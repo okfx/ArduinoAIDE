@@ -3463,6 +3463,33 @@ class MainWindow(QMainWindow):
 # Entry Point
 # =============================================================================
 
+def _ensure_ollama():
+    """Start Ollama if it isn't already running."""
+    try:
+        requests.get("http://localhost:11434/api/tags", timeout=2)
+        return  # already running
+    except Exception:
+        pass
+    # Try macOS app first, then CLI
+    if os.path.isdir("/Applications/Ollama.app"):
+        subprocess.Popen(["open", "-a", "Ollama"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    elif os.path.isfile("/usr/local/bin/ollama"):
+        subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    else:
+        return  # not installed
+    # Wait briefly for it to come up
+    import time
+    for _ in range(10):
+        time.sleep(1)
+        try:
+            requests.get("http://localhost:11434/api/tags", timeout=2)
+            return
+        except Exception:
+            pass
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(WINDOW_TITLE)
@@ -3471,6 +3498,8 @@ def main():
     app_font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(app_font)
     app.setStyleSheet(STYLESHEET)
+    # Ensure Ollama is running
+    _ensure_ollama()
     # Load persisted AI actions config
     _load_ai_actions()
     project_path = None
