@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+teensy-ide-env/
+venv/
+.venv/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Model description cache (local per-machine)
+# Uncomment if you want to track it:
+# ~/.teensy_ide_model_descs.json
+
+# Arduino build artifacts
+build/
+*.elf
+*.hex
+*.bin
