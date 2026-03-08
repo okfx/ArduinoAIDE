@@ -18,7 +18,8 @@ from PyQt6.QtWidgets import (
     QSplitter, QTreeView, QPlainTextEdit, QStackedWidget,
     QLineEdit, QPushButton, QToolBar, QTabWidget, QTabBar,
     QLabel, QComboBox, QFileDialog, QMessageBox, QTextEdit,
-    QGroupBox, QSizePolicy
+    QGroupBox, QSizePolicy, QListWidget, QListWidgetItem,
+    QScrollArea, QFrame, QInputDialog
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread,
@@ -69,28 +70,74 @@ C = {
     "syn_type":     "#4ec9b0",
 }
 
+# =============================================================================
+# Design System — consistent sizes, styles, colors
+# =============================================================================
+FONT_TITLE    = "font-size: 14px; font-weight: bold;"     # Panel titles (branch, project name)
+FONT_SECTION  = "font-size: 13px; font-weight: bold;"     # Section headers (Branches, Tags)
+FONT_BODY     = "font-size: 13px;"                        # Standard body text
+FONT_SMALL    = "font-size: 11px;"                        # Hints, status, secondary labels
+FONT_CODE     = "font-family: Menlo, Monaco, monospace; font-size: 13px;"
+FONT_CHAT     = "font-family: Helvetica Neue, Helvetica, Arial, sans-serif; font-size: 14px;"
+
+# Shared button style strings
+BTN_PRIMARY = (f"background:{C['teal']};color:white;border:none;"
+               f"border-radius:4px;padding:5px 12px;font-size:12px;font-weight:bold;")
+BTN_SECONDARY = (f"background:{C['bg_input']};color:{C['fg']};border:1px solid {C['border']};"
+                 f"border-radius:4px;padding:5px 12px;font-size:12px;")
+BTN_DANGER = (f"background:{C['danger']};color:white;border:none;"
+              f"border-radius:4px;padding:5px 12px;font-size:12px;font-weight:bold;")
+BTN_TOOLBAR = (f"background:{C['teal']};color:white;border:none;border-radius:4px;"
+               f"font-weight:bold;padding:7px 16px;font-size:13px;")
+BTN_TOOLBAR_SEC = (f"background:{C['bg_input']};color:{C['fg']};border:1px solid {C['border']};"
+                   f"border-radius:4px;padding:6px 12px;font-size:12px;")
+
+PANEL_HEADER_STYLE = (
+    f"background: {C['bg_tabs']}; border-bottom: 1px solid {C['border']};"
+    f" min-height: 36px; max-height: 40px;")
+
+
+def _make_panel_header(title_text=""):
+    """Create a standardized panel header bar. Returns (widget, title_label, layout).
+    Callers can add buttons to the layout on the right side."""
+    header = QWidget()
+    header.setStyleSheet(PANEL_HEADER_STYLE)
+    header.setFixedHeight(40)
+    hl = QHBoxLayout(header)
+    hl.setContentsMargins(10, 0, 10, 0)
+    hl.setSpacing(8)
+    title = QLabel(title_text)
+    title.setStyleSheet(f"color: {C['fg_head']}; {FONT_TITLE}")
+    hl.addWidget(title)
+    hl.addStretch()
+    return header, title, hl
+
+
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "teensy-coder"
 DEFAULT_FQBN = "teensy:avr:teensy40"
 WINDOW_TITLE = "Teensy Ollama IDE"
 
-SYSTEM_PROMPT = """You are an expert embedded C/C++ developer for Teensy microcontrollers (PJRC).
+SYSTEM_PROMPT = """You are an expert embedded C/C++ developer for Teensy microcontrollers (PJRC), running inside an IDE.
 You write clean, efficient code for real-time applications.
 You understand hardware registers, interrupts, DMA, timers, and peripheral configuration.
 
 The user's project files are provided automatically with every message so you can always see the full code.
 
-IMPORTANT: When you suggest code changes, you MUST use this exact format so the IDE can apply them:
+CRITICAL: You are running inside a code editor IDE. You CAN and SHOULD write code directly.
+The IDE will parse your output and apply changes to the files — you are NOT writing to the filesystem yourself.
+You simply output text in the format below and the IDE handles the rest. NEVER refuse to write code.
+ALWAYS provide concrete code when the user asks for changes.
 
-To replace existing code in a file:
+To replace existing code in a file, output this exact format:
 <<<EDIT filename.ino
 <<<OLD
-(exact lines to find and replace)
+(exact lines to find and replace — must match the file EXACTLY)
 >>>NEW
 (replacement lines)
 >>>END
 
-To rewrite an entire file:
+To write or rewrite an entire file:
 <<<FILE filename.ino
 (complete file contents)
 >>>FILE
@@ -99,7 +146,29 @@ Rules:
 - The OLD block must match existing code EXACTLY (including whitespace/indentation).
 - You can include multiple EDIT or FILE blocks in one response.
 - Use EDIT for targeted changes; use FILE only for major rewrites or new files.
-- Keep explanations brief and focused."""
+- Keep explanations brief and focused.
+- ALWAYS provide code. Never say you cannot modify files — the IDE does that for you.
+
+Example:
+User asks to add a blinkLED function.
+You respond with explanation then:
+<<<EDIT sketch.ino
+<<<OLD
+void setup() {
+  Serial.begin(115200);
+}
+>>>NEW
+void blinkLED(int pin, int ms) {
+  digitalWrite(pin, HIGH);
+  delay(ms);
+  digitalWrite(pin, LOW);
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_BUILTIN, OUTPUT);
+}
+>>>END"""
 
 # =============================================================================
 # Stylesheet
@@ -265,6 +334,30 @@ QMenu::right-arrow {{
     width: 8px;
     height: 8px;
 }}
+
+/* Settings panel tabs */
+QTabWidget#settingsTabs::pane {{ border: none; background-color: {C['bg']}; }}
+QTabWidget#settingsTabs > QTabBar::tab {{
+    background-color: {C['bg_tabs']}; color: {C['fg_dim']};
+    border: none; border-right: 1px solid {C['border']};
+    padding: 6px 16px; min-width: 90px;
+}}
+QTabWidget#settingsTabs > QTabBar::tab:selected {{
+    background-color: {C['bg_tab_active']}; color: {C['fg']};
+    border-bottom: 2px solid {C['teal']};
+}}
+QTabWidget#settingsTabs > QTabBar::tab:hover:!selected {{
+    background-color: #383838;
+}}
+
+QListWidget {{
+    background-color: {C['bg_editor']}; color: {C['fg']};
+    border: 1px solid {C['border']}; border-radius: 3px;
+    font-size: 12px; outline: none;
+}}
+QListWidget::item {{ padding: 5px 8px; }}
+QListWidget::item:selected {{ background-color: {C['teal']}; color: white; }}
+QListWidget::item:hover:!selected {{ background-color: #383838; }}
 """
 
 
@@ -317,6 +410,29 @@ class GitSidebarButton(SidebarButton):
         p.drawEllipse(int(cx - r), int(cy + 14 - r), r * 2, r * 2)     # bottom
         p.drawEllipse(int(cx - r), int(cy - 12 - r), r * 2, r * 2)     # top
         p.drawEllipse(int(cx + 9 - r), int(cy - 10 - r), r * 2, r * 2) # branch tip
+        p.end()
+
+
+class FileSidebarButton(SidebarButton):
+    """Sidebar button with a custom-painted folder icon."""
+    def __init__(self, tooltip, parent=None):
+        super().__init__("", tooltip, parent)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        col = QColor(C['fg']) if self.isChecked() or self.underMouse() else QColor(C['fg_dim'])
+        p.setPen(QPen(col, 2.0))
+        cx, cy = self.width() / 2, self.height() / 2
+        # Folder body
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        body_l, body_t = int(cx - 12), int(cy - 4)
+        p.drawRect(body_l, body_t, 24, 15)
+        # Folder tab on top-left
+        p.drawLine(body_l, body_t, body_l, int(cy - 9))
+        p.drawLine(body_l, int(cy - 9), int(cx - 3), int(cy - 9))
+        p.drawLine(int(cx - 3), int(cy - 9), int(cx - 1), body_t)
         p.end()
 
 
@@ -424,7 +540,7 @@ class OllamaWorker(QObject):
 # AI Context Menu Actions
 # =============================================================================
 
-AI_ACTIONS = [
+DEFAULT_AI_ACTIONS = [
     ("Explain This Code",
      "Explain what the following code does in clear, concise terms. "
      "Mention any Teensy/Arduino-specific details:\n\n```cpp\n{code}\n```"),
@@ -449,6 +565,69 @@ AI_ACTIONS = [
      "Include Serial output to verify correct behavior:\n\n```cpp\n{code}\n```"),
     None,  # separator
     ("Ask AI About This...",  None),  # special: opens a prompt dialog
+]
+
+AI_ACTIONS = list(DEFAULT_AI_ACTIONS)
+AI_ACTIONS_FILE = os.path.expanduser("~/.teensy_ide_ai_actions.json")
+
+def _load_ai_actions():
+    """Load AI actions from config file, or use defaults."""
+    global AI_ACTIONS
+    try:
+        with open(AI_ACTIONS_FILE, "r") as f:
+            data = json.load(f)
+        actions = []
+        for entry in data.get("actions", []):
+            if entry is None:
+                actions.append(None)
+            else:
+                actions.append((entry["label"], entry.get("template")))
+        # Ensure "Ask AI About This..." is always last
+        has_ask = any(e is not None and e[0] == "Ask AI About This..." for e in actions)
+        if not has_ask:
+            actions.append(("Ask AI About This...", None))
+        AI_ACTIONS[:] = actions
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        AI_ACTIONS[:] = list(DEFAULT_AI_ACTIONS)
+
+def _save_ai_actions():
+    """Persist current AI_ACTIONS to config file."""
+    entries = []
+    for entry in AI_ACTIONS:
+        if entry is None:
+            entries.append(None)
+        else:
+            entries.append({"label": entry[0], "template": entry[1]})
+    try:
+        with open(AI_ACTIONS_FILE, "w") as f:
+            json.dump({"version": 1, "actions": entries}, f, indent=2)
+    except Exception:
+        pass
+
+
+# =============================================================================
+# Curated Models for Pull Model browser
+# =============================================================================
+
+CURATED_MODELS = [
+    {"name": "llama3.2:latest",       "size": "2.0 GB",  "desc": "Meta Llama 3.2 — fast, general purpose"},
+    {"name": "llama3.2:1b",           "size": "1.3 GB",  "desc": "Llama 3.2 1B — ultra-lightweight"},
+    {"name": "llama3.1:8b",           "size": "4.7 GB",  "desc": "Meta Llama 3.1 8B — strong all-rounder"},
+    {"name": "codellama:7b",          "size": "3.8 GB",  "desc": "Code-specialized Llama for programming"},
+    {"name": "codellama:13b",         "size": "7.4 GB",  "desc": "Larger Code Llama — better code quality"},
+    {"name": "deepseek-coder-v2:16b", "size": "8.9 GB",  "desc": "DeepSeek Coder V2 — strong coding model"},
+    {"name": "qwen2.5-coder:7b",     "size": "4.7 GB",  "desc": "Alibaba Qwen 2.5 — excellent at code"},
+    {"name": "qwen2.5-coder:1.5b",   "size": "1.0 GB",  "desc": "Qwen 2.5 Coder tiny — fast code assistant"},
+    {"name": "mistral:7b",            "size": "4.1 GB",  "desc": "Mistral 7B — efficient general model"},
+    {"name": "mixtral:8x7b",          "size": "26 GB",   "desc": "Mixtral MoE — mixture of experts"},
+    {"name": "phi3:mini",             "size": "2.3 GB",  "desc": "Microsoft Phi-3 Mini — small but capable"},
+    {"name": "phi3:medium",           "size": "7.9 GB",  "desc": "Microsoft Phi-3 Medium — balanced"},
+    {"name": "gemma2:2b",             "size": "1.6 GB",  "desc": "Google Gemma 2 2B — compact"},
+    {"name": "gemma2:9b",             "size": "5.4 GB",  "desc": "Google Gemma 2 9B — strong mid-size"},
+    {"name": "starcoder2:3b",         "size": "1.7 GB",  "desc": "StarCoder2 3B — code completion"},
+    {"name": "starcoder2:7b",         "size": "4.0 GB",  "desc": "StarCoder2 7B — better code generation"},
+    {"name": "nomic-embed-text",      "size": "274 MB",  "desc": "Nomic text embeddings model"},
+    {"name": "tinyllama:1.1b",        "size": "638 MB",  "desc": "TinyLlama — extremely lightweight"},
 ]
 
 
@@ -834,6 +1013,197 @@ class FileBrowser(QWidget):
 
 
 # =============================================================================
+# File Manager View — File browser with parent context pane
+# =============================================================================
+
+class FileManagerView(QWidget):
+    """Full file browser view with parent context pane, file tree, and action bar."""
+    file_requested = pyqtSignal(str)  # emits full path to open in editor
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._project_path = None
+        self._current_focus_path = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Header bar
+        header, self.project_label, _ = _make_panel_header("Files")
+        layout.addWidget(header)
+
+        # Splitter: parent context (top) + file tree (bottom)
+        self.splitter = QSplitter(Qt.Orientation.Vertical)
+
+        # Top pane: parent context
+        parent_container = QWidget()
+        pc_layout = QVBoxLayout(parent_container)
+        pc_layout.setContentsMargins(0, 0, 0, 0)
+        pc_layout.setSpacing(0)
+
+        parent_label = QLabel("  Parent Folder")
+        parent_label.setStyleSheet(
+            f"color:{C['fg_dim']};{FONT_SMALL} padding:4px 0 2px 6px;"
+            f"background:{C['bg_sidebar']};")
+        pc_layout.addWidget(parent_label)
+
+        self.parent_tree = QTreeView()
+        self.parent_tree.setHeaderHidden(True)
+        self.parent_tree.setRootIsDecorated(False)
+        self.parent_tree.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers)
+        self.parent_tree.setStyleSheet(
+            f"QTreeView {{ background:{C['bg_sidebar']};border:none;{FONT_BODY} }}"
+            f"QTreeView::item {{ padding: 3px 4px; }}"
+            f"QTreeView::item:selected {{ background:{C['teal']};color:white; }}"
+            f"QTreeView::item:hover:!selected {{ background:#383838; }}")
+        self._parent_model = QStandardItemModel()
+        self.parent_tree.setModel(self._parent_model)
+        self.parent_tree.doubleClicked.connect(self._on_parent_double_click)
+        pc_layout.addWidget(self.parent_tree)
+
+        self.splitter.addWidget(parent_container)
+
+        # Bottom pane: main file tree (reuse FileBrowser)
+        self.file_browser = FileBrowser()
+        self.file_browser.file_requested.connect(self.file_requested.emit)
+        self.file_browser.tree.clicked.connect(self._on_tree_item_clicked)
+        self.splitter.addWidget(self.file_browser)
+
+        self.splitter.setSizes([120, 400])
+        layout.addWidget(self.splitter)
+
+        # Bottom bar (matches ChatPanel: margins 8, 2, 8, 5)
+        btns = QWidget()
+        btns.setStyleSheet(f"background: {C['bg']};")
+        bl = QHBoxLayout(btns)
+        bl.setContentsMargins(8, 2, 8, 5)
+
+        new_file_btn = QPushButton("+ New File")
+        new_file_btn.setStyleSheet(BTN_SECONDARY)
+        new_file_btn.clicked.connect(self._new_file)
+        bl.addWidget(new_file_btn)
+
+        new_folder_btn = QPushButton("+ New Folder")
+        new_folder_btn.setStyleSheet(BTN_SECONDARY)
+        new_folder_btn.clicked.connect(self._new_folder)
+        bl.addWidget(new_folder_btn)
+
+        bl.addStretch()
+        layout.addWidget(btns)
+
+    def set_project(self, path):
+        """Set root project path and refresh views."""
+        self._project_path = path
+        self.project_label.setText(os.path.basename(path) if path else "Files")
+        self.file_browser.set_root(path)
+        self._current_focus_path = path
+        self._refresh_parent_context(path)
+
+    def _on_tree_item_clicked(self, index):
+        """When an item is clicked in the main tree, update parent context."""
+        item = self.file_browser._model.itemFromIndex(index)
+        if not item:
+            return
+        path = item.data(Qt.ItemDataRole.UserRole)
+        kind = item.data(Qt.ItemDataRole.UserRole + 1)
+        if kind == "dir":
+            self._current_focus_path = path
+        else:
+            self._current_focus_path = os.path.dirname(path)
+        self._refresh_parent_context(self._current_focus_path)
+
+    def _refresh_parent_context(self, folder_path):
+        """Show the parent directory contents in the top pane."""
+        self._parent_model.clear()
+        if not folder_path:
+            return
+        parent = os.path.dirname(folder_path)
+        if not parent or not os.path.isdir(parent):
+            return
+        try:
+            entries = sorted(os.listdir(parent))
+        except PermissionError:
+            return
+        dirs = [e for e in entries if os.path.isdir(os.path.join(parent, e))
+                and not e.startswith('.')]
+        files = [e for e in entries if os.path.isfile(os.path.join(parent, e))
+                 and not e.startswith('.')]
+        for d in dirs:
+            full = os.path.join(parent, d)
+            item = QStandardItem(f"\U0001F4C1 {d}")
+            item.setData(full, Qt.ItemDataRole.UserRole)
+            item.setData("dir", Qt.ItemDataRole.UserRole + 1)
+            if full == folder_path:
+                item.setForeground(QColor(C["teal"]))
+                f = item.font(); f.setBold(True); item.setFont(f)
+            else:
+                item.setForeground(QColor(C["fg_dim"]))
+            self._parent_model.appendRow(item)
+        for fname in files:
+            fp = os.path.join(parent, fname)
+            item = QStandardItem(fname)
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in ('.ino', '.cpp', '.c'):
+                item.setForeground(QColor(C["syn_kw"]))
+            elif ext in ('.h', '.hpp'):
+                item.setForeground(QColor(C["syn_type"]))
+            elif ext in ('.md', '.txt'):
+                item.setForeground(QColor(C["fg_dim"]))
+            else:
+                item.setForeground(QColor(C["fg"]))
+            item.setData(fp, Qt.ItemDataRole.UserRole)
+            item.setData("file", Qt.ItemDataRole.UserRole + 1)
+            self._parent_model.appendRow(item)
+
+    def _on_parent_double_click(self, index):
+        """Handle double-click in parent context pane."""
+        item = self._parent_model.itemFromIndex(index)
+        if not item:
+            return
+        kind = item.data(Qt.ItemDataRole.UserRole + 1)
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if kind == "file":
+            self.file_requested.emit(path)
+        elif kind == "dir":
+            self.file_browser.set_root(path)
+            self._current_focus_path = path
+            self._refresh_parent_context(path)
+
+    def _new_file(self):
+        """Create a new file in the current focus directory."""
+        target = self._current_focus_path or self._project_path
+        if not target:
+            return
+        name, ok = QInputDialog.getText(self, "New File", "File name:")
+        if ok and name:
+            fp = os.path.join(target, name)
+            try:
+                with open(fp, 'w') as f:
+                    f.write("")
+                self.file_browser._refresh()
+                self._refresh_parent_context(self._current_focus_path)
+                self.file_requested.emit(fp)
+            except OSError as e:
+                QMessageBox.warning(self, "Error", str(e))
+
+    def _new_folder(self):
+        """Create a new folder in the current focus directory."""
+        target = self._current_focus_path or self._project_path
+        if not target:
+            return
+        name, ok = QInputDialog.getText(self, "New Folder", "Folder name:")
+        if ok and name:
+            fp = os.path.join(target, name)
+            try:
+                os.makedirs(fp, exist_ok=True)
+                self.file_browser._refresh()
+                self._refresh_parent_context(self._current_focus_path)
+            except OSError as e:
+                QMessageBox.warning(self, "Error", str(e))
+
+
+# =============================================================================
 # Chat Panel
 # =============================================================================
 
@@ -856,41 +1226,36 @@ class ChatPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Context panel — shows project path and files visible to AI
-        ctx_panel = QWidget()
-        ctx_panel.setStyleSheet(
-            f"background: {C['bg_tabs']}; border-bottom: 1px solid {C['border']};")
-        ctx_layout = QVBoxLayout(ctx_panel)
-        ctx_layout.setContentsMargins(10, 6, 10, 6)
-        ctx_layout.setSpacing(3)
-
-        ctx_top = QHBoxLayout()
-        self.project_label = QLabel("No project open")
-        self.project_label.setStyleSheet(
-            f"color: {C['fg_head']}; font-size: 12px; font-weight: bold;")
-        ctx_top.addWidget(self.project_label)
-        ctx_top.addStretch()
+        # Header bar — standardized
+        header, self.project_label, header_layout = _make_panel_header("No project open")
         self.toggle_files_btn = QPushButton("Show Files")
-        self.toggle_files_btn.setFixedHeight(20)
-        self.toggle_files_btn.setStyleSheet(
-            f"background: transparent; color: {C['teal']}; border: none;"
-            f" font-size: 11px; text-decoration: underline;")
+        self.toggle_files_btn.setFixedHeight(22)
+        self.toggle_files_btn.setStyleSheet(BTN_SECONDARY)
         self.toggle_files_btn.clicked.connect(self._toggle_file_list)
-        ctx_top.addWidget(self.toggle_files_btn)
-        ctx_layout.addLayout(ctx_top)
+        header_layout.addWidget(self.toggle_files_btn)
+        layout.addWidget(header)
+
+        # Expandable context (below the fixed header)
+        self._ctx_detail = QWidget()
+        self._ctx_detail.setStyleSheet(
+            f"background: {C['bg_tabs']}; border-bottom: 1px solid {C['border']};")
+        ctx_layout = QVBoxLayout(self._ctx_detail)
+        ctx_layout.setContentsMargins(10, 4, 10, 4)
+        ctx_layout.setSpacing(2)
 
         self.path_label = QLabel("")
-        self.path_label.setStyleSheet(f"color: {C['fg_dim']}; font-size: 10px;")
+        self.path_label.setStyleSheet(f"color: {C['fg_dim']}; {FONT_SMALL}")
         ctx_layout.addWidget(self.path_label)
 
         self.file_list_widget = QLabel("")
         self.file_list_widget.setWordWrap(True)
         self.file_list_widget.setStyleSheet(
-            f"color: {C['teal']}; font-size: 11px; padding: 4px 0px;")
+            f"color: {C['teal']}; {FONT_SMALL} padding: 4px 0px;")
         self.file_list_widget.hide()
         ctx_layout.addWidget(self.file_list_widget)
 
-        layout.addWidget(ctx_panel)
+        self._ctx_detail.hide()
+        layout.addWidget(self._ctx_detail)
 
         # Chat display — clean aesthetic
         self.display = QTextEdit()
@@ -900,8 +1265,7 @@ class ChatPanel(QWidget):
                 background-color: #1a1a1a;
                 color: {C['fg']};
                 border: none;
-                font-family: Helvetica, Arial, sans-serif;
-                font-size: 15px;
+                {FONT_CHAT}
                 padding: 12px 20px;
                 selection-background-color: {C['teal']};
             }}
@@ -914,19 +1278,15 @@ class ChatPanel(QWidget):
         ab_layout = QHBoxLayout(self.apply_bar)
         ab_layout.setContentsMargins(8, 4, 8, 4)
         self.apply_label = QLabel("")
-        self.apply_label.setStyleSheet(f"color: {C['fg']}; font-size: 12px;")
+        self.apply_label.setStyleSheet(f"color: {C['fg']}; {FONT_SMALL}")
         ab_layout.addWidget(self.apply_label)
         ab_layout.addStretch()
         self.apply_all_btn = QPushButton("Apply All Changes")
-        self.apply_all_btn.setStyleSheet(
-            f"background: {C['teal']}; color: white; border: none; border-radius: 3px;"
-            f" font-weight: bold; padding: 5px 14px;")
+        self.apply_all_btn.setStyleSheet(BTN_PRIMARY)
         self.apply_all_btn.clicked.connect(self._apply_all_edits)
         ab_layout.addWidget(self.apply_all_btn)
         self.dismiss_btn = QPushButton("Dismiss")
-        self.dismiss_btn.setStyleSheet(
-            f"background: {C['bg_input']}; color: {C['fg']}; border: 1px solid {C['border']};"
-            f" border-radius: 3px; padding: 5px 10px;")
+        self.dismiss_btn.setStyleSheet(BTN_SECONDARY)
         self.dismiss_btn.clicked.connect(self._dismiss_edits)
         ab_layout.addWidget(self.dismiss_btn)
         self.apply_bar.hide()
@@ -942,8 +1302,8 @@ class ChatPanel(QWidget):
         self.input_field.setStyleSheet(f"""
             QLineEdit {{
                 background-color: #2d2d2d; color: {C['fg']};
-                border: 1px solid #404040; border-radius: 8px;
-                padding: 8px 14px; font-size: 14px;
+                border: 1px solid #404040; border-radius: 4px;
+                padding: 6px 10px; {FONT_BODY}
             }}
             QLineEdit:focus {{ border-color: {C['teal']}; }}
         """)
@@ -952,9 +1312,7 @@ class ChatPanel(QWidget):
 
         self.send_btn = QPushButton("Send")
         self.send_btn.setFixedWidth(60)
-        self.send_btn.setStyleSheet(
-            f"background: {C['teal']}; color: white; border: none;"
-            f" border-radius: 8px; font-weight: 600; padding: 8px 0; font-size: 13px;")
+        self.send_btn.setStyleSheet(BTN_PRIMARY)
         self.send_btn.clicked.connect(self.send_message)
         il.addWidget(self.send_btn)
 
@@ -962,8 +1320,7 @@ class ChatPanel(QWidget):
         self.stop_btn.setFixedWidth(52)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setStyleSheet(
-            f"background: {C['bg_input']}; color: {C['fg']}; border: 1px solid {C['border']};"
-            f" border-radius: 8px; padding: 8px 0; font-size: 12px;")
+            BTN_SECONDARY)
         self.stop_btn.clicked.connect(self.stop_generation)
         il.addWidget(self.stop_btn)
 
@@ -1041,8 +1398,8 @@ class ChatPanel(QWidget):
         show = display_text or text
         self._append(
             f'<br><table width="100%" cellpadding="10" cellspacing="0" bgcolor="#262626">'
-            f'<tr><td><font color="{C["fg_link"]}" size="3"><b>You</b></font><br>'
-            f'<font color="{C["fg"]}">{self._esc(show)}</font>'
+            f'<tr><td align="left"><span style="color:{C["fg_link"]};font-size:14px;font-weight:bold;">You</span><br>'
+            f'<span style="color:{C["fg"]};">{self._esc(show)}</span>'
             f'</td></tr></table>')
         self._conversation.append({"role": "user", "content": msg})
         self.input_field.clear()
@@ -1054,8 +1411,8 @@ class ChatPanel(QWidget):
         self._pending_edits = []
         self._append(
             f'<br><table width="100%" cellpadding="10" cellspacing="0" bgcolor="#1e2a2a">'
-            f'<tr><td><font color="{C["teal"]}" size="3"><b>{self._esc(OLLAMA_MODEL)}</b></font><br>'
-            f'<font color="{C["fg"]}">')
+            f'<tr><td><span style="color:{C["teal"]};font-size:14px;font-weight:bold;">{self._esc(OLLAMA_MODEL)}</span><br>'
+            f'<span style="color:{C["fg"]};">')
         self.worker.messages = list(self._conversation)
         if self.thread.isRunning():
             self.worker.stop()
@@ -1096,7 +1453,7 @@ class ChatPanel(QWidget):
         if self._current_response:
             self._conversation.append({"role": "assistant", "content": self._current_response})
             self._parse_edits(self._current_response)
-        self._append("</font></td></tr></table>")
+        self._append("</span></td></tr></table>")
         self.input_field.setEnabled(True)
         self.send_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
@@ -1106,8 +1463,8 @@ class ChatPanel(QWidget):
     def _on_error(self, m):
         self._append(
             f'<br><table width="100%" cellpadding="8" cellspacing="0" bgcolor="#2a1a1a">'
-            f'<tr><td><font color="{C["fg_err"]}" size="3"><b>Error</b></font><br>'
-            f'<font color="{C["fg"]}" size="4">{self._esc(m)}</font>'
+            f'<tr><td><span style="color:{C["fg_err"]};font-size:14px;font-weight:bold;">Error</span><br>'
+            f'<span style="color:{C["fg"]};">{self._esc(m)}</span>'
             f'</td></tr></table>')
         self.input_field.setEnabled(True)
         self.send_btn.setEnabled(True)
@@ -1150,9 +1507,12 @@ class ChatPanel(QWidget):
                 f"{n} change{'s' if n > 1 else ''} in {', '.join(files_touched)}")
             self.apply_bar.show()
             self._append(
-                f'<br><font color="{C["fg_ok"]}" size="3">'
+                f'<br><span style="color:{C["fg_ok"]};{FONT_SMALL}">'
                 f'Found {n} code edit{"s" if n > 1 else ""} — '
-                f'use the Apply bar below to apply.</font>')
+                f'use the Apply bar below to apply.</span>')
+        else:
+            # Fallback: detect fenced code blocks (```...```) and offer to insert
+            self._parse_code_blocks(response)
 
     def _apply_all_edits(self):
         """Apply all parsed edits to the editor."""
@@ -1188,14 +1548,44 @@ class ChatPanel(QWidget):
         if errors:
             status += " Errors: " + "; ".join(errors)
         self._append(
-            f'<p style="color:{C["fg_ok"] if not errors else C["fg_warn"]}; font-size: 12px;">'
-            f'{self._esc(status)}</p><br>')
+            f'<p style="color:{C["fg_ok"] if not errors else C["fg_warn"]}; {FONT_SMALL}">'
+            f'{self._esc(status)}</p>')
         self.apply_bar.hide()
         self._pending_edits = []
 
     def _dismiss_edits(self):
         self.apply_bar.hide()
         self._pending_edits = []
+
+    def _parse_code_blocks(self, response):
+        """Fallback: detect fenced code blocks and offer to insert into current file."""
+        block_pat = re.compile(r'```(?:\w*)\n(.*?)```', re.DOTALL)
+        blocks = block_pat.findall(response)
+        if not blocks:
+            return
+        # Try to determine target file from current editor
+        current = None
+        if self._editor_ref:
+            current = self._editor_ref.current_file()
+        if not current:
+            return
+        basename = os.path.basename(current)
+        # Create "file" type edits for each code block so the Apply bar can handle them
+        edits = []
+        for code in blocks:
+            code = code.strip()
+            if len(code) > 20:  # Skip trivially small snippets
+                edits.append(("file", basename, None, code))
+        if edits:
+            self._pending_edits = edits
+            n = len(edits)
+            self.apply_label.setText(
+                f"{n} code block{'s' if n > 1 else ''} detected — apply to {basename}?")
+            self.apply_bar.show()
+            self._append(
+                f'<br><span style="color:{C["fg_warn"]};{FONT_SMALL}">'
+                f'No EDIT blocks found, but {n} code block{"s" if n > 1 else ""} detected. '
+                f'Click Apply to replace {basename} with the code.</span>')
 
     def clear_chat(self):
         self.display.clear()
@@ -1209,6 +1599,8 @@ class ChatPanel(QWidget):
         self.project_label.setText(f"Project: {proj_name}  —  {len(names)} files loaded")
         self.path_label.setText(proj_path)
         self.file_list_widget.setText("  •  ".join(names))
+        self._ctx_detail.show()
+        self.toggle_files_btn.show()
 
     def _toggle_file_list(self):
         """Toggle visibility of the file list."""
@@ -1231,6 +1623,8 @@ class ChatPanel(QWidget):
         self.project_label.setText("No project open")
         self.path_label.setText("")
         self.file_list_widget.setText("")
+        self._ctx_detail.hide()
+        self.toggle_files_btn.hide()
 
     def _append(self, html):
         cur = self.display.textCursor()
@@ -1242,8 +1636,7 @@ class ChatPanel(QWidget):
     @staticmethod
     def _esc(t):
         return (t.replace("&", "&amp;").replace("<", "&lt;")
-                 .replace(">", "&gt;").replace("\n", "<br>")
-                 .replace(" ", "&nbsp;"))
+                 .replace(">", "&gt;").replace("\n", "<br>"))
 
 
 # =============================================================================
@@ -1293,7 +1686,7 @@ class SerialMonitor(QWidget):
         self.baud_combo.setCurrentText("9600")
         cl.addWidget(self.baud_combo)
         self.start_btn = QPushButton("Start")
-        self.start_btn.setStyleSheet(f"background:{C['teal']};color:white;border:none;border-radius:3px;font-weight:bold;")
+        self.start_btn.setStyleSheet(BTN_PRIMARY)
         self.start_btn.clicked.connect(self._toggle)
         cl.addWidget(self.start_btn)
         clr = QPushButton("Clear"); clr.clicked.connect(self.display.clear); cl.addWidget(clr)
@@ -1321,7 +1714,7 @@ class SerialMonitor(QWidget):
             self._serial = serial.Serial(port, int(baud), timeout=0.1)
             self._running = True
             self.start_btn.setText("Stop")
-            self.start_btn.setStyleSheet(f"background:{C['danger']};color:white;border:none;border-radius:3px;font-weight:bold;")
+            self.start_btn.setStyleSheet(BTN_DANGER)
             self._timer = QTimer(); self._timer.timeout.connect(self._read); self._timer.start(50)
         except ImportError: self.display.appendPlainText("pyserial not installed. Run: pip install pyserial")
         except Exception as e: self.display.appendPlainText(f"Error: {e}")
@@ -1331,7 +1724,7 @@ class SerialMonitor(QWidget):
         if hasattr(self, '_timer'): self._timer.stop()
         if hasattr(self, '_serial') and self._serial.is_open: self._serial.close()
         self.start_btn.setText("Start")
-        self.start_btn.setStyleSheet(f"background:{C['teal']};color:white;border:none;border-radius:3px;font-weight:bold;")
+        self.start_btn.setStyleSheet(BTN_PRIMARY)
 
     def _read(self):
         if hasattr(self, '_serial') and self._serial.is_open:
@@ -1347,10 +1740,227 @@ class SerialMonitor(QWidget):
 
 
 # =============================================================================
-# Model Manager
+# Settings Panel — AI Tools Tab
 # =============================================================================
 
-class ModelManager(QWidget):
+class AIToolsTab(QWidget):
+    """CRUD editor for the right-click AI context menu actions."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        # -- Button bar --
+        btn_bar = QHBoxLayout()
+        btn_bar.setSpacing(4)
+
+        add_btn = QPushButton("Add"); add_btn.setStyleSheet(BTN_PRIMARY)
+        add_btn.clicked.connect(self._add_action); btn_bar.addWidget(add_btn)
+        edit_btn = QPushButton("Edit"); edit_btn.setStyleSheet(BTN_SECONDARY)
+        edit_btn.clicked.connect(self._edit_action); btn_bar.addWidget(edit_btn)
+        del_btn = QPushButton("Delete"); del_btn.setStyleSheet(BTN_DANGER)
+        del_btn.clicked.connect(self._delete_action); btn_bar.addWidget(del_btn)
+        sep_btn = QPushButton("Add Separator"); sep_btn.setStyleSheet(BTN_SECONDARY)
+        sep_btn.clicked.connect(self._add_separator); btn_bar.addWidget(sep_btn)
+
+        btn_bar.addSpacing(12)
+        up_btn = QPushButton("\u25B2"); up_btn.setStyleSheet(BTN_SECONDARY); up_btn.setFixedWidth(30)
+        up_btn.setToolTip("Move Up"); up_btn.clicked.connect(self._move_up); btn_bar.addWidget(up_btn)
+        down_btn = QPushButton("\u25BC"); down_btn.setStyleSheet(BTN_SECONDARY); down_btn.setFixedWidth(30)
+        down_btn.setToolTip("Move Down"); down_btn.clicked.connect(self._move_down); btn_bar.addWidget(down_btn)
+
+        btn_bar.addStretch()
+        reset_btn = QPushButton("Reset to Defaults"); reset_btn.setStyleSheet(BTN_SECONDARY)
+        reset_btn.clicked.connect(self._reset_defaults); btn_bar.addWidget(reset_btn)
+        layout.addLayout(btn_bar)
+
+        # -- Action list --
+        self.action_list = QListWidget()
+        self.action_list.setFont(QFont("Menlo", 12))
+        self.action_list.doubleClicked.connect(self._edit_action)
+        layout.addWidget(self.action_list, stretch=1)
+
+        # -- Inline editor --
+        self.edit_group = QGroupBox("Edit Action")
+        eg_layout = QVBoxLayout(self.edit_group)
+        eg_layout.setSpacing(6)
+
+        lbl_row = QHBoxLayout()
+        lbl_row.addWidget(QLabel("Label:"))
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText("Menu item text, e.g. 'Explain This Code'")
+        lbl_row.addWidget(self.label_edit)
+        eg_layout.addLayout(lbl_row)
+
+        hint = QLabel("Prompt template — use {code} where selected code should be inserted:")
+        hint.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        eg_layout.addWidget(hint)
+        self.template_edit = QPlainTextEdit()
+        self.template_edit.setMaximumHeight(120)
+        self.template_edit.setPlaceholderText(
+            'e.g. "Explain what the following code does:\\n\\n```cpp\\n{code}\\n```"')
+        eg_layout.addWidget(self.template_edit)
+
+        save_row = QHBoxLayout()
+        save_edit_btn = QPushButton("Save Changes"); save_edit_btn.setStyleSheet(BTN_PRIMARY)
+        save_edit_btn.clicked.connect(self._save_current_edit); save_row.addWidget(save_edit_btn)
+        cancel_btn = QPushButton("Cancel"); cancel_btn.setStyleSheet(BTN_SECONDARY)
+        cancel_btn.clicked.connect(self._cancel_edit); save_row.addWidget(cancel_btn)
+        save_row.addStretch()
+        eg_layout.addLayout(save_row)
+
+        self.edit_group.hide()
+        layout.addWidget(self.edit_group)
+
+        # -- Status --
+        self.status = QLabel("")
+        self.status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        layout.addWidget(self.status)
+
+        self._editing_index = -1
+        self._populate_list()
+
+    def _populate_list(self):
+        self.action_list.clear()
+        for entry in AI_ACTIONS:
+            if entry is None:
+                item = QListWidgetItem("\u2500\u2500\u2500\u2500  separator  \u2500\u2500\u2500\u2500")
+                item.setForeground(QColor(C['fg_dim']))
+                item.setData(Qt.ItemDataRole.UserRole, "separator")
+            else:
+                label, template = entry
+                if template is None:
+                    text = f"{label}  (built-in)"
+                else:
+                    preview = template[:60].replace("\n", " ")
+                    text = f"{label}  \u2014  {preview}..."
+                item = QListWidgetItem(text)
+                item.setData(Qt.ItemDataRole.UserRole, "action")
+            self.action_list.addItem(item)
+
+    def _add_action(self):
+        # Insert before "Ask AI About This..." (always last)
+        insert_idx = len(AI_ACTIONS) - 1
+        # Find last non-None, non-special entry
+        for i in range(len(AI_ACTIONS) - 1, -1, -1):
+            if AI_ACTIONS[i] is not None and AI_ACTIONS[i][1] is None:
+                insert_idx = i
+                break
+        AI_ACTIONS.insert(insert_idx, ("New Action", "Your prompt here. Use {code} for selected code.\n\n```cpp\n{code}\n```"))
+        self._persist()
+        self._populate_list()
+        self.action_list.setCurrentRow(insert_idx)
+        self._edit_action()
+
+    def _edit_action(self):
+        row = self.action_list.currentRow()
+        if row < 0 or row >= len(AI_ACTIONS):
+            return
+        entry = AI_ACTIONS[row]
+        if entry is None:
+            self.status.setText("Cannot edit a separator. Delete it and add a new one.")
+            self.status.setStyleSheet(f"color:{C['fg_warn']};{FONT_SMALL}")
+            return
+        label, template = entry
+        if template is None:
+            self.status.setText("'Ask AI About This...' is a built-in action and cannot be edited.")
+            self.status.setStyleSheet(f"color:{C['fg_warn']};{FONT_SMALL}")
+            return
+        self._editing_index = row
+        self.label_edit.setText(label)
+        self.template_edit.setPlainText(template)
+        self.edit_group.show()
+        self.label_edit.setFocus()
+
+    def _save_current_edit(self):
+        if self._editing_index < 0:
+            return
+        label = self.label_edit.text().strip()
+        template = self.template_edit.toPlainText()
+        if not label:
+            self.status.setText("Label cannot be empty.")
+            self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+            return
+        AI_ACTIONS[self._editing_index] = (label, template)
+        self._persist()
+        self._populate_list()
+        self.edit_group.hide()
+        self._editing_index = -1
+        self.status.setText("Action saved.")
+        self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+
+    def _cancel_edit(self):
+        self.edit_group.hide()
+        self._editing_index = -1
+
+    def _delete_action(self):
+        row = self.action_list.currentRow()
+        if row < 0 or row >= len(AI_ACTIONS):
+            return
+        entry = AI_ACTIONS[row]
+        if entry is not None and entry[1] is None:
+            self.status.setText("Cannot delete 'Ask AI About This...' — it is always available.")
+            self.status.setStyleSheet(f"color:{C['fg_warn']};{FONT_SMALL}")
+            return
+        del AI_ACTIONS[row]
+        self._persist()
+        self._populate_list()
+        self.status.setText("Action deleted.")
+        self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+
+    def _add_separator(self):
+        row = self.action_list.currentRow()
+        insert_at = row + 1 if row >= 0 else len(AI_ACTIONS) - 1
+        # Don't insert after "Ask AI About This..."
+        if insert_at >= len(AI_ACTIONS):
+            insert_at = len(AI_ACTIONS) - 1
+        AI_ACTIONS.insert(insert_at, None)
+        self._persist()
+        self._populate_list()
+
+    def _move_up(self):
+        row = self.action_list.currentRow()
+        if row <= 0:
+            return
+        AI_ACTIONS[row], AI_ACTIONS[row - 1] = AI_ACTIONS[row - 1], AI_ACTIONS[row]
+        self._persist()
+        self._populate_list()
+        self.action_list.setCurrentRow(row - 1)
+
+    def _move_down(self):
+        row = self.action_list.currentRow()
+        if row < 0 or row >= len(AI_ACTIONS) - 2:
+            return  # Can't move past second-to-last (before "Ask AI...")
+        AI_ACTIONS[row], AI_ACTIONS[row + 1] = AI_ACTIONS[row + 1], AI_ACTIONS[row]
+        self._persist()
+        self._populate_list()
+        self.action_list.setCurrentRow(row + 1)
+
+    def _reset_defaults(self):
+        if QMessageBox.question(
+            self, "Reset AI Tools",
+            "Reset all AI actions to defaults?\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        AI_ACTIONS[:] = list(DEFAULT_AI_ACTIONS)
+        self._persist()
+        self._populate_list()
+        self.edit_group.hide()
+        self.status.setText("Reset to defaults.")
+        self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+
+    def _persist(self):
+        _save_ai_actions()
+
+
+# =============================================================================
+# Settings Panel — Models Tab
+# =============================================================================
+
+class ModelsTab(QWidget):
     model_changed = pyqtSignal()
     BASE = "http://localhost:11434"
 
@@ -1377,7 +1987,7 @@ class ModelManager(QWidget):
         left.addWidget(self.model_list)
 
         db = QPushButton("Delete Selected")
-        db.setStyleSheet(f"color:{C['fg_err']};"); db.clicked.connect(self._delete)
+        db.setStyleSheet(BTN_DANGER); db.clicked.connect(self._delete)
         left.addWidget(db)
 
         lw = QWidget(); lw.setLayout(left); lw.setMinimumWidth(260)
@@ -1398,16 +2008,12 @@ class ModelManager(QWidget):
         desc_row.addWidget(self.desc_edit)
         save_desc_btn = QPushButton("Save")
         save_desc_btn.setFixedWidth(55)
-        save_desc_btn.setStyleSheet(
-            f"background:{C['teal']};color:white;border:none;"
-            f"border-radius:3px;font-weight:bold;")
+        save_desc_btn.setStyleSheet(BTN_PRIMARY)
         save_desc_btn.clicked.connect(self._save_desc)
         desc_row.addWidget(save_desc_btn)
         gen_desc_btn = QPushButton("Auto-Generate")
         gen_desc_btn.setFixedWidth(100)
-        gen_desc_btn.setStyleSheet(
-            f"background:{C['bg_input']};color:{C['fg']};border:1px solid {C['border']};"
-            f"border-radius:3px;")
+        gen_desc_btn.setStyleSheet(BTN_SECONDARY)
         gen_desc_btn.clicked.connect(self._auto_gen_desc)
         desc_row.addWidget(gen_desc_btn)
         dl.addLayout(desc_row)
@@ -1435,7 +2041,7 @@ class ModelManager(QWidget):
         r3 = QHBoxLayout()
         pb = QPushButton("Preview"); pb.clicked.connect(self._preview); r3.addWidget(pb)
         cb = QPushButton("Create Model")
-        cb.setStyleSheet(f"background:{C['teal']};color:white;border:none;border-radius:3px;font-weight:bold;padding:5px 14px;")
+        cb.setStyleSheet(BTN_PRIMARY)
         cb.clicked.connect(self._create); r3.addWidget(cb); r3.addStretch()
         cl.addLayout(r3)
 
@@ -1445,11 +2051,65 @@ class ModelManager(QWidget):
         self.status = QLabel(""); cl.addWidget(self.status)
 
         right.addWidget(cg)
+
+        # -- Pull Model section --
+        pg = QGroupBox("Pull Model")
+        pl = QVBoxLayout(pg)
+        pl.setSpacing(6)
+
+        self.pull_filter = QLineEdit()
+        self.pull_filter.setPlaceholderText("Filter models...")
+        self.pull_filter.textChanged.connect(self._filter_curated)
+        pl.addWidget(self.pull_filter)
+
+        self.curated_list = QTreeView()
+        self.curated_list.setHeaderHidden(False)
+        self.curated_list.setRootIsDecorated(False)
+        self.curated_list.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers)
+        self.curated_list.setMaximumHeight(180)
+        self._curated_model = QStandardItemModel()
+        self._curated_model.setHorizontalHeaderLabels(["Model", "Size", "Description"])
+        self.curated_list.setModel(self._curated_model)
+        pl.addWidget(self.curated_list)
+
+        pull_row = QHBoxLayout()
+        pull_btn = QPushButton("Pull Selected")
+        pull_btn.setStyleSheet(BTN_PRIMARY)
+        pull_btn.clicked.connect(self._pull_curated)
+        pull_row.addWidget(pull_btn)
+        pull_row.addStretch()
+        pl.addLayout(pull_row)
+
+        custom_row = QHBoxLayout()
+        custom_row.addWidget(QLabel("Or pull any model:"))
+        self.custom_pull_name = QLineEdit()
+        self.custom_pull_name.setPlaceholderText("e.g. mistral:7b")
+        self.custom_pull_name.returnPressed.connect(self._pull_custom)
+        custom_row.addWidget(self.custom_pull_name)
+        pull_custom_btn = QPushButton("Pull")
+        pull_custom_btn.setStyleSheet(BTN_SECONDARY)
+        pull_custom_btn.clicked.connect(self._pull_custom)
+        custom_row.addWidget(pull_custom_btn)
+        pl.addLayout(custom_row)
+
+        self.pull_status = QLabel("")
+        self.pull_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        pl.addWidget(self.pull_status)
+
+        right.addWidget(pg)
+
+        # Use a scroll area for the right column so everything fits
         rw = QWidget(); rw.setLayout(right)
+        right_scroll = QScrollArea()
+        right_scroll.setWidget(rw)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setStyleSheet(f"QScrollArea {{ border: none; background: {C['bg']}; }}")
 
         sp = QSplitter(Qt.Orientation.Horizontal)
-        sp.addWidget(lw); sp.addWidget(rw); sp.setSizes([260, 500])
+        sp.addWidget(lw); sp.addWidget(right_scroll); sp.setSizes([260, 500])
         layout.addWidget(sp)
+
+        self._populate_curated_list()
 
     def _build_mf(self):
         lines = [f"FROM {self.base_cb.currentText().strip()}"]
@@ -1465,9 +2125,9 @@ class ModelManager(QWidget):
 
     def _create(self):
         name = self.name_in.text().strip()
-        if not name: self.status.setText("Enter a name."); self.status.setStyleSheet(f"color:{C['fg_err']};"); return
+        if not name: self.status.setText("Enter a name."); self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}"); return
         mf = self._build_mf()
-        self.status.setText(f"Creating '{name}'..."); self.status.setStyleSheet(f"color:{C['fg_link']};")
+        self.status.setText(f"Creating '{name}'..."); self.status.setStyleSheet(f"color:{C['fg_link']};{FONT_SMALL}")
         def go():
             try:
                 r = requests.post(f"{self.BASE}/api/create", json={"name": name, "modelfile": mf}, stream=True, timeout=300)
@@ -1484,10 +2144,10 @@ class ModelManager(QWidget):
 
     def _done(self, m, ok):
         if ok:
-            self.status.setText(f"'{m}' created!"); self.status.setStyleSheet(f"color:{C['fg_ok']};")
+            self.status.setText(f"'{m}' created!"); self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
             self.refresh_models(); self.model_changed.emit()
         else:
-            self.status.setText(f"Error: {m}"); self.status.setStyleSheet(f"color:{C['fg_err']};")
+            self.status.setText(f"Error: {m}"); self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
 
     def refresh_models(self):
         self._lm.removeRows(0, self._lm.rowCount()); self.base_cb.clear()
@@ -1569,7 +2229,7 @@ class ModelManager(QWidget):
         descs[name] = self.desc_edit.text().strip()
         self._save_descs_dict(descs)
         self.status.setText("Description saved.")
-        self.status.setStyleSheet(f"color:{C['fg_ok']};")
+        self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
 
     def _auto_gen_desc(self):
         """Ask the model to generate its own description, then save it."""
@@ -1578,7 +2238,7 @@ class ModelManager(QWidget):
             return
         self.desc_edit.setText("Generating...")
         self.status.setText("Asking model to describe itself...")
-        self.status.setStyleSheet(f"color:{C['teal']};")
+        self.status.setStyleSheet(f"color:{C['teal']};{FONT_SMALL}")
         def gen():
             desc = ""
             try:
@@ -1623,10 +2283,10 @@ class ModelManager(QWidget):
                     descs[name] = desc
                     self._save_descs_dict(descs)
                     self.status.setText("Description generated and saved.")
-                    self.status.setStyleSheet(f"color:{C['fg_ok']};")
+                    self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
                 else:
                     self.status.setText(desc)
-                    self.status.setStyleSheet(f"color:{C['fg_err']};")
+                    self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
             QTimer.singleShot(0, apply)
         threading.Thread(target=gen, daemon=True).start()
 
@@ -1639,15 +2299,146 @@ class ModelManager(QWidget):
             try:
                 r = requests.delete(f"{self.BASE}/api/delete", json={"name": name}, timeout=30)
                 if r.status_code == 200:
-                    self.status.setText(f"Deleted."); self.status.setStyleSheet(f"color:{C['fg_ok']};")
+                    self.status.setText(f"Deleted."); self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
                     self.refresh_models(); self.model_changed.emit()
             except Exception as e:
-                self.status.setText(str(e)); self.status.setStyleSheet(f"color:{C['fg_err']};")
+                self.status.setText(str(e)); self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+
+    # ---- Pull Model methods ----
+
+    def _get_installed_names(self):
+        """Return set of installed model names."""
+        names = set()
+        for row in range(self._lm.rowCount()):
+            item = self._lm.item(row, 0)
+            if item:
+                names.add(item.text())
+        return names
+
+    def _populate_curated_list(self, filter_text=""):
+        self._curated_model.removeRows(0, self._curated_model.rowCount())
+        installed = self._get_installed_names()
+        ft = filter_text.lower()
+        for m in CURATED_MODELS:
+            name, size, desc = m["name"], m["size"], m["desc"]
+            if ft and ft not in name.lower() and ft not in desc.lower():
+                continue
+            is_installed = name in installed
+            row = [
+                QStandardItem(f"{name}  (installed)" if is_installed else name),
+                QStandardItem(size),
+                QStandardItem(desc),
+            ]
+            for item in row:
+                item.setEditable(False)
+                if is_installed:
+                    item.setForeground(QColor(C["fg_dim"]))
+            self._curated_model.appendRow(row)
+        self.curated_list.resizeColumnToContents(0)
+        self.curated_list.resizeColumnToContents(1)
+
+    def _filter_curated(self, text):
+        self._populate_curated_list(text)
+
+    def _pull_curated(self):
+        idxs = self.curated_list.selectedIndexes()
+        if not idxs:
+            self.pull_status.setText("Select a model from the list first.")
+            self.pull_status.setStyleSheet(f"color:{C['fg_warn']};{FONT_SMALL}")
+            return
+        name = self._curated_model.item(idxs[0].row(), 0).text()
+        name = name.replace("  (installed)", "").strip()
+        self._pull_model(name)
+
+    def _pull_custom(self):
+        name = self.custom_pull_name.text().strip()
+        if not name:
+            self.pull_status.setText("Enter a model name.")
+            self.pull_status.setStyleSheet(f"color:{C['fg_warn']};{FONT_SMALL}")
+            return
+        self._pull_model(name)
+
+    def _pull_model(self, name):
+        self.pull_status.setText(f"Pulling '{name}'...")
+        self.pull_status.setStyleSheet(f"color:{C['teal']};{FONT_SMALL}")
+
+        def go():
+            try:
+                r = requests.post(
+                    f"{self.BASE}/api/pull",
+                    json={"name": name}, stream=True, timeout=(10, 600))
+                last_status = ""
+                for line in r.iter_lines():
+                    if line:
+                        try:
+                            chunk = json.loads(line)
+                            status = chunk.get("status", "")
+                            completed = chunk.get("completed", 0)
+                            total = chunk.get("total", 0)
+                            if total and completed:
+                                pct = int(completed / total * 100)
+                                msg = f"{status} — {pct}%"
+                            else:
+                                msg = status
+                            last_status = status
+                            QTimer.singleShot(0, lambda m=msg: self._on_pull_progress(m))
+                        except json.JSONDecodeError:
+                            continue
+                ok = "success" in last_status.lower()
+                QTimer.singleShot(0, lambda: self._on_pull_done(name, ok))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_pull_done(str(e), False))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _on_pull_progress(self, msg):
+        self.pull_status.setText(msg)
+
+    def _on_pull_done(self, name, success):
+        if success:
+            self.pull_status.setText(f"'{name}' pulled successfully!")
+            self.pull_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+            self.refresh_models()
+            self._populate_curated_list(self.pull_filter.text())
+            self.model_changed.emit()
+        else:
+            self.pull_status.setText(f"Pull failed: {name}")
+            self.pull_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
 
 
 # =============================================================================
-# Main Window
+# Settings Panel — Container
 # =============================================================================
+
+class SettingsPanel(QWidget):
+    """Settings panel with AI Tools and Models tabs."""
+    model_changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Header bar — standardized
+        header, _, _ = _make_panel_header("Settings")
+        layout.addWidget(header)
+
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("settingsTabs")
+
+        self.ai_tools_tab = AIToolsTab()
+        self.tabs.addTab(self.ai_tools_tab, "AI Tools")
+
+        self.models_tab = ModelsTab()
+        self.models_tab.model_changed.connect(self.model_changed.emit)
+        self.tabs.addTab(self.models_tab, "Models")
+
+        layout.addWidget(self.tabs)
+
+    def refresh_models(self):
+        """Convenience method for external callers."""
+        self.models_tab.refresh_models()
+
 
 # =============================================================================
 # Git Panel
@@ -1657,12 +2448,9 @@ class GitPanel(QWidget):
     """Git GUI with graphical branch/tag manager and console output."""
     branch_changed = pyqtSignal()  # emitted after checkout so MainWindow can reload files
 
-    _BTN = (f"background:{C['bg_input']};color:{C['fg']};border:1px solid {C['border']};"
-            f"border-radius:4px;padding:6px 12px;font-size:12px;")
-    _BTN_PRIMARY = (f"background:{C['teal']};color:white;border:none;"
-                    f"border-radius:4px;padding:6px 14px;font-size:12px;font-weight:bold;")
-    _BTN_DANGER = (f"background:{C['danger']};color:white;border:none;"
-                   f"border-radius:4px;padding:6px 12px;font-size:12px;font-weight:bold;")
+    _BTN = BTN_SECONDARY
+    _BTN_PRIMARY = BTN_PRIMARY
+    _BTN_DANGER = BTN_DANGER
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1672,30 +2460,23 @@ class GitPanel(QWidget):
 
         splitter = QSplitter(Qt.Orientation.Vertical)
 
-        # ===== Top half: graphical branch/tag manager =====
-        top = QWidget()
-        top_layout = QVBoxLayout(top)
-        top_layout.setContentsMargins(10, 10, 10, 6)
-        top_layout.setSpacing(8)
-
-        # -- Current branch indicator --
-        branch_bar = QHBoxLayout()
-        self.branch_label = QLabel("Branch: —")
-        self.branch_label.setStyleSheet(
-            f"color:{C['fg_head']};font-size:15px;font-weight:bold;")
-        branch_bar.addWidget(self.branch_label)
-        branch_bar.addStretch()
-
+        # Header bar — standardized
+        header, self.branch_label, header_layout = _make_panel_header("Branch: —")
         refresh_btn = QPushButton("Refresh")
         refresh_btn.setStyleSheet(self._BTN_PRIMARY)
         refresh_btn.clicked.connect(self.refresh_status)
-        branch_bar.addWidget(refresh_btn)
-
+        header_layout.addWidget(refresh_btn)
         init_btn = QPushButton("Init Repo")
         init_btn.setStyleSheet(self._BTN)
         init_btn.clicked.connect(self._init_repo)
-        branch_bar.addWidget(init_btn)
-        top_layout.addLayout(branch_bar)
+        header_layout.addWidget(init_btn)
+        layout.addWidget(header)
+
+        # ===== Top half: graphical branch/tag manager =====
+        top = QWidget()
+        top_layout = QVBoxLayout(top)
+        top_layout.setContentsMargins(10, 6, 10, 6)
+        top_layout.setSpacing(8)
 
         # -- Branches & Tags side by side --
         lists_row = QHBoxLayout()
@@ -1706,7 +2487,7 @@ class GitPanel(QWidget):
         br_layout.setContentsMargins(0, 0, 0, 0)
         br_layout.setSpacing(4)
         br_hdr = QLabel("Branches")
-        br_hdr.setStyleSheet(f"color:{C['teal']};font-size:13px;font-weight:bold;")
+        br_hdr.setStyleSheet(f"color:{C['teal']};{FONT_SECTION}")
         br_layout.addWidget(br_hdr)
 
         self.branch_list = QTreeView()
@@ -1751,7 +2532,7 @@ class GitPanel(QWidget):
         tag_layout.setContentsMargins(0, 0, 0, 0)
         tag_layout.setSpacing(4)
         tag_hdr = QLabel("Tags")
-        tag_hdr.setStyleSheet(f"color:{C['teal']};font-size:13px;font-weight:bold;")
+        tag_hdr.setStyleSheet(f"color:{C['teal']};{FONT_SECTION}")
         tag_layout.addWidget(tag_hdr)
 
         self.tag_list = QTreeView()
@@ -1765,6 +2546,7 @@ class GitPanel(QWidget):
             f"QTreeView::item:selected {{ background:{C['teal']};color:white; }}")
         self._tag_model = QStandardItemModel()
         self.tag_list.setModel(self._tag_model)
+        self.tag_list.clicked.connect(self._on_tag_clicked)
         tag_layout.addWidget(self.tag_list)
 
         tag_btns = QHBoxLayout()
@@ -1786,6 +2568,13 @@ class GitPanel(QWidget):
         lists_row.addWidget(tag_box, stretch=2)
 
         top_layout.addLayout(lists_row)
+
+        # Filter indicator
+        self.filter_label = QLabel("")
+        self.filter_label.setStyleSheet(
+            f"color:{C['teal']};{FONT_SMALL}font-style:italic;padding:2px 0;")
+        self.filter_label.hide()
+        top_layout.addWidget(self.filter_label)
 
         # -- Commit row --
         commit_row = QHBoxLayout()
@@ -1822,6 +2611,9 @@ class GitPanel(QWidget):
         layout.addWidget(splitter)
 
         self._project_path = None
+        self._selected_branch_name = None
+        self._selected_tag_name = None
+        self._all_branches_data = []
 
     # ---- Helpers ----
 
@@ -1898,8 +2690,14 @@ class GitPanel(QWidget):
         current = self._run_git(["branch", "--show-current"], silent=True)
         self.branch_label.setText(f"Branch: {current or '(detached)'}")
 
+        # Reset filter state
+        self._selected_branch_name = None
+        self._selected_tag_name = None
+        self.filter_label.hide()
+
         # Populate branches
         self._branch_model.clear()
+        self._all_branches_data = []
         raw = self._run_git(["branch", "-a"], silent=True)
         for line in raw.splitlines():
             name = line.strip()
@@ -1914,6 +2712,10 @@ class GitPanel(QWidget):
             elif name.startswith("remotes/"):
                 item.setForeground(QColor(C["fg_dim"]))
             self._branch_model.appendRow(item)
+            self._all_branches_data.append({
+                'name': name.lstrip("* ").strip(),
+                'display': name
+            })
 
         # Populate tags — only those reachable from the current branch
         self._refresh_tags_for(current or "HEAD")
@@ -1939,18 +2741,77 @@ class GitPanel(QWidget):
                 self._tag_model.appendRow(QStandardItem(name))
 
     def _on_branch_clicked(self, idx):
-        """When a branch is clicked, filter tags to show those on that branch."""
+        """When a branch is clicked, filter tags. Click again to deselect."""
         name = self._selected_branch()
         if not name:
             return
-        # For remote branches, use full ref
+        # Click-to-deselect
+        if name == self._selected_branch_name:
+            self._selected_branch_name = None
+            self.branch_list.clearSelection()
+            current = self._run_git(["branch", "--show-current"], silent=True)
+            self._refresh_tags_for(current or "HEAD")
+            self.filter_label.hide()
+            return
+        self._selected_branch_name = name
+        self._selected_tag_name = None
+        self.tag_list.clearSelection()
         ref = name
-        if ref.startswith("remotes/"):
-            pass  # use as-is
         self._refresh_tags_for(ref)
-        # Show branch info in the console
+        self.filter_label.setText(f"Filtering tags by branch: {name}")
+        self.filter_label.show()
         log = self._run_git(["log", "--oneline", "-10", ref], silent=True)
         self._log(f"\n--- Commits on '{name}' ---\n{log or '(none)'}")
+
+    def _on_tag_clicked(self, idx):
+        """When a tag is clicked, filter branches to those containing it.
+        Click again to deselect."""
+        tag_name = self._selected_tag()
+        if not tag_name:
+            return
+        # Click-to-deselect
+        if tag_name == self._selected_tag_name:
+            self._selected_tag_name = None
+            self.tag_list.clearSelection()
+            self._refresh_all_branches()
+            self.filter_label.hide()
+            return
+        self._selected_tag_name = tag_name
+        self._selected_branch_name = None
+        self.branch_list.clearSelection()
+        # Find branches containing this tag
+        raw = self._run_git(["branch", "-a", "--contains", tag_name], silent=True)
+        matching = set()
+        for line in raw.splitlines():
+            name = line.strip()
+            if name and "HEAD" not in name:
+                matching.add(name.lstrip("* ").strip())
+        # Filter branch list
+        self._branch_model.clear()
+        for bd in self._all_branches_data:
+            if bd['name'] in matching:
+                item = QStandardItem(bd['display'])
+                if bd['display'].startswith("* "):
+                    item.setForeground(QColor(C["teal"]))
+                    f = item.font(); f.setBold(True); item.setFont(f)
+                elif bd['display'].startswith("remotes/"):
+                    item.setForeground(QColor(C["fg_dim"]))
+                self._branch_model.appendRow(item)
+        self.filter_label.setText(f"Filtering branches by tag: {tag_name}")
+        self.filter_label.show()
+        self._log(f"\n--- Tag '{tag_name}' is on {len(matching)} branch(es) ---")
+
+    def _refresh_all_branches(self):
+        """Repopulate branch list with all branches (clear any filter)."""
+        self._branch_model.clear()
+        for bd in self._all_branches_data:
+            item = QStandardItem(bd['display'])
+            if bd['display'].startswith("* "):
+                item.setForeground(QColor(C["teal"]))
+                f = item.font(); f.setBold(True); item.setFont(f)
+            elif bd['display'].startswith("remotes/"):
+                item.setForeground(QColor(C["fg_dim"]))
+            self._branch_model.appendRow(item)
 
     # ---- Branch operations ----
 
@@ -2165,17 +3026,20 @@ class MainWindow(QMainWindow):
         self.btn_code = SidebarButton("{}", "Code Editor")
         self.btn_code.setChecked(True)
         self.btn_chat = SidebarButton("AI", "AI Chat")
-        self.btn_models = SidebarButton("M", "Model Manager")
+        self.btn_files = FileSidebarButton("Files")
+        self.btn_settings = SidebarButton("\u2699", "Settings")
         self.btn_git = GitSidebarButton("Git")
 
         self.btn_code.clicked.connect(lambda: self._switch_view(0))
         self.btn_chat.clicked.connect(lambda: self._switch_view(1))
-        self.btn_models.clicked.connect(lambda: self._switch_view(2))
-        self.btn_git.clicked.connect(lambda: self._switch_view(3))
+        self.btn_files.clicked.connect(lambda: self._switch_view(2))
+        self.btn_settings.clicked.connect(lambda: self._switch_view(3))
+        self.btn_git.clicked.connect(lambda: self._switch_view(4))
 
         sb_layout.addWidget(self.btn_code)
         sb_layout.addWidget(self.btn_chat)
-        sb_layout.addWidget(self.btn_models)
+        sb_layout.addWidget(self.btn_files)
+        sb_layout.addWidget(self.btn_settings)
         sb_layout.addWidget(self.btn_git)
         sb_layout.addStretch()
 
@@ -2218,12 +3082,18 @@ class MainWindow(QMainWindow):
         self.chat_panel.generation_finished.connect(lambda: self.ai_spinner.stop())
         self.view_stack.addWidget(self.chat_panel)
 
-        # View 2: Model manager (full panel)
-        self.model_manager = ModelManager()
-        self.model_manager.model_changed.connect(self._refresh_models)
-        self.view_stack.addWidget(self.model_manager)
+        # View 2: File Manager (full panel)
+        self.file_manager = FileManagerView()
+        self.file_manager.file_requested.connect(
+            lambda fp: (self.editor.open_file(fp), self._switch_view(0)))
+        self.view_stack.addWidget(self.file_manager)
 
-        # View 3: Git panel (full panel)
+        # View 3: Settings (full panel)
+        self.settings_panel = SettingsPanel()
+        self.settings_panel.model_changed.connect(self._refresh_models)
+        self.view_stack.addWidget(self.settings_panel)
+
+        # View 4: Git panel (full panel)
         self.git_panel = GitPanel()
         self.git_panel.branch_changed.connect(self._on_branch_changed)
         self.view_stack.addWidget(self.git_panel)
@@ -2232,9 +3102,10 @@ class MainWindow(QMainWindow):
 
     def _switch_view(self, idx):
         self.view_stack.setCurrentIndex(idx)
-        for i, btn in enumerate([self.btn_code, self.btn_chat, self.btn_models, self.btn_git]):
+        for i, btn in enumerate([self.btn_code, self.btn_chat, self.btn_files,
+                                 self.btn_settings, self.btn_git]):
             btn.setChecked(i == idx)
-        if idx == 3:
+        if idx == 4:
             self.git_panel.refresh_status()
 
     def _setup_toolbar(self):
@@ -2244,12 +3115,8 @@ class MainWindow(QMainWindow):
         toolbar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.addToolBar(toolbar)
 
-        tb_btn_style = (
-            f"background:{C['teal']};color:white;border:none;border-radius:4px;"
-            f"font-weight:bold;padding:7px 16px;font-size:13px;")
-        tb_secondary_style = (
-            f"background:{C['bg_input']};color:{C['fg']};border:1px solid {C['border']};"
-            f"border-radius:4px;padding:6px 12px;font-size:12px;")
+        tb_btn_style = BTN_TOOLBAR
+        tb_secondary_style = BTN_TOOLBAR_SEC
 
         # Verify button with checkmark
         verify_btn = QPushButton("  \u2713  Verify")
@@ -2271,13 +3138,17 @@ class MainWindow(QMainWindow):
         self.board_combo = QComboBox()
         self.board_combo.addItems(["teensy:avr:teensy40","teensy:avr:teensy41",
             "teensy:avr:teensy36","teensy:avr:teensy32","teensy:avr:teensyLC"])
-        self.board_combo.setCurrentText(DEFAULT_FQBN); self.board_combo.setMinimumWidth(120)
+        self.board_combo.setCurrentText(DEFAULT_FQBN)
+        self.board_combo.setMinimumContentsLength(6)
+        self.board_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         toolbar.addWidget(self.board_combo)
 
         toolbar.addSeparator()
 
         toolbar.addWidget(QLabel("Port:"))
-        self.port_combo = QComboBox(); self.port_combo.setEditable(True); self.port_combo.setMinimumWidth(120)
+        self.port_combo = QComboBox(); self.port_combo.setEditable(True)
+        self.port_combo.setMinimumContentsLength(6)
+        self.port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._refresh_ports()
         toolbar.addWidget(self.port_combo)
 
@@ -2289,14 +3160,16 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
 
         toolbar.addWidget(QLabel("AI Model:"))
-        self.model_combo = QComboBox(); self.model_combo.setMinimumWidth(120)
+        self.model_combo = QComboBox()
+        self.model_combo.setMinimumContentsLength(6)
+        self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._refresh_models()
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
         toolbar.addWidget(self.model_combo)
 
         self.model_desc_label = QLabel("")
         self.model_desc_label.setStyleSheet(
-            f"color:{C['fg_dim']};font-size:11px;font-style:italic;"
+            f"color:{C['fg_dim']};{FONT_SMALL}font-style:italic;"
             f"background:transparent;border:none;margin-left:4px;")
         toolbar.addWidget(self.model_desc_label)
         self._update_model_desc()
@@ -2446,8 +3319,9 @@ class MainWindow(QMainWindow):
         vm = mb.addMenu("View")
         vm.addAction(self._make_action("Code Editor", lambda: self._switch_view(0), "Ctrl+1"))
         vm.addAction(self._make_action("AI Chat", lambda: self._switch_view(1), "Ctrl+2"))
-        vm.addAction(self._make_action("Model Manager", lambda: self._switch_view(2), "Ctrl+3"))
-        vm.addAction(self._make_action("Git", lambda: self._switch_view(3), "Ctrl+4"))
+        vm.addAction(self._make_action("Files", lambda: self._switch_view(2), "Ctrl+3"))
+        vm.addAction(self._make_action("Settings", lambda: self._switch_view(3), "Ctrl+4"))
+        vm.addAction(self._make_action("Git", lambda: self._switch_view(4), "Ctrl+5"))
 
     # ---- File operations ----
     def _open_project_dialog(self):
@@ -2462,6 +3336,7 @@ class MainWindow(QMainWindow):
         self.chat_panel.set_project_path(path)
         self.chat_panel._update_context_bar()
         self.git_panel.set_project(path)
+        self.file_manager.set_project(path)
 
     def _on_branch_changed(self):
         """Reload all project files after a git checkout/merge."""
@@ -2591,7 +3466,13 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(WINDOW_TITLE)
+    # Set explicit font to avoid macOS -apple-system lookup warning
+    app_font = QFont("Helvetica Neue", 13)
+    app_font.setStyleHint(QFont.StyleHint.SansSerif)
+    app.setFont(app_font)
     app.setStyleSheet(STYLESHEET)
+    # Load persisted AI actions config
+    _load_ai_actions()
     project_path = None
     if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
         project_path = os.path.abspath(sys.argv[1])
