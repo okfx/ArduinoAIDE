@@ -19,16 +19,17 @@ from PyQt6.QtWidgets import (
     QLineEdit, QPushButton, QToolBar, QTabWidget, QTabBar,
     QLabel, QComboBox, QFileDialog, QMessageBox, QTextEdit,
     QGroupBox, QSizePolicy, QListWidget, QListWidgetItem,
-    QScrollArea, QFrame, QInputDialog
+    QScrollArea, QFrame, QInputDialog, QStatusBar
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread,
-    QTimer, QSize
+    QTimer, QSize, QPointF
 )
 from PyQt6.QtGui import (
     QFont, QColor, QAction, QKeySequence, QTextCursor,
     QTextCharFormat, QPalette, QFileSystemModel,
-    QStandardItemModel, QStandardItem, QPainter, QPen
+    QStandardItemModel, QStandardItem, QPainter, QPen,
+    QPainterPath, QPolygonF
 )
 
 try:
@@ -116,6 +117,15 @@ def _make_panel_header(title_text=""):
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "teensy-coder"
 DEFAULT_FQBN = "teensy:avr:teensy40"
+
+# Board FQBN → friendly display name mapping
+BOARD_DISPLAY = {
+    "teensy:avr:teensy40": "Teensy 4.0",
+    "teensy:avr:teensy41": "Teensy 4.1",
+    "teensy:avr:teensy36": "Teensy 3.6",
+    "teensy:avr:teensy32": "Teensy 3.2",
+    "teensy:avr:teensyLC": "Teensy LC",
+}
 WINDOW_TITLE = "Teensy Ollama IDE"
 
 SYSTEM_PROMPT = """You are an expert embedded C/C++ developer for Teensy microcontrollers (PJRC), running inside an IDE.
@@ -433,6 +443,47 @@ class FileSidebarButton(SidebarButton):
         p.drawLine(body_l, body_t, body_l, int(cy - 9))
         p.drawLine(body_l, int(cy - 9), int(cx - 3), int(cy - 9))
         p.drawLine(int(cx - 3), int(cy - 9), int(cx - 1), body_t)
+        p.end()
+
+
+class SettingsSidebarButton(SidebarButton):
+    """Sidebar button with a custom-painted gear icon (larger than unicode)."""
+    def __init__(self, tooltip, parent=None):
+        super().__init__("", tooltip, parent)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        col = QColor(C['fg']) if self.isChecked() or self.underMouse() else QColor(C['fg_dim'])
+        p.setPen(QPen(col, 2.0))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        cx, cy = self.width() / 2, self.height() / 2
+        p.translate(cx, cy)
+        # Gear: 8 teeth
+        teeth = 8
+        outer_r, inner_r = 11, 7
+        tooth_half = math.pi / teeth * 0.45
+        path = QPainterPath()
+        points = []
+        for i in range(teeth):
+            a = 2 * math.pi * i / teeth
+            # Outer tooth corners
+            points.append(QPointF(outer_r * math.cos(a - tooth_half),
+                                  outer_r * math.sin(a - tooth_half)))
+            points.append(QPointF(outer_r * math.cos(a + tooth_half),
+                                  outer_r * math.sin(a + tooth_half)))
+            # Inner valley between teeth
+            a2 = 2 * math.pi * (i + 0.5) / teeth
+            points.append(QPointF(inner_r * math.cos(a2 - tooth_half),
+                                  inner_r * math.sin(a2 - tooth_half)))
+            points.append(QPointF(inner_r * math.cos(a2 + tooth_half),
+                                  inner_r * math.sin(a2 + tooth_half)))
+        path.addPolygon(QPolygonF(points))
+        path.closeSubpath()
+        p.drawPath(path)
+        # Center hole
+        p.drawEllipse(-3, -3, 6, 6)
         p.end()
 
 
@@ -1030,7 +1081,7 @@ class FileManagerView(QWidget):
         layout.setSpacing(0)
 
         # Header bar
-        header, self.project_label, _ = _make_panel_header("Files")
+        header, self.project_label, _ = _make_panel_header("SKETCHBOOK")
         layout.addWidget(header)
 
         # Splitter: parent context (top) + file tree (bottom)
@@ -1090,12 +1141,18 @@ class FileManagerView(QWidget):
         bl.addWidget(new_folder_btn)
 
         bl.addStretch()
+
+        new_sketch_btn = QPushButton("New Sketch")
+        new_sketch_btn.setStyleSheet(BTN_PRIMARY)
+        new_sketch_btn.clicked.connect(self._new_sketch)
+        bl.addWidget(new_sketch_btn)
+
         layout.addWidget(btns)
 
     def set_project(self, path):
         """Set root project path and refresh views."""
         self._project_path = path
-        self.project_label.setText(os.path.basename(path) if path else "Files")
+        self.project_label.setText(os.path.basename(path) if path else "SKETCHBOOK")
         self.file_browser.set_root(path)
         self._current_focus_path = path
         self._refresh_parent_context(path)
@@ -1202,6 +1259,27 @@ class FileManagerView(QWidget):
             except OSError as e:
                 QMessageBox.warning(self, "Error", str(e))
 
+    def _new_sketch(self):
+        """Create a new Arduino sketch folder with a .ino file."""
+        target = self._current_focus_path or self._project_path
+        if not target:
+            target = os.path.expanduser("~/Documents/Arduino")
+            os.makedirs(target, exist_ok=True)
+        name, ok = QInputDialog.getText(self, "New Sketch", "Sketch name:")
+        if ok and name:
+            sketch_dir = os.path.join(target, name)
+            ino_file = os.path.join(sketch_dir, f"{name}.ino")
+            try:
+                os.makedirs(sketch_dir, exist_ok=True)
+                with open(ino_file, "w") as f:
+                    f.write(f"// {name}.ino\n\nvoid setup() {{\n\n}}\n\nvoid loop() {{\n\n}}\n")
+                self.file_browser._refresh()
+                self._refresh_parent_context(self._current_focus_path)
+                # Signal to open the new sketch file
+                self.file_requested.emit(ino_file)
+            except OSError as e:
+                QMessageBox.warning(self, "Error", str(e))
+
 
 # =============================================================================
 # Chat Panel
@@ -1257,20 +1335,23 @@ class ChatPanel(QWidget):
         self._ctx_detail.hide()
         layout.addWidget(self._ctx_detail)
 
-        # Chat display — clean aesthetic
-        self.display = QTextEdit()
-        self.display.setReadOnly(True)
-        self.display.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: #1a1a1a;
-                color: {C['fg']};
-                border: none;
-                {FONT_CHAT}
-                padding: 12px 20px;
-                selection-background-color: {C['teal']};
-            }}
-        """)
-        layout.addWidget(self.display)
+        # Chat display — widget-based bubbles (Claude desktop style)
+        self._chat_scroll = QScrollArea()
+        self._chat_scroll.setWidgetResizable(True)
+        self._chat_scroll.setStyleSheet(
+            f"QScrollArea {{ background-color: #1a1a1a; border: none; }}"
+            f"QWidget#chatContainer {{ background-color: #1a1a1a; }}")
+        self._chat_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        chat_container = QWidget()
+        chat_container.setObjectName("chatContainer")
+        self._chat_layout = QVBoxLayout(chat_container)
+        self._chat_layout.setContentsMargins(16, 12, 16, 12)
+        self._chat_layout.setSpacing(16)
+        self._chat_layout.addStretch()
+        self._chat_scroll.setWidget(chat_container)
+        self._current_ai_widget = None
+        layout.addWidget(self._chat_scroll)
 
         # Apply bar — shows after AI suggests edits
         self.apply_bar = QWidget()
@@ -1394,13 +1475,10 @@ class ChatPanel(QWidget):
             self.send_errors_btn.setChecked(False)
         msg += f"\n[USER REQUEST:]\n{text}"
 
-        # Show the display text in the chat
+        # Show user message bubble (right-aligned)
         show = display_text or text
-        self._append(
-            f'<br><table width="100%" cellpadding="10" cellspacing="0" bgcolor="#262626">'
-            f'<tr><td align="left"><span style="color:{C["fg_link"]};font-size:14px;font-weight:bold;">You</span><br>'
-            f'<span style="color:{C["fg"]};">{self._esc(show)}</span>'
-            f'</td></tr></table>')
+        self._add_user_msg(show)
+
         self._conversation.append({"role": "user", "content": msg})
         self.input_field.clear()
         self.input_field.setEnabled(False)
@@ -1409,16 +1487,15 @@ class ChatPanel(QWidget):
         self._current_response = ""
         self.apply_bar.hide()
         self._pending_edits = []
-        self._append(
-            f'<br><table width="100%" cellpadding="10" cellspacing="0" bgcolor="#1e2a2a">'
-            f'<tr><td><span style="color:{C["teal"]};font-size:14px;font-weight:bold;">{self._esc(OLLAMA_MODEL)}</span><br>'
-            f'<span style="color:{C["fg"]};">')
+
+        # Create AI response widget (left-aligned, no bubble)
+        self._add_ai_msg()
+
         self.worker.messages = list(self._conversation)
         if self.thread.isRunning():
             self.worker.stop()
             self.thread.quit()
             if not self.thread.wait(2000):
-                # Thread didn't stop — recreate worker/thread
                 self.thread.terminate()
                 self.thread.wait(1000)
                 self._setup_worker_thread()
@@ -1441,11 +1518,12 @@ class ChatPanel(QWidget):
 
     def _on_token(self, t):
         self._current_response += t
-        cur = self.display.textCursor()
-        cur.movePosition(QTextCursor.MoveOperation.End)
-        cur.insertText(t)
-        self.display.setTextCursor(cur)
-        self.display.ensureCursorVisible()
+        if self._current_ai_widget:
+            cur = self._current_ai_widget.textCursor()
+            cur.movePosition(QTextCursor.MoveOperation.End)
+            cur.insertText(t)
+            self._current_ai_widget.setTextCursor(cur)
+        self._scroll_to_bottom()
 
     def _on_complete(self):
         if self.thread.isRunning():
@@ -1453,7 +1531,7 @@ class ChatPanel(QWidget):
         if self._current_response:
             self._conversation.append({"role": "assistant", "content": self._current_response})
             self._parse_edits(self._current_response)
-        self._append("</span></td></tr></table>")
+        self._current_ai_widget = None
         self.input_field.setEnabled(True)
         self.send_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
@@ -1461,11 +1539,22 @@ class ChatPanel(QWidget):
         self.generation_finished.emit()
 
     def _on_error(self, m):
-        self._append(
-            f'<br><table width="100%" cellpadding="8" cellspacing="0" bgcolor="#2a1a1a">'
-            f'<tr><td><span style="color:{C["fg_err"]};font-size:14px;font-weight:bold;">Error</span><br>'
-            f'<span style="color:{C["fg"]};">{self._esc(m)}</span>'
-            f'</td></tr></table>')
+        # Show error as a left-aligned message with error styling
+        wrapper = QWidget()
+        wrapper.setStyleSheet("background: transparent;")
+        wl = QHBoxLayout(wrapper)
+        wl.setContentsMargins(0, 0, 40, 0)
+        err_label = QLabel(f"Error: {m}")
+        err_label.setWordWrap(True)
+        err_label.setStyleSheet(
+            f"color: {C['fg_err']}; {FONT_CHAT} padding: 8px 0;")
+        err_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        wl.addWidget(err_label)
+        wl.addStretch()
+        self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
+        self._scroll_to_bottom()
+        self._current_ai_widget = None
         self.input_field.setEnabled(True)
         self.send_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
@@ -1506,10 +1595,9 @@ class ChatPanel(QWidget):
             self.apply_label.setText(
                 f"{n} change{'s' if n > 1 else ''} in {', '.join(files_touched)}")
             self.apply_bar.show()
-            self._append(
-                f'<br><span style="color:{C["fg_ok"]};{FONT_SMALL}">'
+            self._add_info_msg(
                 f'Found {n} code edit{"s" if n > 1 else ""} — '
-                f'use the Apply bar below to apply.</span>')
+                f'use the Apply bar below to apply.', C['fg_ok'])
         else:
             # Fallback: detect fenced code blocks (```...```) and offer to insert
             self._parse_code_blocks(response)
@@ -1547,9 +1635,8 @@ class ChatPanel(QWidget):
         status = f"Applied {applied} change{'s' if applied != 1 else ''}."
         if errors:
             status += " Errors: " + "; ".join(errors)
-        self._append(
-            f'<p style="color:{C["fg_ok"] if not errors else C["fg_warn"]}; {FONT_SMALL}">'
-            f'{self._esc(status)}</p>')
+        self._add_info_msg(status,
+                           C['fg_ok'] if not errors else C['fg_warn'])
         self.apply_bar.hide()
         self._pending_edits = []
 
@@ -1582,13 +1669,17 @@ class ChatPanel(QWidget):
             self.apply_label.setText(
                 f"{n} code block{'s' if n > 1 else ''} detected — apply to {basename}?")
             self.apply_bar.show()
-            self._append(
-                f'<br><span style="color:{C["fg_warn"]};{FONT_SMALL}">'
+            self._add_info_msg(
                 f'No EDIT blocks found, but {n} code block{"s" if n > 1 else ""} detected. '
-                f'Click Apply to replace {basename} with the code.</span>')
+                f'Click Apply to replace {basename} with the code.', C['fg_warn'])
 
     def clear_chat(self):
-        self.display.clear()
+        # Remove all message widgets from the chat layout (keep the stretch)
+        while self._chat_layout.count() > 1:
+            item = self._chat_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._current_ai_widget = None
         self._conversation = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.apply_bar.hide()
         self._pending_edits = []
@@ -1626,12 +1717,69 @@ class ChatPanel(QWidget):
         self._ctx_detail.hide()
         self.toggle_files_btn.hide()
 
-    def _append(self, html):
-        cur = self.display.textCursor()
-        cur.movePosition(QTextCursor.MoveOperation.End)
-        self.display.setTextCursor(cur)
-        self.display.insertHtml(html)
-        self.display.ensureCursorVisible()
+    def _add_user_msg(self, text):
+        """Add a right-aligned user message bubble (Claude desktop style)."""
+        wrapper = QWidget()
+        wrapper.setStyleSheet("background: transparent;")
+        wl = QHBoxLayout(wrapper)
+        wl.setContentsMargins(60, 0, 0, 0)  # left margin pushes right
+        wl.addStretch()
+        bubble = QLabel(text)
+        bubble.setWordWrap(True)
+        bubble.setStyleSheet(
+            f"background-color: #363636; color: {C['fg']}; {FONT_CHAT}"
+            f" border-radius: 12px; padding: 10px 14px;")
+        bubble.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        wl.addWidget(bubble)
+        self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
+        self._scroll_to_bottom()
+
+    def _add_ai_msg(self):
+        """Add a left-aligned AI message area (plain text, no bubble)."""
+        wrapper = QWidget()
+        wrapper.setStyleSheet("background: transparent;")
+        wl = QHBoxLayout(wrapper)
+        wl.setContentsMargins(0, 0, 40, 0)
+        ai_text = QTextEdit()
+        ai_text.setReadOnly(True)
+        ai_text.setStyleSheet(
+            f"QTextEdit {{ background: transparent; color: {C['fg']};"
+            f" border: none; {FONT_CHAT} padding: 0; }}")
+        ai_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        ai_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Auto-resize as content grows
+        ai_text.document().contentsChanged.connect(
+            lambda: ai_text.setFixedHeight(
+                int(ai_text.document().size().height()) + 4))
+        ai_text.setFixedHeight(24)
+        wl.addWidget(ai_text)
+        wl.addStretch()
+        self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
+        self._current_ai_widget = ai_text
+        self._scroll_to_bottom()
+
+    def _scroll_to_bottom(self):
+        """Scroll chat to bottom."""
+        QTimer.singleShot(10, lambda: self._chat_scroll.verticalScrollBar().setValue(
+            self._chat_scroll.verticalScrollBar().maximum()))
+
+    def _add_info_msg(self, text, color=None):
+        """Add a small info/status message (e.g. 'Found 2 edits')."""
+        wrapper = QWidget()
+        wrapper.setStyleSheet("background: transparent;")
+        wl = QHBoxLayout(wrapper)
+        wl.setContentsMargins(0, 0, 40, 0)
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet(
+            f"color: {color or C['fg_ok']}; {FONT_SMALL} padding: 4px 0;")
+        label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        wl.addWidget(label)
+        wl.addStretch()
+        self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
+        self._scroll_to_bottom()
 
     @staticmethod
     def _esc(t):
@@ -2999,11 +3147,11 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(700, 450)
         self.project_path = project_path
         self._compiler_errors = ""
-        self.setStatusBar(None)  # No status bar
 
         self._setup_ui()
         self._setup_toolbar()
         self._setup_menubar()
+        self._setup_statusbar()
 
         if project_path:
             self._open_project(project_path)
@@ -3027,8 +3175,8 @@ class MainWindow(QMainWindow):
         self.btn_code.setChecked(True)
         self.btn_chat = SidebarButton("AI", "AI Chat")
         self.btn_files = FileSidebarButton("Files")
-        self.btn_settings = SidebarButton("\u2699", "Settings")
         self.btn_git = GitSidebarButton("Git")
+        self.btn_settings = SettingsSidebarButton("Settings")
 
         self.btn_code.clicked.connect(lambda: self._switch_view(0))
         self.btn_chat.clicked.connect(lambda: self._switch_view(1))
@@ -3039,9 +3187,9 @@ class MainWindow(QMainWindow):
         sb_layout.addWidget(self.btn_code)
         sb_layout.addWidget(self.btn_chat)
         sb_layout.addWidget(self.btn_files)
-        sb_layout.addWidget(self.btn_settings)
         sb_layout.addWidget(self.btn_git)
         sb_layout.addStretch()
+        sb_layout.addWidget(self.btn_settings)
 
         main_layout.addWidget(sidebar)
 
@@ -3108,6 +3256,78 @@ class MainWindow(QMainWindow):
         if idx == 4:
             self.git_panel.refresh_status()
 
+    def _setup_statusbar(self):
+        sb = QStatusBar()
+        sb.setStyleSheet(
+            f"QStatusBar {{ background: {C['bg_toolbar']}; color: {C['fg_dim']};"
+            f" border-top: 1px solid {C['border']}; {FONT_SMALL} }}"
+            f" QStatusBar::item {{ border: none; }}")
+        sb.setFixedHeight(22)
+        self.setStatusBar(sb)
+        # Left: cursor position
+        self._status_cursor = QLabel("Ln 1, Col 1")
+        self._status_cursor.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL} padding: 0 8px;")
+        sb.addWidget(self._status_cursor)
+        # Right: board/port connection info
+        self._status_board = QLabel("")
+        self._status_board.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL} padding: 0 8px;")
+        sb.addPermanentWidget(self._status_board)
+        self._update_status_board()
+        # Connect board/port combo changes to status bar
+        if hasattr(self, 'board_combo'):
+            self.board_combo.currentTextChanged.connect(lambda: self._update_status_board())
+        if hasattr(self, 'port_combo'):
+            self.port_combo.currentTextChanged.connect(lambda: self._update_status_board())
+        # Connect tab changes to re-wire cursor signal
+        self.editor.tabs.currentChanged.connect(self._connect_cursor_signal)
+        # Wire up initial editor if any
+        QTimer.singleShot(100, lambda: self._connect_cursor_signal(self.editor.tabs.currentIndex()))
+
+    def _connect_cursor_signal(self, idx):
+        """Connect cursor position signal from current editor tab."""
+        w = self.editor.tabs.widget(idx)
+        if w is None:
+            return
+        if HAS_QSCINTILLA and isinstance(w, QsciScintilla):
+            try: w.cursorPositionChanged.disconnect(self._update_cursor_pos_sci)
+            except: pass
+            w.cursorPositionChanged.connect(self._update_cursor_pos_sci)
+            line, col = w.getCursorPosition()
+            self._status_cursor.setText(f"Ln {line + 1}, Col {col + 1}")
+        elif isinstance(w, QPlainTextEdit):
+            try: w.cursorPositionChanged.disconnect(self._update_cursor_pos_plain)
+            except: pass
+            w.cursorPositionChanged.connect(self._update_cursor_pos_plain)
+            cursor = w.textCursor()
+            self._status_cursor.setText(
+                f"Ln {cursor.blockNumber() + 1}, Col {cursor.columnNumber() + 1}")
+
+    def _update_cursor_pos_sci(self, line, col):
+        self._status_cursor.setText(f"Ln {line + 1}, Col {col + 1}")
+
+    def _update_cursor_pos_plain(self):
+        w = self.editor.tabs.currentWidget()
+        if w and isinstance(w, QPlainTextEdit):
+            cursor = w.textCursor()
+            self._status_cursor.setText(
+                f"Ln {cursor.blockNumber() + 1}, Col {cursor.columnNumber() + 1}")
+
+    def _current_fqbn(self):
+        """Get the actual FQBN from board combo (stored as item data)."""
+        if hasattr(self, 'board_combo'):
+            data = self.board_combo.currentData()
+            return data if data else self.board_combo.currentText()
+        return DEFAULT_FQBN
+
+    def _update_status_board(self):
+        board = self._current_fqbn()
+        port = self.port_combo.currentText() if hasattr(self, 'port_combo') else ""
+        board_display = BOARD_DISPLAY.get(board, board)
+        if port:
+            self._status_board.setText(f"{board_display} on {port}")
+        else:
+            self._status_board.setText(f"{board_display}")
+
     def _setup_toolbar(self):
         toolbar = QToolBar("Build")
         toolbar.setMovable(False)
@@ -3115,52 +3335,62 @@ class MainWindow(QMainWindow):
         toolbar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.addToolBar(toolbar)
 
-        tb_btn_style = BTN_TOOLBAR
-        tb_secondary_style = BTN_TOOLBAR_SEC
+        # Icon-only Verify/Upload buttons (Arduino IDE 2.x style)
+        tb_icon_style = (f"QPushButton {{ background:{C['teal']};color:white;border:none;"
+                         f"border-radius:4px;font-size:18px;padding:4px 10px;min-width:32px; }}"
+                         f"QPushButton:hover {{ background:{C['teal_hover']}; }}")
 
-        # Verify button with checkmark
-        verify_btn = QPushButton("  \u2713  Verify")
-        verify_btn.setToolTip("Compile sketch (Ctrl+B)")
-        verify_btn.setStyleSheet(tb_btn_style)
+        verify_btn = QPushButton("\u2713")
+        verify_btn.setToolTip("Verify / Compile (Ctrl+B)")
+        verify_btn.setStyleSheet(tb_icon_style)
         verify_btn.clicked.connect(self._compile)
         toolbar.addWidget(verify_btn)
 
-        # Upload button with arrow
-        upload_btn = QPushButton("  \u27A4  Upload")
+        upload_btn = QPushButton("\u27A4")
         upload_btn.setToolTip("Upload to Teensy (Ctrl+U)")
-        upload_btn.setStyleSheet(tb_btn_style)
+        upload_btn.setStyleSheet(tb_icon_style)
         upload_btn.clicked.connect(self._upload)
         toolbar.addWidget(upload_btn)
 
         toolbar.addSeparator()
 
-        toolbar.addWidget(QLabel("Board:"))
+        # Board combo — display friendly names, store FQBNs as item data
         self.board_combo = QComboBox()
-        self.board_combo.addItems(["teensy:avr:teensy40","teensy:avr:teensy41",
-            "teensy:avr:teensy36","teensy:avr:teensy32","teensy:avr:teensyLC"])
-        self.board_combo.setCurrentText(DEFAULT_FQBN)
+        self.board_combo.setToolTip("Board")
+        fqbns = ["teensy:avr:teensy40", "teensy:avr:teensy41",
+                 "teensy:avr:teensy36", "teensy:avr:teensy32", "teensy:avr:teensyLC"]
+        for fqbn in fqbns:
+            self.board_combo.addItem(BOARD_DISPLAY.get(fqbn, fqbn), fqbn)
+        self.board_combo.setCurrentIndex(0)
         self.board_combo.setMinimumContentsLength(6)
         self.board_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         toolbar.addWidget(self.board_combo)
 
         toolbar.addSeparator()
 
-        toolbar.addWidget(QLabel("Port:"))
-        self.port_combo = QComboBox(); self.port_combo.setEditable(True)
+        # Port combo
+        self.port_combo = QComboBox()
+        self.port_combo.setToolTip("Port")
+        self.port_combo.setEditable(True)
         self.port_combo.setMinimumContentsLength(6)
         self.port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._refresh_ports()
         toolbar.addWidget(self.port_combo)
 
-        rb = QPushButton("Refresh")
-        rb.setStyleSheet(tb_secondary_style)
+        refresh_style = (f"QPushButton {{ background:transparent;color:{C['fg_dim']};"
+                         f"border:none;font-size:14px;padding:4px; }}"
+                         f"QPushButton:hover {{ color:{C['fg']}; }}")
+        rb = QPushButton("\u21BB")
+        rb.setToolTip("Refresh ports")
+        rb.setStyleSheet(refresh_style)
         rb.clicked.connect(self._refresh_ports)
         toolbar.addWidget(rb)
 
         toolbar.addSeparator()
 
-        toolbar.addWidget(QLabel("AI Model:"))
+        # AI Model combo
         self.model_combo = QComboBox()
+        self.model_combo.setToolTip("AI Model")
         self.model_combo.setMinimumContentsLength(6)
         self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._refresh_models()
@@ -3366,7 +3596,7 @@ class MainWindow(QMainWindow):
         self._save_file(); self.compiler_output.clear_output()
         self._switch_view(0); self.bottom_tabs.setCurrentWidget(self.compiler_output)
         self.compiler_output.append_output("Compiling...", C["fg_link"])
-        self._run_cli(["compile", "--fqbn", self.board_combo.currentText(), self.project_path])
+        self._run_cli(["compile", "--fqbn", self._current_fqbn(), self.project_path])
 
     def _upload(self):
         if not self.project_path:
@@ -3377,7 +3607,7 @@ class MainWindow(QMainWindow):
         self._save_file(); self.compiler_output.clear_output()
         self._switch_view(0); self.bottom_tabs.setCurrentWidget(self.compiler_output)
         self.compiler_output.append_output("Compiling and uploading...", C["fg_link"])
-        self._run_cli(["compile","--upload","--fqbn",self.board_combo.currentText(),"--port",port,self.project_path])
+        self._run_cli(["compile","--upload","--fqbn",self._current_fqbn(),"--port",port,self.project_path])
 
     def _run_cli(self, args):
         self._compiler_errors = ""
