@@ -7000,6 +7000,7 @@ class MainWindow(QMainWindow):
         self.settings_panel.set_project_path(path)
         self.git_panel.set_project(path)
         self.file_manager.set_project(path)
+        self._restore_project_state()
 
     def _on_branch_changed(self):
         """Reload all project files after a git checkout/merge."""
@@ -7236,7 +7237,104 @@ class MainWindow(QMainWindow):
         self._switch_view(0)
         self.editor.goto_line(filepath, line)
 
+    _PANEL_NAMES = {0: "editor", 1: "chat", 2: "files", 3: "settings", 4: "git"}
+    _PANEL_INDICES = {v: k for k, v in _PANEL_NAMES.items()}
+
+    def _save_project_state(self):
+        """Save editor state to <project_root>/.arduinoaide_state.json."""
+        if not self.project_path:
+            return
+        try:
+            # Collect open files in tab order
+            open_files = []
+            for i in range(self.editor.tabs.count()):
+                w = self.editor.tabs.widget(i)
+                for fp, ed in self.editor._editors.items():
+                    if ed is w:
+                        open_files.append(os.path.relpath(fp, self.project_path))
+                        break
+            # Scroll positions
+            scroll_positions = {}
+            for fp, ed in self.editor._editors.items():
+                rel = os.path.relpath(fp, self.project_path)
+                if HAS_QSCINTILLA and hasattr(ed, 'firstVisibleLine'):
+                    scroll_positions[rel] = ed.firstVisibleLine()
+                else:
+                    scroll_positions[rel] = ed.verticalScrollBar().value()
+            # Active file
+            active = self.editor.current_file()
+            active_file = os.path.relpath(active, self.project_path) if active else ""
+            # Active panel
+            active_panel = self._PANEL_NAMES.get(
+                self.view_stack.currentIndex(), "editor")
+            state = {
+                "open_files": open_files,
+                "active_file": active_file,
+                "scroll_positions": scroll_positions,
+                "active_panel": active_panel,
+            }
+            state_path = os.path.join(self.project_path, ".arduinoaide_state.json")
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+            # Ensure .arduinoaide_state.json is in .gitignore
+            gi = os.path.join(self.project_path, ".gitignore")
+            if os.path.isfile(gi):
+                with open(gi, "r", encoding="utf-8") as f:
+                    content = f.read()
+                if ".arduinoaide_state.json" not in content:
+                    with open(gi, "a", encoding="utf-8") as f:
+                        if not content.endswith("\n"):
+                            f.write("\n")
+                        f.write(".arduinoaide_state.json\n")
+        except Exception:
+            pass  # silently ignore write errors
+
+    def _restore_project_state(self):
+        """Restore editor state from <project_root>/.arduinoaide_state.json."""
+        if not self.project_path:
+            return
+        state_path = os.path.join(self.project_path, ".arduinoaide_state.json")
+        if not os.path.isfile(state_path):
+            return
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except Exception:
+            return  # corrupt or unreadable — skip silently
+        # Open files from saved list (skip any that no longer exist)
+        saved_files = state.get("open_files", [])
+        for rel in saved_files:
+            abs_path = os.path.join(self.project_path, rel)
+            if os.path.isfile(abs_path):
+                self.editor.open_file(abs_path)
+        # Defer scroll/tab/panel restoration until event loop processes new tabs
+        def _finish_restore():
+            # Restore scroll positions
+            for rel, pos in state.get("scroll_positions", {}).items():
+                abs_path = os.path.join(self.project_path, rel)
+                ed = self.editor._editors.get(abs_path)
+                if ed is None:
+                    continue
+                if HAS_QSCINTILLA and hasattr(ed, 'setFirstVisibleLine'):
+                    ed.setFirstVisibleLine(pos)
+                elif hasattr(ed, 'verticalScrollBar'):
+                    ed.verticalScrollBar().setValue(pos)
+            # Restore active tab
+            active_file = state.get("active_file", "")
+            if active_file:
+                abs_active = os.path.join(self.project_path, active_file)
+                if abs_active in self.editor._editors:
+                    self.editor.tabs.setCurrentWidget(
+                        self.editor._editors[abs_active])
+            # Restore active panel
+            panel = state.get("active_panel", "editor")
+            idx = self._PANEL_INDICES.get(panel, 0)
+            self._switch_view(idx)
+        QTimer.singleShot(0, _finish_restore)
+
     def closeEvent(self, event):
+        # Save project state before closing
+        self._save_project_state()
         # Save application state before closing
         config = {
             "project_path": self.project_path,
