@@ -4556,6 +4556,55 @@ class DiagnosticPanel(QWidget):
 # Serial Monitor
 # =============================================================================
 
+class HistoryLineEdit(QLineEdit):
+    """QLineEdit with Up/Down arrow command history (terminal-style)."""
+    _MAX_HISTORY = 200
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._history: list[str] = []
+        self._history_index: int = -1
+        self._pending: str = ""
+
+    def add_to_history(self, text: str):
+        text = text.strip()
+        if not text:
+            return
+        if self._history and self._history[-1] == text:
+            return
+        self._history.append(text)
+        if len(self._history) > self._MAX_HISTORY:
+            self._history.pop(0)
+        self._history_index = -1
+        self._pending = ""
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Up:
+            if not self._history:
+                return
+            if self._history_index == -1:
+                self._pending = self.text()
+                self._history_index = len(self._history) - 1
+            elif self._history_index > 0:
+                self._history_index -= 1
+            self.setText(self._history[self._history_index])
+            return
+        elif event.key() == Qt.Key.Key_Down:
+            if self._history_index == -1:
+                return
+            if self._history_index < len(self._history) - 1:
+                self._history_index += 1
+                self.setText(self._history[self._history_index])
+            else:
+                self._history_index = -1
+                self.setText(self._pending)
+            return
+        else:
+            if self._history_index != -1:
+                self._history_index = -1
+            super().keyPressEvent(event)
+
+
 class SerialReaderThread(QThread):
     """Background thread that reads from serial port and emits data."""
     data_received = pyqtSignal(bytes)
@@ -4697,7 +4746,7 @@ class SerialMonitor(QWidget):
         ir_layout.setContentsMargins(10, 6, 10, 6)
         ir_layout.setSpacing(8)
 
-        self.send_input = QLineEdit()
+        self.send_input = HistoryLineEdit()
         self.send_input.setPlaceholderText("Type message to send...")
         self.send_input.returnPressed.connect(self._send)
         ir_layout.addWidget(self.send_input, stretch=1)
@@ -4839,6 +4888,7 @@ class SerialMonitor(QWidget):
         ending_map = {"NL": "\n", "CR": "\r", "CR+NL": "\r\n", "None": ""}
         ending = ending_map.get(self.line_ending_combo.currentText(), "\n")
         self._reader.write_data((text + ending).encode("utf-8"))
+        self.send_input.add_to_history(text)
         self.send_input.clear()
 
     def cleanup(self):
