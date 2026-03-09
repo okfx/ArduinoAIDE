@@ -196,7 +196,8 @@ class WorkingSet:
                 f"[Included {len(included)} file(s), {len(stubs)} excluded by budget]")
             parts.append("")
             for e in included:
-                parts.append(f"========== FILE: {e.rel_path} ==========")
+                label = "ACTIVE FILE" if e.priority == 0 else "FILE"
+                parts.append(f"========== {label}: {e.rel_path} ==========")
                 parts.append(e.content)
                 parts.append(f"========== END: {e.rel_path} ==========\n")
         if stubs:
@@ -2369,7 +2370,8 @@ class ChatPanel(QWidget):
         msg += (
             "\n[REMINDER: You are inside an IDE. You CAN and MUST edit files directly. "
             "Use <<<EDIT path\\n<<<OLD\\n...\\n>>>NEW\\n...\\n>>>END to modify files. "
-            "NEVER say you cannot edit files. ALWAYS output code edits when asked.]\n"
+            "NEVER say you cannot edit files. ALWAYS output code edits when asked. "
+            "Edit the file the USER mentions, NOT the active file unless they ask for it.]\n"
             f"\n[USER REQUEST:]\n{text}"
         )
 
