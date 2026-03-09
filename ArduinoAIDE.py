@@ -2166,6 +2166,7 @@ class ChatPanel(QWidget):
         "clear":   "Clear conversation history",
         "model":   "Switch AI model — /model <name>",
         "compact": "Summarize and compress conversation history",
+        "fix":     "Ask AI to fix compile errors using diagnostics",
         "help":    "Show available slash commands",
         "context": "Show what the AI sees (file list, git status, context size)",
     }
@@ -2273,6 +2274,8 @@ class ChatPanel(QWidget):
             self._cmd_compact()
         elif cmd == "help":
             self._cmd_help()
+        elif cmd == "fix":
+            self._cmd_fix()
         elif cmd == "context":
             self._cmd_context()
         elif cmd == "debug-ws":
@@ -2371,6 +2374,26 @@ class ChatPanel(QWidget):
         for cmd, desc in self.SLASH_COMMANDS.items():
             lines.append(f"  /{cmd}  —  {desc}")
         self._add_info_msg("\n".join(lines), C['fg'])
+
+    def _cmd_fix(self):
+        """Send a compile-fix request using structured diagnostics."""
+        if not self._error_context:
+            self._add_info_msg(
+                "No compile errors to fix. Compile first (Ctrl+R).", C['fg_warn'])
+            return
+        n_diags = len(self._error_diagnostics)
+        n_errors = sum(1 for d in self._error_diagnostics if d.severity == "error")
+        if n_diags:
+            self._add_info_msg(
+                f"Sending {n_diags} diagnostics ({n_errors} errors) to AI...",
+                C['fg_dim'])
+        # Enable error attachment and send a focused fix prompt
+        self.send_errors_btn.setChecked(True)
+        self._send_prompt(
+            "Fix the compile errors shown above. Make minimal, targeted edits. "
+            "Do not refactor or change unrelated code. "
+            "Explain briefly what you changed and why.",
+            display_text="/fix")
 
     def _cmd_context(self):
         """Show the full AI context preview."""
@@ -5114,6 +5137,7 @@ class MainWindow(QMainWindow):
                     QTimer.singleShot(0, lambda: self.compiler_output.append_output("\nCompilation failed.", C["fg_err"]))
                     QTimer.singleShot(0, lambda: self.chat_panel.set_error_context(
                         self._compiler_errors, self._compiler_diagnostics))
+                    QTimer.singleShot(0, self._show_fix_errors_btn)
             except FileNotFoundError:
                 QTimer.singleShot(0, lambda: self.compiler_output.append_output("arduino-cli not found.", C["fg_err"]))
             except subprocess.TimeoutExpired:
@@ -5208,6 +5232,12 @@ class MainWindow(QMainWindow):
                 self._compiler_errors, getattr(self, '_compiler_diagnostics', []))
             self.chat_panel.send_errors_btn.setChecked(True)
             self._switch_view(1); self.chat_panel.input_field.setFocus()
+
+    def _show_fix_errors_btn(self):
+        """Show a hint in compiler output and auto-switch to chat for /fix."""
+        n = len(self._compiler_diagnostics)
+        hint = f"\nType /fix in AI Chat to auto-fix ({n} diagnostic{'s' if n != 1 else ''})"
+        self.compiler_output.append_output(hint, C["teal"])
 
     def closeEvent(self, event):
         # Save application state before closing
