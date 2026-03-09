@@ -14,10 +14,14 @@ This is the most important view aesthetically. Get this right.
 │                                                               │
 │  QScrollArea (flex: 1)                                        │
 │  bg: C['bg_dark'] (#1a1a1a)                                   │
-│  padding: 20px horizontal, 16px vertical                      │
-│  spacing: 20px between message groups                         │
 │                                                               │
-│  Messages flow here...                                        │
+│  ┌─ Outer container (fills scroll area) ───────────────────┐  │
+│  │           ┌─ Inner column (max 800px) ──────┐           │  │
+│  │  stretch  │ padding: 20px H, 16px V         │  stretch  │  │
+│  │           │ spacing: 20px between messages   │           │  │
+│  │           │ Messages flow here...            │           │  │
+│  │           └─────────────────────────────────┘           │  │
+│  └─────────────────────────────────────────────────────────┘  │
 │                                                               │
 ├───────────────────────────────────────────────────────────────┤
 │ Apply Bar (hidden unless edits found)                         │
@@ -29,6 +33,32 @@ This is the most important view aesthetically. Get this right.
 │ Bottom buttons row                                            │
 │ height: ~32px, bg: C['bg_dark']                               │
 └───────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Centered Column Layout
+
+The chat messages are displayed in a centered column with a max-width of 800px. On wide windows, equal space appears on both sides; on narrow windows, the column fills the available width.
+
+```python
+# Outer container fills the scroll area width
+outer_container = QWidget()
+outer_layout = QHBoxLayout(outer_container)
+outer_layout.addStretch()
+
+# Inner column is centered, max-width 800px
+chat_container = QWidget()
+chat_container.setMaximumWidth(800)
+chat_container.setSizePolicy(Expanding, Preferred)
+chat_layout = QVBoxLayout(chat_container)
+chat_layout.setContentsMargins(20, 16, 20, 16)
+chat_layout.setSpacing(20)
+chat_layout.addStretch()
+
+outer_layout.addWidget(chat_container)
+outer_layout.addStretch()
+scroll_area.setWidget(outer_container)
 ```
 
 ---
@@ -66,12 +96,12 @@ Layout:
         alignment: right
         style: color: C['fg_link'] (#7aafff), FONT_CHAT_BOLD
         padding-right: 8px
-      QHBoxLayout
+      QHBoxLayout (margins: 0, 0, 12, 0)  ← 12px right margin for breathing room
         stretch (pushes bubble right)
         QFrame bubble
-          max-width: 500px
+          max-width: 600px
           style: background: C['bg_input'] (#2a2a2a), border-radius: 14px
-          QVBoxLayout (margins: 12, 10, 12, 10)
+          QVBoxLayout (margins: 16, 12, 16, 12)
             QLabel text
               word-wrap: true
               format: PlainText
@@ -79,10 +109,12 @@ Layout:
 ```
 
 **Key details:**
-- The bubble should NOT stretch to full width. It hugs the text content, up to 500px max.
+- The bubble should NOT stretch to full width. It hugs the text content, up to 600px max.
 - 14px border-radius gives the pill/bubble shape.
+- 12px right margin inside the row provides breathing room from the column edge.
 - Background is `C['bg_input']` (#2a2a2a) — slightly lighter than the chat bg (#1a1a1a).
 - No border on the bubble. The contrast between #2a2a2a and #1a1a1a is enough.
+- Slash commands are also displayed as user message bubbles before being executed.
 
 ### AI Message (left-aligned, NO bubble)
 
@@ -117,6 +149,24 @@ Layout:
 - Speaker name is the same 14px size as the message text, just bold and teal.
 - The streaming QTextEdit auto-resizes its height as tokens arrive.
 - Scrollbars must be off on the QTextEdit — the parent QScrollArea handles scrolling.
+
+### Stats Row (below AI message during streaming)
+
+During AI streaming, a stats row appears below the AI message showing a spinning gear and live token counter.
+
+```
+Layout:
+  QWidget (transparent)
+    QHBoxLayout (margins: 2, 4, 0, 4, spacing: 6)
+      SpinnerWidget (24x24 animated teal gear)
+      QLabel "142 tokens · 3.2s"
+        style: color: C['fg_dim'], FONT_SMALL, transparent
+      stretch
+
+On completion, spinner stops/hides and label updates to final stats:
+  "247 tokens · 5.1s · 48.4 tok/s"
+  style changes to: color: C['fg_muted']
+```
 
 ### Error Message (left-aligned)
 
@@ -181,42 +231,6 @@ QLabel text
 
 ---
 
-## Scroll Area Setup
-
-```python
-scroll_area = QScrollArea()
-scroll_area.setWidgetResizable(True)
-scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-scroll_area.setStyleSheet(f"""
-    QScrollArea {{
-        background-color: {C['bg_dark']};
-        border: none;
-    }}
-    QScrollBar:vertical {{
-        background: {C['bg_dark']};
-        width: 8px;
-    }}
-    QScrollBar::handle:vertical {{
-        background: {C['border_light']};
-        border-radius: 4px;
-        min-height: 20px;
-    }}
-    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-        height: 0px;
-    }}
-""")
-
-_chat_container = QWidget()
-_chat_container.setStyleSheet(f"background:{C['bg_dark']};")
-chat_layout = QVBoxLayout(_chat_container)
-chat_layout.setContentsMargins(20, 16, 20, 16)
-chat_layout.setSpacing(20)
-chat_layout.addStretch()  # pushes messages to top
-scroll_area.setWidget(_chat_container)
-```
-
----
-
 ## Input Area
 
 ```python
@@ -240,16 +254,53 @@ input_field.setStyleSheet(f"""
     }}
 """)
 
-# Send button
+# Send button — min-width 72px, padding-based sizing
 send_btn.setStyleSheet(
     f"background:{C['teal']};color:white;border:none;"
-    f"border-radius:10px;font-weight:600;padding:8px 16px;{FONT_CHAT}")
+    f"border-radius:10px;font-weight:600;padding:8px 20px;{FONT_CHAT}")
 
-# Stop button
+# Stop button — min-width 72px, padding-based sizing
 stop_btn.setStyleSheet(
     f"background:{C['bg_input']};color:{C['fg']};border:1px solid {C['border_light']};"
-    f"border-radius:10px;padding:8px 14px;font-size:12px;")
+    f"border-radius:10px;padding:8px 20px;{FONT_CHAT}")
 ```
+
+---
+
+## Slash Command Autocomplete Popup
+
+When the user types `/` in the input field, a popup appears above the input showing matching commands.
+
+```python
+_slash_popup = QListWidget()
+_slash_popup.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+_slash_popup.setStyleSheet(f"""
+    QListWidget {{
+        background: {C['bg_input']};
+        border: 1px solid {C['border_light']};
+        border-radius: 6px;
+        color: {C['fg']};
+        {FONT_CHAT}
+        padding: 4px;
+    }}
+    QListWidget::item {{
+        padding: 6px 10px;
+        border-radius: 4px;
+    }}
+    QListWidget::item:selected {{
+        background: {C['bg_hover']};
+    }}
+""")
+```
+
+**Behavior:**
+- Shows on `/` keystroke, filters as user types (e.g. `/mo` shows only `/model`)
+- Max height: 240px (~6 items visible)
+- Max width: min(input_field.width(), 400px)
+- Positioned above the input field with 4px gap
+- Keyboard nav: Up/Down to navigate, Tab/Enter to select, Escape to dismiss
+- Click on item fills input with the command
+- Selecting a command fills the input field text; user presses Enter to execute
 
 ---
 
@@ -285,9 +336,10 @@ Call after: adding any message widget, every token during streaming.
 
 ## Common Mistakes to Avoid
 
-1. **User bubble stretches full width** — It must NOT. Use QHBoxLayout with stretch on the left and the bubble QFrame on the right. Set `bubble.setMaximumWidth(500)`.
+1. **User bubble stretches full width** — It must NOT. Use QHBoxLayout with stretch on the left and the bubble QFrame on the right. Set `bubble.setMaximumWidth(600)`.
 2. **AI text has a visible container** — The QTextEdit must be completely invisible. `background: transparent; border: none; padding: 0; margin: 0;`
 3. **Speaker names are a different size than message text** — Both must be 14px (FONT_CHAT). Speaker names are just bold.
 4. **Scrollbar on the AI QTextEdit** — Must be off. Only the parent QScrollArea scrolls.
 5. **AI QTextEdit doesn't resize** — Must connect `document().contentsChanged` to a handler that sets `setFixedHeight(max(24, int(doc.size().height()) + 4))`.
 6. **Hardcoded colors in chat code** — Every color must use `C['key']`.
+7. **Messages not centered** — The chat column must be max-width 800px, centered via outer HBoxLayout with stretches on both sides.

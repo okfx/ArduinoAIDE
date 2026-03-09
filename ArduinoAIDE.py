@@ -10,7 +10,7 @@ Requirements:
     pip3 install PyQt6 PyQt6-QScintilla requests
 """
 
-import sys, os, json, glob, re, threading, subprocess, math, html
+import sys, os, json, glob, re, threading, subprocess, math, html, time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -125,9 +125,9 @@ BTN_TOOLBAR = (f"background:{C['teal']};color:white;border:none;"
 BTN_GHOST = (f"background:transparent;color:{C['teal']};border:none;"
              f"{FONT_SMALL}text-decoration:underline;")
 BTN_CHAT_SEND = (f"background:{C['teal']};color:white;border:none;"
-                 f"border-radius:10px;font-weight:600;padding:8px 16px;{FONT_CHAT}")
+                 f"border-radius:10px;font-weight:600;padding:8px 20px;{FONT_CHAT}")
 BTN_CHAT_STOP = (f"background:{C['bg_input']};color:{C['fg']};border:1px solid {C['border_light']};"
-                 f"border-radius:10px;padding:8px 14px;{FONT_CHAT}")
+                 f"border-radius:10px;padding:8px 20px;{FONT_CHAT}")
 
 PANEL_HEADER_STYLE = (
     f"background: {C['bg']}; border-bottom: 1px solid {C['border']};"
@@ -1541,6 +1541,11 @@ class ChatPanel(QWidget):
         self._use_working_set_context = True      # WorkingSet is default; /debug-use-ws off for old path
         self._last_prompt_stats = None            # dict: stats from the last actual prompt sent
         self._last_work_result = None             # AIWorkResult from most recent AI turn
+        self._gen_start_time = None               # time.time() when generation started
+        self._gen_token_count = 0                  # token count during streaming
+        self._stats_widget = None                  # stats row widget during streaming
+        self._stats_label = None                   # QLabel showing token/time stats
+        self._stats_spinner = None                 # SpinnerWidget in stats row
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1591,13 +1596,25 @@ class ChatPanel(QWidget):
         """)
         self._chat_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Outer container fills scroll area; inner column is centered & max-width
+        outer_container = QWidget()
+        outer_container.setStyleSheet(f"background:{C['bg_dark']};")
+        outer_layout = QHBoxLayout(outer_container)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        outer_layout.addStretch()
         chat_container = QWidget()
         chat_container.setStyleSheet(f"background:{C['bg_dark']};")
+        chat_container.setMaximumWidth(800)
+        chat_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._chat_layout = QVBoxLayout(chat_container)
         self._chat_layout.setContentsMargins(20, 16, 20, 16)
         self._chat_layout.setSpacing(20)
         self._chat_layout.addStretch()
-        self._chat_scroll.setWidget(chat_container)
+        outer_layout.addWidget(chat_container)
+        outer_layout.addStretch()
+        self._chat_scroll.setWidget(outer_container)
         self._current_ai_widget = None
         layout.addWidget(self._chat_scroll)
 
@@ -1637,16 +1654,45 @@ class ChatPanel(QWidget):
             QLineEdit:focus {{ border-color: {C['teal']}; }}
         """)
         self.input_field.returnPressed.connect(self.send_message)
+        self.input_field.textChanged.connect(self._on_input_text_changed)
+        self.input_field.installEventFilter(self)
         il.addWidget(self.input_field)
 
+        # Slash command autocomplete popup
+        self._slash_popup = QListWidget()
+        self._slash_popup.setWindowFlags(
+            Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self._slash_popup.setStyleSheet(f"""
+            QListWidget {{
+                background: {C['bg_input']};
+                border: 1px solid {C['border_light']};
+                border-radius: 6px;
+                color: {C['fg']};
+                {FONT_CHAT}
+                padding: 4px;
+            }}
+            QListWidget::item {{
+                padding: 6px 10px;
+                border-radius: 4px;
+            }}
+            QListWidget::item:selected {{
+                background: {C['bg_hover']};
+            }}
+        """)
+        self._slash_popup.setMaximumHeight(240)
+        self._slash_popup.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._slash_popup.hide()
+        self._slash_popup.itemClicked.connect(self._on_slash_selected)
+
         self.send_btn = QPushButton("Send")
-        self.send_btn.setFixedWidth(60)
+        self.send_btn.setMinimumWidth(72)
         self.send_btn.setStyleSheet(BTN_CHAT_SEND)
         self.send_btn.clicked.connect(self.send_message)
         il.addWidget(self.send_btn)
 
         self.stop_btn = QPushButton("Stop")
-        self.stop_btn.setFixedWidth(52)
+        self.stop_btn.setMinimumWidth(72)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setStyleSheet(BTN_CHAT_STOP)
         self.stop_btn.clicked.connect(self.stop_generation)
@@ -1980,18 +2026,96 @@ class ChatPanel(QWidget):
         "context": "Show what the AI sees (file list, git status, context size)",
     }
 
+    def _on_input_text_changed(self, text):
+        """Show/hide/filter slash command autocomplete popup."""
+        if not text.startswith("/"):
+            self._slash_popup.hide()
+            return
+        query = text[1:].lower()
+        self._slash_popup.clear()
+        for cmd, desc in self.SLASH_COMMANDS.items():
+            if not query or cmd.startswith(query):
+                item = QListWidgetItem(f"/{cmd}  \u2014  {desc}")
+                item.setData(Qt.ItemDataRole.UserRole, cmd)
+                self._slash_popup.addItem(item)
+        if self._slash_popup.count() == 0:
+            self._slash_popup.hide()
+            return
+        # Position popup above the input field
+        global_pos = self.input_field.mapToGlobal(
+            self.input_field.rect().topLeft())
+        row_h = self._slash_popup.sizeHintForRow(0) if self._slash_popup.count() else 28
+        popup_h = min(row_h * self._slash_popup.count() + 10, 240)
+        self._slash_popup.setFixedWidth(min(self.input_field.width(), 400))
+        self._slash_popup.setFixedHeight(popup_h)
+        self._slash_popup.move(global_pos.x(), global_pos.y() - popup_h - 4)
+        self._slash_popup.show()
+        if self._slash_popup.count() > 0:
+            self._slash_popup.setCurrentRow(0)
+
+    def _on_slash_selected(self, item):
+        """User clicked a slash command in the popup."""
+        cmd = item.data(Qt.ItemDataRole.UserRole)
+        self.input_field.setText(f"/{cmd} ")
+        self.input_field.setFocus()
+        self._slash_popup.hide()
+
+    def eventFilter(self, obj, event):
+        """Handle keyboard navigation for slash command popup."""
+        if obj == self.input_field and self._slash_popup.isVisible():
+            from PyQt6.QtCore import QEvent
+            if event.type() == QEvent.Type.KeyPress:
+                key = event.key()
+                if key == Qt.Key.Key_Up:
+                    row = self._slash_popup.currentRow()
+                    if row > 0:
+                        self._slash_popup.setCurrentRow(row - 1)
+                    return True
+                elif key == Qt.Key.Key_Down:
+                    row = self._slash_popup.currentRow()
+                    if row < self._slash_popup.count() - 1:
+                        self._slash_popup.setCurrentRow(row + 1)
+                    return True
+                elif key == Qt.Key.Key_Tab:
+                    item = self._slash_popup.currentItem()
+                    if item:
+                        self._on_slash_selected(item)
+                    return True
+                elif key == Qt.Key.Key_Escape:
+                    self._slash_popup.hide()
+                    return True
+                elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    # If popup is showing and text is just a partial command,
+                    # select the item; otherwise let send_message handle it
+                    text = self.input_field.text().strip()
+                    matched_cmd = None
+                    for cmd in self.SLASH_COMMANDS:
+                        if text == f"/{cmd}" or text.startswith(f"/{cmd} "):
+                            matched_cmd = cmd
+                            break
+                    if not matched_cmd:
+                        item = self._slash_popup.currentItem()
+                        if item:
+                            self._on_slash_selected(item)
+                            return True
+                    # Full command typed — let send_message handle it
+                    self._slash_popup.hide()
+        return super().eventFilter(obj, event)
+
     def send_message(self):
         text = self.input_field.text().strip()
         if not text:
             return
+        self._slash_popup.hide()
         if text.startswith("/"):
-            self.input_field.clear()
             self._handle_slash_command(text)
             return
         self._send_prompt(text, display_text=text)
 
     def _handle_slash_command(self, text):
         """Parse and dispatch a /command."""
+        self._add_user_msg(text)
+        self.input_field.clear()
         parts = text.split(None, 1)
         cmd = parts[0][1:].lower()  # strip leading /
         args = parts[1] if len(parts) > 1 else ""
@@ -2260,6 +2384,27 @@ class ChatPanel(QWidget):
         # Create AI response widget (left-aligned, no bubble)
         self._add_ai_msg()
 
+        # Create stats row with spinner + live token counter
+        self._gen_start_time = time.time()
+        self._gen_token_count = 0
+        stats_wrapper = QWidget()
+        stats_wrapper.setStyleSheet("background: transparent;")
+        stats_hl = QHBoxLayout(stats_wrapper)
+        stats_hl.setContentsMargins(2, 4, 0, 4)
+        stats_hl.setSpacing(6)
+        spinner = SpinnerWidget()
+        spinner.start()
+        stats_hl.addWidget(spinner)
+        stats_lbl = QLabel("0 tokens")
+        stats_lbl.setStyleSheet(
+            f"color:{C['fg_dim']};{FONT_SMALL}background:transparent;border:none;")
+        stats_hl.addWidget(stats_lbl)
+        stats_hl.addStretch()
+        self._chat_layout.insertWidget(self._chat_layout.count() - 1, stats_wrapper)
+        self._stats_widget = stats_wrapper
+        self._stats_label = stats_lbl
+        self._stats_spinner = spinner
+
         self.worker.messages = list(self._conversation)
         if self.thread.isRunning():
             self.worker.stop()
@@ -2279,6 +2424,7 @@ class ChatPanel(QWidget):
                 self.thread.terminate()
                 self.thread.wait(1000)
                 self._setup_worker_thread()
+        self._finalize_stats(suffix=" (stopped)")
         self.input_field.setEnabled(True)
         self.send_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
@@ -2292,6 +2438,12 @@ class ChatPanel(QWidget):
             cur.movePosition(QTextCursor.MoveOperation.End)
             cur.insertText(t)
             self._current_ai_widget.setTextCursor(cur)
+        # Update live stats
+        self._gen_token_count += 1
+        if self._stats_label and self._gen_start_time:
+            elapsed = time.time() - self._gen_start_time
+            self._stats_label.setText(
+                f"{self._gen_token_count} tokens \u00b7 {elapsed:.1f}s")
         self._scroll_to_bottom()
 
     # Styles for code blocks and edit blocks in AI responses (QTextEdit HTML)
@@ -2400,6 +2552,8 @@ class ChatPanel(QWidget):
             result = AIWorkResult(assistant_text=self._current_response)
             self._parse_edits(self._current_response, result)
             self._last_work_result = result
+        # Finalize stats — stop spinner, show final stats
+        self._finalize_stats()
         self._current_ai_widget = None
         self.input_field.setEnabled(True)
         self.send_btn.setEnabled(True)
@@ -2407,7 +2561,26 @@ class ChatPanel(QWidget):
         self.input_field.setFocus()
         self.generation_finished.emit()
 
+    def _finalize_stats(self, suffix=""):
+        """Stop spinner and show final token/time stats."""
+        if self._stats_spinner:
+            self._stats_spinner.stop()
+            self._stats_spinner.hide()
+        if self._stats_label and self._gen_start_time:
+            elapsed = time.time() - self._gen_start_time
+            tok_s = self._gen_token_count / elapsed if elapsed > 0 else 0
+            self._stats_label.setText(
+                f"{self._gen_token_count} tokens \u00b7 {elapsed:.1f}s"
+                f" \u00b7 {tok_s:.1f} tok/s{suffix}")
+            self._stats_label.setStyleSheet(
+                f"color:{C['fg_muted']};{FONT_SMALL}background:transparent;border:none;")
+        self._stats_widget = None
+        self._stats_label = None
+        self._stats_spinner = None
+        self._gen_start_time = None
+
     def _on_error(self, m):
+        self._finalize_stats(suffix=" (error)")
         # Show error with "Error" speaker label
         wrapper = QWidget()
         wrapper.setStyleSheet("background: transparent;")
@@ -2481,9 +2654,9 @@ class ChatPanel(QWidget):
             self._add_info_msg(
                 f'Found {n} code edit{"s" if n > 1 else ""} — '
                 f'use the Apply bar below to apply.', C['fg_ok'])
-        else:
-            # Fallback: detect fenced code blocks (```...```) and offer to insert
-            self._parse_code_blocks(response)
+        # No fallback — if the AI didn't use <<<EDIT or <<<FILE syntax,
+        # we do NOT offer to blindly replace files with code block contents.
+        # The SYSTEM_PROMPT instructs the AI to use EDIT/FILE blocks.
 
     def _track_ai_edited_file(self, filename):
         """Record that the AI edited this file (for working set priority)."""
@@ -2576,35 +2749,6 @@ class ChatPanel(QWidget):
         self.apply_bar.hide()
         self._pending_edits = []
 
-    def _parse_code_blocks(self, response):
-        """Fallback: detect fenced code blocks and offer to insert into current file."""
-        block_pat = re.compile(r'```(?:\w*)\n(.*?)```', re.DOTALL)
-        blocks = block_pat.findall(response)
-        if not blocks:
-            return
-        # Try to determine target file from current editor
-        current = None
-        if self._editor_ref:
-            current = self._editor_ref.current_file()
-        if not current:
-            return
-        basename = os.path.basename(current)
-        # Create "file" type edits for each code block so the Apply bar can handle them
-        edits = []
-        for code in blocks:
-            code = code.strip()
-            if len(code) > 20:  # Skip trivially small snippets
-                edits.append(("file", basename, None, code))
-        if edits:
-            self._pending_edits = edits
-            n = len(edits)
-            self.apply_label.setText(
-                f"{n} code block{'s' if n > 1 else ''} detected — apply to {basename}?")
-            self.apply_bar.show()
-            self._add_info_msg(
-                f'No EDIT blocks found, but {n} code block{"s" if n > 1 else ""} detected. '
-                f'Click Apply to replace {basename} with the code.', C['fg_warn'])
-
     def clear_chat(self):
         # Remove all message widgets from the chat layout (keep the stretch)
         while self._chat_layout.count() > 1:
@@ -2677,14 +2821,14 @@ class ChatPanel(QWidget):
         vl.addWidget(speaker)
         # Bubble row
         row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
+        row.setContentsMargins(0, 0, 12, 0)
         row.addStretch()
         bubble = QFrame()
-        bubble.setMaximumWidth(500)
+        bubble.setMaximumWidth(600)
         bubble.setStyleSheet(
             f"QFrame {{ background-color:{C['bg_input']}; border-radius:14px; }}")
         bl = QVBoxLayout(bubble)
-        bl.setContentsMargins(12, 10, 12, 10)
+        bl.setContentsMargins(16, 12, 16, 12)
         bl.setSpacing(8)
         # Text label
         text_label = QLabel(text)
@@ -4911,6 +5055,22 @@ def _ensure_ollama():
             pass
 
 
+def _ensure_app_bundle():
+    """Auto-create ArduinoAIDE.app if it doesn't exist (macOS Finder launch)."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    app_dir = os.path.join(script_dir, "ArduinoAIDE.app")
+    if os.path.isdir(app_dir):
+        return  # already exists
+    create_script = os.path.join(script_dir, "create_app.sh")
+    if os.path.isfile(create_script):
+        try:
+            subprocess.run(["bash", create_script], cwd=script_dir,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=10)
+        except Exception:
+            pass  # non-critical — app still works from terminal
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(WINDOW_TITLE)
@@ -4919,6 +5079,8 @@ def main():
     app_font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(app_font)
     app.setStyleSheet(STYLESHEET)
+    # Auto-create .app bundle for Finder launch (if missing)
+    _ensure_app_bundle()
     # Ensure Ollama is running
     _ensure_ollama()
     # Load persisted configs
@@ -4935,6 +5097,8 @@ def main():
     OLLAMA_MODEL = config.get("ollama_model", "teensy-coder")
     w = MainWindow(project_path, config=config)
     w.show()
+    # Auto-preload the AI model after UI is visible
+    QTimer.singleShot(500, w._load_model)
     sys.exit(app.exec())
 
 if __name__ == "__main__":

@@ -71,10 +71,12 @@ QTextEdit's rich text engine supports a subset of CSS 2.1. It does NOT support `
 
 ## Recent Work / Known State
 - **WorkingSet context system** — priority-based (0=active, 1=AI-edited, 2=open, 3=project), 12K token budget, replaces old full-project dump. Safety checks warn if critical files excluded.
-- **Slash commands** — `/clear`, `/model`, `/compact`, `/context`, `/help`, `/debug-ws`, `/debug-use-ws`
+- **Slash commands** — `/clear`, `/model`, `/compact`, `/context`, `/help`, `/debug-ws`, `/debug-use-ws` with autocomplete popup on `/`
 - **Code block rendering** — `_render_formatted_response()` post-renders fenced code blocks and EDIT/FILE blocks with styled HTML
 - **AIWorkResult** — typed container for AI responses (`ProposedEdit`, `AIWorkResult` dataclasses)
 - **Git context** — `_build_git_context()` injects branch, commits, diff stat into every AI prompt
+- **Chat layout** — centered 800px max-width column, streaming stats (spinner + token count + elapsed time)
+- **Model auto-preload** — `_load_model()` called via QTimer on startup to warm Ollama
 - Visual overhaul: icon-only toolbar buttons, widget-based chat bubbles, status bar, file browser
 - Board combo shows friendly names (e.g. "Teensy 4.0") but stores FQBN as item data — use `_current_fqbn()` to get the actual FQBN
 - Sidebar order: Code, AI Chat, Files, Git, (stretch), Settings at bottom
