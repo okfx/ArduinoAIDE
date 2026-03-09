@@ -240,6 +240,14 @@ class ProposedEdit:
     matched_text: str = ""        # actual text matched in file (for normalized matches)
 
 @dataclass
+class SymbolEntry:
+    """A single indexed symbol (function, global, type) in the project."""
+    name: str
+    rel_path: str       # relative path to source file
+    line: int           # 1-based line number
+    kind: str           # "function", "global", "type"
+
+@dataclass
 class StructuredDiagnostic:
     """A single compiler diagnostic parsed from gcc/arduino-cli output."""
     file: str
@@ -420,6 +428,7 @@ WINDOW_TITLE = "Teensy Ollama IDE"
 
 # File extensions recognized as project files (used by AI context and file scanner)
 PROJECT_EXTENSIONS = {".ino", ".cpp", ".c", ".h", ".hpp", ".md", ".txt", ".json", ".yaml", ".yml", ".cfg", ".ini"}
+TARGET_EXTENSIONS = {".ino", ".cpp", ".c", ".h", ".hpp"}  # code extensions for file-targeting detection
 PROJECT_SKIP_DIRS = {'.git', '__pycache__', 'build', 'node_modules', '.venv', 'venv'}
 
 SYSTEM_PROMPT = """You are an expert embedded C/C++ developer for Teensy microcontrollers (PJRC), running inside an IDE.
@@ -452,8 +461,9 @@ Rules:
 - You can include multiple EDIT or FILE blocks in one response.
 - STRONGLY PREFER <<<EDIT over <<<FILE for ALL changes to existing files. <<<EDIT is safer because it only replaces what you specify. <<<FILE replaces THE ENTIRE FILE — any code you don't include will be DELETED.
 - ONLY use <<<FILE for: (a) creating brand new files, or (b) completely rewriting a file from scratch when more than 50% of the code changes.
-- For adding code (comments, functions, includes), use <<<EDIT with enough OLD context to find the insertion point.
-- NEVER use <<<FILE just to add a comment or make a small change — use <<<EDIT.
+- For adding code near a known landmark WITHOUT modifying existing code, prefer <<<INSERT_BEFORE or <<<INSERT_AFTER (see below). These only need a short anchor — no OLD/NEW replacement.
+- You can also use <<<EDIT with enough OLD context to find the insertion point.
+- NEVER use <<<FILE just to add a comment or make a small change — use <<<EDIT or <<<INSERT_BEFORE/<<<INSERT_AFTER.
 - You can create files in new subdirectories — the IDE will create the directories.
 - You can edit and create .ino, .cpp, .c, .h, .hpp, .md, .txt, .json, and other project files.
 - Keep explanations brief and focused.
@@ -487,7 +497,27 @@ Example — creating a new file:
 // Utility functions
 void initPins();
 #endif
->>>FILE"""
+>>>FILE
+
+To INSERT new code before or after a known anchor line (without replacing anything):
+<<<INSERT_BEFORE path/to/file.ext
+<<<ANCHOR
+void setup() {
+>>>ANCHOR
+<<<CONTENT
+void blinkLED(int pin, int ms) {
+  digitalWrite(pin, HIGH);
+  delay(ms);
+  digitalWrite(pin, LOW);
+}
+>>>CONTENT
+
+<<<INSERT_AFTER works the same way but inserts AFTER the anchor.
+Use INSERT_BEFORE/INSERT_AFTER when:
+- Adding a new function, #include, or variable near a known landmark
+- You don't need to modify the anchor code, just add code next to it
+- The anchor is a short, unique snippet (e.g., a function signature, #include line)
+Use <<<EDIT when you need to REPLACE existing code."""
 
 # =============================================================================
 # Stylesheet
@@ -1765,6 +1795,8 @@ class ChatPanel(QWidget):
         self._ai_edited_files = set()             # rel_paths of files the AI has edited
         self._use_working_set_context = True      # WorkingSet is default; /debug-use-ws off for old path
         self._last_prompt_stats = None            # dict: stats from the last actual prompt sent
+        self._target_override = None              # str: rel_path of file detected in user message (per-prompt only)
+        self._symbol_index = {}                   # {name: [SymbolEntry, ...]} across all project files
         self._last_work_result = None             # AIWorkResult from most recent AI turn
         self._gen_start_time = None               # time.time() when generation started
         self._gen_token_count = 0                  # token count during streaming
@@ -1821,25 +1853,16 @@ class ChatPanel(QWidget):
         """)
         self._chat_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # Outer container fills scroll area; inner column is centered & max-width
-        outer_container = QWidget()
-        outer_container.setStyleSheet(f"background:{C['bg_dark']};")
-        outer_layout = QHBoxLayout(outer_container)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.setSpacing(0)
-        outer_layout.addStretch()
+        # Chat container fills the full scroll area width
         chat_container = QWidget()
         chat_container.setStyleSheet(f"background:{C['bg_dark']};")
-        chat_container.setMaximumWidth(960)
         chat_container.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._chat_layout = QVBoxLayout(chat_container)
-        self._chat_layout.setContentsMargins(12, 16, 12, 16)
+        self._chat_layout.setContentsMargins(16, 16, 16, 16)
         self._chat_layout.setSpacing(24)
         self._chat_layout.addStretch()
-        outer_layout.addWidget(chat_container)
-        outer_layout.addStretch()
-        self._chat_scroll.setWidget(outer_container)
+        self._chat_scroll.setWidget(chat_container)
         self._current_ai_widget = None
         layout.addWidget(self._chat_scroll)
 
@@ -2055,6 +2078,9 @@ class ChatPanel(QWidget):
         # Update system prompt (picks up .aide_prompt if present)
         if self._conversation and self._conversation[0]["role"] == "system":
             self._conversation[0]["content"] = self._build_system_prompt()
+        # Build symbol index after event loop returns (non-blocking)
+        self._symbol_index = {}
+        QTimer.singleShot(0, self._build_symbol_index)
 
     def set_error_context(self, e, diagnostics=None):
         self._error_context = e
@@ -2249,6 +2275,144 @@ class ChatPanel(QWidget):
             return os.path.join(proj, filename)
         return os.path.abspath(filename)
 
+    def _detect_named_files(self, user_text):
+        """Scan user message for filenames with code extensions or known function names.
+        Returns the rel_path of the best matching project file, or None.
+        Checks filenames first; falls back to symbol index for function names."""
+        proj = getattr(self, '_project_path', None) or ""
+        if not proj:
+            return None
+        # Tokenize on whitespace, commas, backticks, quotes, parens
+        import re as _re
+        tokens = _re.split(r'[\s,`\'"()\[\]]+', user_text)
+
+        # Phase 1: filename detection (existing logic)
+        candidates = []
+        for tok in tokens:
+            tok = tok.strip('.!?;:')
+            if not tok:
+                continue
+            ext = os.path.splitext(tok)[1].lower()
+            if ext in TARGET_EXTENSIONS:
+                candidates.append(tok)
+        if candidates:
+            all_files = self._scan_project_files(proj)
+            for cand in candidates:
+                if cand in all_files:
+                    return cand
+                cand_base = os.path.basename(cand)
+                matches = [rp for rp in all_files if os.path.basename(rp) == cand_base]
+                if len(matches) == 1:
+                    return matches[0]
+                if len(matches) > 1:
+                    return min(matches, key=len)
+
+        # Phase 2: function-name detection via symbol index
+        if self._symbol_index:
+            # Look for tokens that match a known function name
+            # Prefer "function" kind over "global"/"type"
+            for tok in tokens:
+                tok = tok.strip('.!?;:()').rstrip('(')
+                if not tok or len(tok) < 2:
+                    continue
+                entries = self._symbol_index.get(tok)
+                if not entries:
+                    continue
+                func_entries = [e for e in entries if e.kind == "function"]
+                if func_entries:
+                    # If all function entries point to the same file, use it
+                    files = list({e.rel_path for e in func_entries})
+                    if len(files) == 1:
+                        return files[0]
+                    # Multiple files — prefer the one with the shortest path
+                    return min(files, key=len)
+
+        return None
+
+    def _build_symbol_index(self):
+        """Walk all project files and extract function definitions, globals, and type
+        definitions using conservative regex patterns. Updates self._symbol_index.
+        Called after project open and after edits are applied. Non-blocking (fast scan).
+        Files that fail to parse are silently skipped."""
+        import re as _re
+        proj = getattr(self, '_project_path', None) or ""
+        if not proj:
+            self._symbol_index = {}
+            return
+
+        # Only index code files — skip .md/.json/etc.
+        CODE_EXTS = {".ino", ".cpp", ".c", ".h", ".hpp"}
+        all_files = self._scan_project_files(proj)
+        index = {}  # name -> list[SymbolEntry]
+
+        # Conservative patterns — prefer false negatives over false positives
+        # Function definitions: return-type name(args) NOT ending in ; or pure declarations
+        RE_FUNC = _re.compile(
+            r'^[a-zA-Z_][\w\s\*&:<>]+\s+(\w+)\s*\([^;{]*\)\s*(?:const\s*)?(?:override\s*)?(?:noexcept\s*)?[{]',
+            _re.MULTILINE)
+        # Global variables at file scope (not inside a block): type name = / type name;
+        RE_GLOBAL = _re.compile(
+            r'^(?:(?:static|extern|volatile|const)\s+)*[a-zA-Z_]\w+(?:\s*\*+)?\s+(\w+)\s*(?:=|;)',
+            _re.MULTILINE)
+        # Type definitions: struct/enum/typedef name
+        RE_TYPE = _re.compile(
+            r'^(?:struct|enum|typedef|class)\s+(\w+)', _re.MULTILINE)
+
+        for rel_path, content in all_files.items():
+            ext = os.path.splitext(rel_path)[1].lower()
+            if ext not in CODE_EXTS:
+                continue
+            try:
+                # Pre-compute line start offsets for O(1) line-number lookup
+                line_starts = [0]
+                for ch in content:
+                    if ch == '\n':
+                        line_starts.append(line_starts[-1] + 1)
+                    else:
+                        line_starts[-1] += 1
+                # Rebuild as cumulative byte offsets
+                offsets = [0]
+                pos = 0
+                for line_content in content.split('\n'):
+                    pos += len(line_content) + 1
+                    offsets.append(pos)
+
+                def offset_to_line(match_start):
+                    # Binary search for line number
+                    lo, hi = 0, len(offsets) - 1
+                    while lo < hi:
+                        mid = (lo + hi + 1) // 2
+                        if offsets[mid] <= match_start:
+                            lo = mid
+                        else:
+                            hi = mid - 1
+                    return lo + 1  # 1-based
+
+                for m in RE_FUNC.finditer(content):
+                    name = m.group(1)
+                    if name in ('if', 'for', 'while', 'switch', 'return', 'else'):
+                        continue
+                    entry = SymbolEntry(name, rel_path, offset_to_line(m.start()), "function")
+                    index.setdefault(name, []).append(entry)
+
+                for m in RE_TYPE.finditer(content):
+                    name = m.group(1)
+                    entry = SymbolEntry(name, rel_path, offset_to_line(m.start()), "type")
+                    index.setdefault(name, []).append(entry)
+
+                for m in RE_GLOBAL.finditer(content):
+                    name = m.group(1)
+                    # Skip names already indexed as functions or common keywords
+                    if name in index or name in ('if', 'for', 'while', 'return',
+                                                  'else', 'case', 'break', 'continue'):
+                        continue
+                    entry = SymbolEntry(name, rel_path, offset_to_line(m.start()), "global")
+                    index.setdefault(name, []).append(entry)
+            except Exception:
+                continue  # silently skip files that fail to parse
+
+        self._symbol_index = index
+
     def _build_file_context(self):
         """Build file context string for AI prompts. Uses WorkingSet with token budget
         by default. Hidden fallback to full-context via /debug-use-ws off."""
@@ -2302,6 +2466,17 @@ class ChatPanel(QWidget):
             else:
                 priority = 3
             self._working_set.add(abs_path, rel_path, priority, content)
+
+        # Per-prompt target override: promote named file to priority 0,
+        # demote active tab to priority 2 (open-tab) if different
+        if self._target_override and self._target_override in self._working_set.entries:
+            target_entry = self._working_set.entries[self._target_override]
+            if target_entry.priority != 0:
+                # Demote current priority-0 entry (active tab) to open-tab
+                for e in self._working_set.entries.values():
+                    if e.priority == 0 and e.rel_path != self._target_override:
+                        e.priority = 2
+                target_entry.priority = 0
 
         # Safety net: if active file wasn't found by scanner (wrong extension,
         # too large, etc.), inject it directly from the editor content
@@ -2370,6 +2545,7 @@ class ChatPanel(QWidget):
             "active_included": active_ok,
             "ai_edited_included": edited_ok,
             "warnings": warnings,
+            "target_override": self._target_override,
         }
         return context
 
@@ -2787,6 +2963,12 @@ class ChatPanel(QWidget):
             counts[label] = counts.get(label, 0) + 1
 
         live_mode = "WorkingSet (default)" if self._use_working_set_context else "old full-context (debug fallback)"
+        # Symbol index summary
+        sym_count = sum(len(v) for v in self._symbol_index.values())
+        sym_files = len({e.rel_path for entries in self._symbol_index.values()
+                         for e in entries})
+        sym_summary = (f"{sym_count} symbols across {sym_files} files"
+                       if self._symbol_index else "(empty — send a message first)")
         lines = [
             f"[debug] WorkingSet — {len(ws.entries)} entries, "
             f"~{ws.total_tokens:,} tokens total, budget={ws.budget:,}",
@@ -2794,6 +2976,7 @@ class ChatPanel(QWidget):
             f"  would include: {ws.included_count} files",
             f"  breakdown: {', '.join(f'{v} {k}' for k, v in sorted(counts.items()))}",
             f"  ai_edited_files: {sorted(self._ai_edited_files) if self._ai_edited_files else '(none)'}",
+            f"  symbol index: {sym_summary}",
             "",
         ]
         # Per-file listing sorted by priority then path
@@ -2814,6 +2997,9 @@ class ChatPanel(QWidget):
             lines.append(f"  tokens: ~{lps['tokens']:,}")
             lines.append(f"  active file included: {'yes' if lps['active_included'] else 'NO'}")
             lines.append(f"  all AI-edited included: {'yes' if lps['ai_edited_included'] else 'NO'}")
+            tgt = lps.get('target_override')
+            if tgt:
+                lines.append(f"  target override: {tgt} (detected in user message)")
             if lps['warnings']:
                 lines.append(f"  warnings ({len(lps['warnings'])}):")
                 for w in lps['warnings']:
@@ -2878,6 +3064,15 @@ class ChatPanel(QWidget):
 
     def _send_prompt(self, text, display_text=None, display_code=None):
         """Core send method used by both manual chat and AI actions."""
+        # Guard: reject if a generation is already in progress
+        if self.thread.isRunning():
+            self._add_info_msg(
+                "Please wait — model is currently responding.", C['fg_warn'])
+            return
+
+        # Detect named files in user message for per-prompt targeting override
+        self._target_override = self._detect_named_files(text)
+
         # Build the full message with automatic file + git context
         msg = self._build_file_context()
         git_ctx = self._build_git_context()
@@ -2886,13 +3081,24 @@ class ChatPanel(QWidget):
         if self.send_errors_btn.isChecked() and self._error_context:
             msg += "\n" + self._build_diagnostic_context() + "\n"
             self.send_errors_btn.setChecked(False)
-        msg += (
-            "\n[REMINDER: You are inside an IDE. You CAN and MUST edit files directly. "
-            "Use <<<EDIT path\\n<<<OLD\\n...\\n>>>NEW\\n...\\n>>>END to modify files. "
-            "NEVER say you cannot edit files. ALWAYS output code edits when asked. "
-            "Edit the file the USER mentions, NOT the active file unless they ask for it.]\n"
-            f"\n[USER REQUEST:]\n{text}"
-        )
+        # Targeting reminder — stronger when a named file was detected
+        if self._target_override:
+            target_reminder = (
+                f"\n[REMINDER: You are inside an IDE. You CAN and MUST edit files directly. "
+                "Use <<<EDIT path\\n<<<OLD\\n...\\n>>>NEW\\n...\\n>>>END to modify files. "
+                "NEVER say you cannot edit files. ALWAYS output code edits when asked.]\n"
+                f"(Edit {self._target_override} as requested — not the active file.)\n"
+                f"\n[USER REQUEST:]\n{text}"
+            )
+        else:
+            target_reminder = (
+                "\n[REMINDER: You are inside an IDE. You CAN and MUST edit files directly. "
+                "Use <<<EDIT path\\n<<<OLD\\n...\\n>>>NEW\\n...\\n>>>END to modify files. "
+                "NEVER say you cannot edit files. ALWAYS output code edits when asked. "
+                "Edit the file the USER mentions, NOT the active file unless they ask for it.]\n"
+                f"\n[USER REQUEST:]\n{text}"
+            )
+        msg += target_reminder
 
         # Show user message bubble (right-aligned)
         show = display_text or text
@@ -3147,9 +3353,10 @@ class ChatPanel(QWidget):
         self.thread.started.connect(self.worker.run)
 
     def _extract_edit_blocks(self, text):
-        """Parse <<<EDIT and <<<FILE blocks using a line-by-line state machine.
-        Handles >>> and <<< inside code content, blank lines between markers,
-        and trailing newlines in captured sections. Returns list[ProposedEdit]."""
+        """Parse <<<EDIT, <<<FILE, <<<INSERT_BEFORE, and <<<INSERT_AFTER blocks
+        using a line-by-line state machine. Handles >>> and <<< inside code
+        content, blank lines between markers, and trailing newlines in captured
+        sections. Returns list[ProposedEdit]."""
         edits = []
         lines = text.split('\n')
         state = 'idle'
@@ -3157,6 +3364,9 @@ class ChatPanel(QWidget):
         old_lines = []
         new_lines = []
         file_lines = []
+        insert_type = ''      # "insert_before" or "insert_after"
+        anchor_lines = []
+        content_lines = []
 
         for line in lines:
             stripped = line.strip()
@@ -3169,6 +3379,16 @@ class ChatPanel(QWidget):
                     filename = stripped[7:].strip()
                     file_lines = []
                     state = 'file'
+                elif stripped.startswith('<<<INSERT_BEFORE') and len(stripped) > 16:
+                    filename = stripped[16:].strip()
+                    insert_type = 'insert_before'
+                    anchor_lines = []; content_lines = []
+                    state = 'insert_expect_anchor'
+                elif stripped.startswith('<<<INSERT_AFTER') and len(stripped) > 15:
+                    filename = stripped[15:].strip()
+                    insert_type = 'insert_after'
+                    anchor_lines = []; content_lines = []
+                    state = 'insert_expect_anchor'
             elif state == 'expect_old':
                 if stripped == '<<<OLD':
                     state = 'old'
@@ -3195,6 +3415,28 @@ class ChatPanel(QWidget):
                     state = 'idle'; filename = ''; file_lines = []
                 else:
                     file_lines.append(line)
+            # INSERT_BEFORE / INSERT_AFTER states
+            elif state == 'insert_expect_anchor':
+                if stripped == '<<<ANCHOR':
+                    state = 'insert_anchor'
+            elif state == 'insert_anchor':
+                if stripped == '>>>ANCHOR':
+                    state = 'insert_expect_content'
+                else:
+                    anchor_lines.append(line)
+            elif state == 'insert_expect_content':
+                if stripped == '<<<CONTENT':
+                    state = 'insert_content'
+            elif state == 'insert_content':
+                if stripped == '>>>CONTENT':
+                    edits.append(ProposedEdit(
+                        insert_type, filename,
+                        '\n'.join(anchor_lines).rstrip('\n'),
+                        '\n'.join(content_lines).rstrip('\n')))
+                    state = 'idle'; filename = ''; insert_type = ''
+                    anchor_lines = []; content_lines = []
+                else:
+                    content_lines.append(line)
         return edits
 
     def _parse_edits(self, response, result=None):
@@ -3270,7 +3512,9 @@ class ChatPanel(QWidget):
         """Assign semantic operation to each pending edit and resolve file paths."""
         for edit in self._pending_edits:
             edit.resolved_path = self._resolve_file_path(edit.filename)
-            if edit.edit_type == "edit":
+            if edit.edit_type in ("insert_before", "insert_after"):
+                edit.operation = edit.edit_type
+            elif edit.edit_type == "edit":
                 edit.operation = "search_replace"
             elif edit.edit_type == "file":
                 if os.path.isfile(edit.resolved_path):
@@ -3286,6 +3530,8 @@ class ChatPanel(QWidget):
             edit.blocked = False
             if edit.operation == "search_replace":
                 self._validate_search_replace(edit)
+            elif edit.operation in ("insert_before", "insert_after"):
+                self._validate_insert(edit)
             elif edit.operation == "replace_file":
                 self._validate_replace_file(edit)
             elif edit.operation == "create_file":
@@ -3322,6 +3568,42 @@ class ChatPanel(QWidget):
             edit.warnings.append(
                 f"normalized anchor matches {len(norm_matches)} locations, "
                 f"will replace first only")
+            start, end = norm_matches[0]
+            edit.matched_text = content[start:end]
+        else:
+            edit.blocked = True
+            edit.warnings.append("anchor text not found in file")
+
+    def _validate_insert(self, edit):
+        """Validate an insert_before or insert_after edit.
+        Uses the same anchor matching as search_replace: exact first, then normalized."""
+        content = self._get_file_content_for_validation(edit)
+        if content is None:
+            edit.blocked = True
+            edit.warnings.append(f"file not found: {edit.filename}")
+            return
+        if not edit.old_text:
+            edit.blocked = True
+            edit.warnings.append("empty anchor text — cannot locate insertion point")
+            return
+        # 1. Exact match
+        count = content.count(edit.old_text)
+        if count == 1:
+            return  # unique match
+        if count > 1:
+            edit.warnings.append(
+                f"anchor matches {count} locations, will insert at first only")
+            return
+        # 2. Normalized whitespace fallback
+        norm_matches = _find_normalized_matches(content, edit.old_text)
+        if len(norm_matches) == 1:
+            start, end = norm_matches[0]
+            edit.matched_text = content[start:end]
+            edit.warnings.append("anchor matched using normalized whitespace")
+        elif len(norm_matches) > 1:
+            edit.warnings.append(
+                f"normalized anchor matches {len(norm_matches)} locations, "
+                f"will insert at first only")
             start, end = norm_matches[0]
             edit.matched_text = content[start:end]
         else:
@@ -3426,7 +3708,8 @@ class ChatPanel(QWidget):
                     errors.append(f"Could not create {edit.filename}: {e}")
                     continue
 
-            if not fp and edit.operation in ("search_replace", "replace_file"):
+            if not fp and edit.operation in ("search_replace", "replace_file",
+                                              "insert_before", "insert_after"):
                 if os.path.isfile(abs_path):
                     self._editor_ref.open_file(abs_path)
                     fp = abs_path
@@ -3471,6 +3754,35 @@ class ChatPanel(QWidget):
                     errors.append(
                         f"✗ Anchor not found in {edit.filename} — "
                         f"copy the change manually or ask AI to retry")
+            elif edit.operation in ("insert_before", "insert_after"):
+                files = self._editor_ref.get_all_files()
+                content = files.get(fp, "")
+                # Re-validate anchor at apply time
+                anchor = None
+                if edit.matched_text and edit.matched_text in content:
+                    anchor = edit.matched_text
+                elif edit.old_text and edit.old_text in content:
+                    anchor = edit.old_text
+                else:
+                    norm_matches = _find_normalized_matches(content, edit.old_text)
+                    if norm_matches:
+                        start, end = norm_matches[0]
+                        anchor = content[start:end]
+                if anchor is not None:
+                    if edit.operation == "insert_before":
+                        replacement = edit.new_text + "\n" + anchor
+                    else:
+                        replacement = anchor + "\n" + edit.new_text
+                    new_content = content.replace(anchor, replacement, 1)
+                    if self._editor_ref.set_file_content(fp, new_content):
+                        applied += 1
+                        self._track_ai_edited_file(edit.filename)
+                    else:
+                        errors.append(f"✗ Could not write {edit.filename}")
+                else:
+                    errors.append(
+                        f"✗ Anchor not found in {edit.filename} — "
+                        f"copy the change manually or ask AI to retry")
             elif edit.operation == "create_file":
                 # create_file but file is already open — replace content
                 if self._editor_ref.set_file_content(fp, edit.new_text):
@@ -3496,6 +3808,8 @@ class ChatPanel(QWidget):
         # Notify MainWindow to refresh file browser after creates/edits
         if applied > 0:
             self.edits_applied.emit()
+            # Rebuild symbol index after edits (non-blocking)
+            QTimer.singleShot(0, self._build_symbol_index)
             # Show recompile bar if there are active diagnostics
             if self._error_diagnostics:
                 self.recompile_bar.show()
@@ -3903,7 +4217,6 @@ class ChatPanel(QWidget):
         """Add a left-aligned AI message area with model name label."""
         wrapper = QWidget()
         wrapper.setStyleSheet("background: transparent;")
-        wrapper.setMaximumWidth(860)
         vl = QVBoxLayout(wrapper)
         vl.setContentsMargins(0, 0, 0, 0)
         vl.setSpacing(4)
