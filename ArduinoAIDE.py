@@ -42,7 +42,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QPushButton, QToolBar, QTabWidget, QTabBar,
     QLabel, QComboBox, QFileDialog, QMessageBox, QTextEdit,
     QGroupBox, QSizePolicy, QListWidget, QListWidgetItem,
-    QScrollArea, QFrame, QInputDialog, QStatusBar
+    QScrollArea, QFrame, QInputDialog, QStatusBar, QProgressBar
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread,
