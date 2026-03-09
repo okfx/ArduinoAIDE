@@ -1789,6 +1789,97 @@ class ChatPanel(QWidget):
         self._error_context = e
         self._error_diagnostics = diagnostics or []
 
+    def _build_diagnostic_context(self):
+        """Build structured diagnostic context for the AI prompt.
+        Includes a summary table plus targeted code excerpts around error lines.
+        Falls back to raw compiler text if no structured diagnostics are available."""
+        raw = self._error_context
+        diags = self._error_diagnostics
+
+        if not diags:
+            # No structured diagnostics — send raw text only
+            return f"[COMPILER ERRORS:]\n```\n{raw}\n```\n"
+
+        # --- Diagnostic summary table ---
+        parts = ["[COMPILER ERRORS — STRUCTURED DIAGNOSTICS:]", ""]
+        for i, d in enumerate(diags[:15]):  # Cap at 15 to avoid prompt bloat
+            loc = f"{d.file}:{d.line}"
+            if d.column:
+                loc += f":{d.column}"
+            parts.append(f"  {i+1}. [{d.severity}] {loc} — {d.message}")
+        if len(diags) > 15:
+            parts.append(f"  ... and {len(diags) - 15} more")
+        parts.append("")
+
+        # --- Code excerpts for diagnostic locations ---
+        # Group diagnostics by file, read each file once, show context window
+        proj = getattr(self, '_project_path', None) or ""
+        file_lines_cache = {}  # abs_path -> list of lines
+        seen_files = {}        # rel_path -> set of diagnostic line numbers
+
+        for d in diags[:15]:
+            if d.file == "<linker>" or d.line == 0:
+                continue
+            # Resolve to absolute path
+            if os.path.isabs(d.file):
+                abs_path = d.file
+            elif proj:
+                abs_path = os.path.join(proj, d.file)
+            else:
+                abs_path = os.path.abspath(d.file)
+            # Try to get a relative path for display
+            rel = os.path.relpath(abs_path, proj) if proj else d.file
+            if rel not in seen_files:
+                seen_files[rel] = set()
+            seen_files[rel].add(d.line)
+            # Cache the file contents
+            if abs_path not in file_lines_cache:
+                try:
+                    with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
+                        file_lines_cache[abs_path] = f.readlines()
+                except OSError:
+                    file_lines_cache[abs_path] = None
+
+        # Build excerpts — max 3 files to keep context bounded
+        excerpt_count = 0
+        for rel, line_nums in sorted(seen_files.items()):
+            if excerpt_count >= 3:
+                parts.append(f"[... excerpts for remaining files omitted]")
+                break
+            # Find the cached content
+            abs_path = os.path.join(proj, rel) if proj else os.path.abspath(rel)
+            lines = file_lines_cache.get(abs_path)
+            if not lines:
+                continue
+
+            # Merge nearby line ranges (5 lines above/below each diagnostic)
+            WINDOW = 5
+            ranges = []
+            for ln in sorted(line_nums):
+                start = max(1, ln - WINDOW)
+                end = min(len(lines), ln + WINDOW)
+                if ranges and start <= ranges[-1][1] + 2:
+                    # Merge with previous range
+                    ranges[-1] = (ranges[-1][0], end)
+                else:
+                    ranges.append((start, end))
+
+            parts.append(f"[CODE EXCERPT: {rel}]")
+            for rng_start, rng_end in ranges:
+                for i in range(rng_start, rng_end + 1):
+                    marker = " >>>" if i in line_nums else "    "
+                    parts.append(f"{marker} {i:4d} | {lines[i-1].rstrip()}")
+                if rng_end < len(lines):
+                    parts.append("    ...")
+            parts.append("")
+            excerpt_count += 1
+
+        # Append raw output for human/model reference
+        parts.append("[RAW COMPILER OUTPUT:]")
+        parts.append(f"```\n{raw}\n```")
+
+        return "\n".join(parts) + "\n"
+
     def _build_system_prompt(self):
         """Build system prompt, prepending project-level .aide_prompt if found."""
         base = SYSTEM_PROMPT
@@ -2417,7 +2508,7 @@ class ChatPanel(QWidget):
         if git_ctx:
             msg += f"\n{git_ctx}\n"
         if self.send_errors_btn.isChecked() and self._error_context:
-            msg += f"\n[COMPILER ERRORS:]\n```\n{self._error_context}\n```\n\n"
+            msg += "\n" + self._build_diagnostic_context() + "\n"
             self.send_errors_btn.setChecked(False)
         msg += (
             "\n[REMINDER: You are inside an IDE. You CAN and MUST edit files directly. "
