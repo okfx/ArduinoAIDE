@@ -3973,6 +3973,11 @@ class ModelsTab(QWidget):
         self.unload_btn.setToolTip("Unload model from memory to free resources")
         self.unload_btn.clicked.connect(self._unload_selected)
         model_btns.addWidget(self.unload_btn)
+        rename_btn = QPushButton("Rename…")
+        rename_btn.setStyleSheet(BTN_SECONDARY)
+        rename_btn.setToolTip("Copy model to a new name, then delete the original")
+        rename_btn.clicked.connect(self._rename)
+        model_btns.addWidget(rename_btn)
         db = QPushButton("Delete")
         db.setStyleSheet(BTN_DANGER); db.clicked.connect(self._delete)
         model_btns.addWidget(db)
@@ -3984,9 +3989,17 @@ class ModelsTab(QWidget):
         left.addWidget(self.model_status)
 
         # -- Pull Model section (in left column, below installed models) --
+        pull_hdr = QHBoxLayout()
         pull_label = QLabel("Pull Model")
         pull_label.setStyleSheet(f"color:{C['fg_head']};{FONT_SECTION} padding-top: 8px;")
-        left.addWidget(pull_label)
+        pull_hdr.addWidget(pull_label)
+        pull_hdr.addStretch()
+        reveal_btn = QPushButton("Reveal in Finder")
+        reveal_btn.setStyleSheet(BTN_SECONDARY)
+        reveal_btn.setToolTip("Open the Ollama models folder in Finder")
+        reveal_btn.clicked.connect(self._reveal_models_folder)
+        pull_hdr.addWidget(reveal_btn)
+        left.addLayout(pull_hdr)
 
         self.pull_filter = QLineEdit()
         self.pull_filter.setPlaceholderText("Filter models...")
@@ -4027,6 +4040,16 @@ class ModelsTab(QWidget):
         self.pull_status = QLabel("")
         self.pull_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
         left.addWidget(self.pull_status)
+
+        self.pull_progress = QProgressBar()
+        self.pull_progress.setRange(0, 100)
+        self.pull_progress.setTextVisible(True)
+        self.pull_progress.setStyleSheet(
+            f"QProgressBar{{background:{C['bg_input']};border:1px solid {C['border_light']};"
+            f"border-radius:3px;height:12px;{FONT_SMALL}}}"
+            f"QProgressBar::chunk{{background:{C['teal']};border-radius:2px;}}")
+        self.pull_progress.hide()
+        left.addWidget(self.pull_progress)
 
         lw = QWidget(); lw.setLayout(left); lw.setMinimumWidth(280)
 
@@ -4295,6 +4318,44 @@ class ModelsTab(QWidget):
             except Exception as e:
                 self.status.setText(str(e)); self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
 
+    def _rename(self):
+        """Rename selected model via Ollama copy + delete."""
+        from PyQt6.QtWidgets import QInputDialog
+        idxs = self.model_list.selectedIndexes()
+        if not idxs:
+            return
+        old_name = self._lm.item(idxs[0].row(), 0).text()
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Model", f"New name for '{old_name}':", text=old_name)
+        if not ok or not new_name.strip() or new_name.strip() == old_name:
+            return
+        new_name = new_name.strip()
+        try:
+            r = requests.post(f"{self.BASE}/api/copy",
+                              json={"source": old_name, "destination": new_name},
+                              timeout=30)
+            if r.status_code == 200:
+                requests.delete(f"{self.BASE}/api/delete",
+                                json={"name": old_name}, timeout=30)
+                self.status.setText(f"Renamed to '{new_name}'.")
+                self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+                self.refresh_models()
+                self.model_changed.emit()
+            else:
+                self.status.setText(f"Rename failed: {r.text}")
+                self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+        except Exception as e:
+            self.status.setText(str(e))
+            self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+
+    def _reveal_models_folder(self):
+        """Open the Ollama models folder in Finder."""
+        import subprocess
+        folder = os.path.expanduser("~/.ollama/models")
+        if not os.path.isdir(folder):
+            folder = os.path.expanduser("~/.ollama")
+        subprocess.Popen(["open", folder])
+
     # ---- Load / Unload Model methods ----
 
     def _load_selected(self):
@@ -4421,6 +4482,8 @@ class ModelsTab(QWidget):
     def _pull_model(self, name):
         self.pull_status.setText(f"Pulling '{name}'...")
         self.pull_status.setStyleSheet(f"color:{C['teal']};{FONT_SMALL}")
+        self.pull_progress.setValue(0)
+        self.pull_progress.show()
 
         def go():
             try:
@@ -4439,9 +4502,10 @@ class ModelsTab(QWidget):
                                 pct = int(completed / total * 100)
                                 msg = f"{status} — {pct}%"
                             else:
+                                pct = -1  # indeterminate
                                 msg = status
                             last_status = status
-                            QTimer.singleShot(0, lambda m=msg: self._on_pull_progress(m))
+                            QTimer.singleShot(0, lambda m=msg, p=pct: self._on_pull_progress(m, p))
                         except json.JSONDecodeError:
                             continue
                 ok = "success" in last_status.lower()
@@ -4450,10 +4514,17 @@ class ModelsTab(QWidget):
                 QTimer.singleShot(0, lambda: self._on_pull_done(str(e), False))
         threading.Thread(target=go, daemon=True).start()
 
-    def _on_pull_progress(self, msg):
+    def _on_pull_progress(self, msg, pct=-1):
         self.pull_status.setText(msg)
+        if pct >= 0:
+            self.pull_progress.setRange(0, 100)
+            self.pull_progress.setValue(pct)
+        else:
+            # Indeterminate (e.g. "pulling manifest", "verifying sha256")
+            self.pull_progress.setRange(0, 0)
 
     def _on_pull_done(self, name, success):
+        self.pull_progress.hide()
         if success:
             self.pull_status.setText(f"'{name}' pulled successfully!")
             self.pull_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
