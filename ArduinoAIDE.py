@@ -335,6 +335,11 @@ _GCC_DIAG_RE = re.compile(
     r'^(.+?):(\d+):(?:(\d+):)?\s*(error|warning|note):\s*(.+)$')
 _LINKER_RE = re.compile(
     r"(undefined reference to|multiple definition of)\s+[`'](.+?)[`']")
+_INCLUDE_RE = re.compile(
+    r'^In file included from (.+?):(\d+)[,:]')
+_BARE_DIAG_RE = re.compile(
+    r'^\s*(error|warning):\s*(.+)$')
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 
 def _normalize_ws(text):
     """Normalize whitespace for fuzzy anchor matching.
@@ -380,8 +385,11 @@ def _parse_compiler_diagnostics(stderr_text):
     """Parse gcc/arduino-cli stderr into StructuredDiagnostic objects.
     Returns (list[StructuredDiagnostic], raw_text). Raw text is always preserved."""
     diags = []
-    for line in stderr_text.splitlines():
-        m = _GCC_DIAG_RE.match(line.strip())
+    cleaned = _ANSI_RE.sub('', stderr_text)
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        # Pattern A/B — gcc-style with optional column
+        m = _GCC_DIAG_RE.match(stripped)
         if m:
             diags.append(StructuredDiagnostic(
                 file=m.group(1),
@@ -391,14 +399,28 @@ def _parse_compiler_diagnostics(stderr_text):
                 message=m.group(5).strip(),
             ))
             continue
-        m = _LINKER_RE.search(line)
+        # Pattern C — "In file included from path:line"
+        m = _INCLUDE_RE.match(stripped)
         if m:
             diags.append(StructuredDiagnostic(
-                file="<linker>",
-                line=0,
-                column=0,
-                severity="error",
-                message=line.strip(),
+                file=m.group(1), line=int(m.group(2)), column=0,
+                severity="note", message="In file included from here",
+            ))
+            continue
+        # Linker errors
+        m = _LINKER_RE.search(stripped)
+        if m:
+            diags.append(StructuredDiagnostic(
+                file="<linker>", line=0, column=0,
+                severity="error", message=stripped,
+            ))
+            continue
+        # Pattern D — standalone error/warning with no file
+        m = _BARE_DIAG_RE.match(stripped)
+        if m:
+            diags.append(StructuredDiagnostic(
+                file="", line=0, column=0,
+                severity=m.group(1), message=m.group(2).strip(),
             ))
     return diags, stderr_text
 
@@ -4364,6 +4386,116 @@ class CompilerOutput(QPlainTextEdit):
 
 
 # =============================================================================
+# Diagnostic Panel — structured compiler error/warning rows
+# =============================================================================
+
+class DiagnosticPanel(QWidget):
+    """Table of parsed compiler diagnostics with clickable file:line navigation."""
+    navigate_requested = pyqtSignal(str, int)  # file path, line number
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self._diagnostics = []
+        self._table = QTableWidget()
+        self._table.setColumnCount(4)
+        self._table.setHorizontalHeaderLabels(["", "File", "Line", "Message"])
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setAlternatingRowColors(False)
+        self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(22)
+        hdr = self._table.horizontalHeader()
+        hdr.resizeSection(0, 24)
+        hdr.resizeSection(1, 160)
+        hdr.resizeSection(2, 48)
+        hdr.setStretchLastSection(True)
+        self._table.setStyleSheet(f"""
+            QTableWidget {{
+                background:{C['bg_dark']};color:{C['fg']};
+                border:1px solid {C['border']};{FONT_BODY}
+                gridline-color:{C['border']};
+            }}
+            QTableWidget::item {{
+                padding:2px 4px;border:none;
+            }}
+            QTableWidget::item:selected {{
+                background:{C['bg_hover']};color:{C['fg']};
+            }}
+            QHeaderView::section {{
+                background:{C['bg']};color:{C['fg_dim']};
+                {FONT_SMALL}border:none;
+                padding:2px 4px;border-right:1px solid {C['border']};
+            }}
+        """)
+        self._table.cellDoubleClicked.connect(self._on_double_click)
+        layout.addWidget(self._table)
+
+    def populate(self, diagnostics):
+        """Fill table from list[StructuredDiagnostic]."""
+        self._diagnostics = list(diagnostics)
+        self._table.setRowCount(0)
+        severity_map = {
+            "error":   ("\u2715", C['fg_err']),
+            "warning": ("\u26a0", C['fg_warn']),
+            "note":    ("\u2139", C['fg_dim']),
+        }
+        for diag in self._diagnostics:
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            # Column 0: severity icon
+            icon_char, icon_color = severity_map.get(
+                diag.severity, ("\u00b7", C['fg_dim']))
+            icon_item = QTableWidgetItem(icon_char)
+            icon_item.setForeground(QColor(icon_color))
+            icon_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            icon_item.setFlags(
+                icon_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self._table.setItem(row, 0, icon_item)
+            # Column 1: file basename
+            fname = os.path.basename(diag.file) if diag.file else ""
+            file_item = QTableWidgetItem(fname)
+            file_item.setForeground(QColor(C['fg']))
+            if diag.file:
+                file_item.setToolTip(diag.file)
+            self._table.setItem(row, 1, file_item)
+            # Column 2: line number
+            line_str = str(diag.line) if diag.line else ""
+            line_item = QTableWidgetItem(line_str)
+            line_item.setForeground(QColor(C['fg_dim']))
+            line_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            self._table.setItem(row, 2, line_item)
+            # Column 3: message
+            msg_item = QTableWidgetItem(diag.message)
+            msg_item.setForeground(QColor(C['fg']))
+            self._table.setItem(row, 3, msg_item)
+
+    def _on_double_click(self, row, col):
+        if row < 0 or row >= len(self._diagnostics):
+            return
+        diag = self._diagnostics[row]
+        if diag.file and diag.line:
+            self.navigate_requested.emit(diag.file, diag.line)
+
+    def summary_text(self):
+        errors = sum(1 for d in self._diagnostics if d.severity == "error")
+        warnings = sum(1 for d in self._diagnostics if d.severity == "warning")
+        if not self._diagnostics:
+            return ""
+        parts = []
+        if errors:
+            parts.append(f"{errors} error{'s' if errors != 1 else ''}")
+        if warnings:
+            parts.append(f"{warnings} warning{'s' if warnings != 1 else ''}")
+        return ", ".join(parts)
+
+
+# =============================================================================
 # Serial Monitor
 # =============================================================================
 
@@ -6631,9 +6763,19 @@ class MainWindow(QMainWindow):
         self.bottom_tabs = QTabWidget()
         self.bottom_tabs.setObjectName("bottomTabs")
         self.bottom_tabs.tabBar().setExpanding(False)
+        # Output tab: raw compiler output + diagnostic table
+        self._output_tab = output_wrapper = QWidget()
+        ow_layout = QVBoxLayout(output_wrapper)
+        ow_layout.setContentsMargins(0, 0, 0, 0)
+        ow_layout.setSpacing(0)
         self.compiler_output = CompilerOutput()
         self.compiler_output.jump_to_line.connect(self._jump_to_error)
-        self.bottom_tabs.addTab(self.compiler_output, "Output")
+        ow_layout.addWidget(self.compiler_output, stretch=1)
+        self._diag_panel = DiagnosticPanel()
+        self._diag_panel.navigate_requested.connect(self._jump_to_error)
+        self._diag_panel.hide()
+        ow_layout.addWidget(self._diag_panel)
+        self.bottom_tabs.addTab(output_wrapper, "Output")
         self.serial_monitor = SerialMonitor()
         self.bottom_tabs.addTab(self.serial_monitor, "Serial Monitor")
 
@@ -7064,7 +7206,7 @@ class MainWindow(QMainWindow):
         self._compile_follows_ai_edits = self._ai_fix_pending_compile
         self._ai_fix_pending_compile = False
         self._save_file(); self.compiler_output.clear_output()
-        self._switch_view(0); self.bottom_tabs.setCurrentWidget(self.compiler_output)
+        self._switch_view(0); self.bottom_tabs.setCurrentWidget(self._output_tab)
         self.compiler_output.append_output("Compiling...", C["fg_link"])
         self._run_cli(["compile", "--fqbn", self._current_fqbn(), self.project_path])
 
@@ -7075,7 +7217,7 @@ class MainWindow(QMainWindow):
         if not port:
             QMessageBox.warning(self, "No Port", "Select a port first."); return
         self._save_file(); self.compiler_output.clear_output()
-        self._switch_view(0); self.bottom_tabs.setCurrentWidget(self.compiler_output)
+        self._switch_view(0); self.bottom_tabs.setCurrentWidget(self._output_tab)
         self.compiler_output.append_output("Compiling and uploading...", C["fg_link"])
         self._run_cli(["compile","--upload","--fqbn",self._current_fqbn(),"--port",port,self.project_path])
 
@@ -7083,6 +7225,7 @@ class MainWindow(QMainWindow):
         self._compiler_errors = ""
         self._compiler_diagnostics = []
         self.editor.clear_diagnostics()
+        self._diag_panel.hide()
         def go():
             try:
                 r = subprocess.run(["arduino-cli"]+args, capture_output=True, text=True, timeout=120)
@@ -7095,6 +7238,9 @@ class MainWindow(QMainWindow):
                     for l in r.stderr.splitlines():
                         c = C["fg_err"] if "error" in l.lower() else C["fg_warn"] if "warning" in l.lower() else C["fg"]
                         QTimer.singleShot(0, lambda l=l,c=c: self.compiler_output.append_output(l,c))
+                # Populate diagnostic panel
+                diags = list(self._compiler_diagnostics)
+                QTimer.singleShot(0, lambda: self._update_diag_panel(diags))
                 if r.returncode == 0:
                     QTimer.singleShot(0, lambda: self.compiler_output.append_output("\nDone compiling.", C["fg_ok"]))
                     QTimer.singleShot(0, self._reset_fix_attempt_count)
@@ -7223,6 +7369,11 @@ class MainWindow(QMainWindow):
         else:
             hint = f"\nType /fix in AI Chat to auto-fix ({n} diagnostic{'s' if n != 1 else ''})"
             self.compiler_output.append_output(hint, C["teal"])
+
+    def _update_diag_panel(self, diags):
+        """Populate diagnostic panel and show/hide it."""
+        self._diag_panel.populate(diags)
+        self._diag_panel.setVisible(bool(diags))
 
     def _apply_compile_diagnostics(self):
         """Apply gutter markers to editors based on compiler diagnostics."""
