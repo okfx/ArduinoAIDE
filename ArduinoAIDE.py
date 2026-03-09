@@ -229,10 +229,14 @@ class WorkingSet:
 @dataclass
 class ProposedEdit:
     """A single edit parsed from AI output."""
-    edit_type: str       # "edit" or "file"
+    edit_type: str       # "edit" or "file" (from parser)
     filename: str
     old_text: str        # None for "file" type
     new_text: str
+    operation: str = ""           # "create_file", "replace_file", "search_replace"
+    warnings: list = field(default_factory=list)  # validation warnings
+    blocked: bool = False         # if True, skip during apply
+    resolved_path: str = ""       # cached absolute path after resolution
 
 @dataclass
 class StructuredDiagnostic:
@@ -2937,30 +2941,29 @@ class ChatPanel(QWidget):
     def _parse_edits(self, response, result=None):
         """Parse <<<EDIT and <<<FILE blocks from the AI response.
         Populates result.proposed_edits if an AIWorkResult is provided."""
-        edits = []
+        edits = []  # list[ProposedEdit]
 
         # Parse <<<EDIT filename\n<<<OLD\n...\n>>>NEW\n...\n>>>END
         edit_pat = re.compile(
             r'<<<EDIT\s+(\S+)\s*\n<<<OLD\n(.*?)\n>>>NEW\n(.*?)\n>>>END',
             re.DOTALL)
         for m in edit_pat.finditer(response):
-            edits.append(("edit", m.group(1), m.group(2), m.group(3)))
+            edits.append(ProposedEdit("edit", m.group(1), m.group(2), m.group(3)))
 
         # Parse <<<FILE filename\n...\n>>>FILE
         file_pat = re.compile(
             r'<<<FILE\s+(\S+)\s*\n(.*?)\n>>>FILE',
             re.DOTALL)
         for m in file_pat.finditer(response):
-            edits.append(("file", m.group(1), None, m.group(2)))
+            edits.append(ProposedEdit("file", m.group(1), None, m.group(2)))
 
-        # Populate typed result object
         if result is not None:
-            for edit_type, filename, old, new in edits:
-                result.proposed_edits.append(
-                    ProposedEdit(edit_type, filename, old, new))
+            result.proposed_edits.extend(edits)
 
         if edits:
             self._pending_edits = edits
+            self._classify_edits()
+            self._validate_edits()
             n = len(edits)
             self._populate_apply_bar(edits)
             self._add_info_msg(
@@ -2969,13 +2972,15 @@ class ChatPanel(QWidget):
         # Fallback: parse unified diff format (diff --git a/file b/file)
         # Some small models output this despite being told not to.
         if not edits:
-            edits = self._parse_unified_diffs(response)
-            if edits:
+            diff_tuples = self._parse_unified_diffs(response)
+            if diff_tuples:
+                edits = [ProposedEdit(et, fn, old, new)
+                         for et, fn, old, new in diff_tuples]
                 if result is not None:
-                    for edit_type, filename, old, new in edits:
-                        result.proposed_edits.append(
-                            ProposedEdit(edit_type, filename, old, new))
+                    result.proposed_edits.extend(edits)
                 self._pending_edits = edits
+                self._classify_edits()
+                self._validate_edits()
                 n = len(edits)
                 self._populate_apply_bar(edits)
                 self._add_info_msg(
@@ -3014,6 +3019,94 @@ class ChatPanel(QWidget):
                               "\n".join(old_lines), "\n".join(new_lines)))
         return edits
 
+    # -- Edit classification and validation ----------------------------------
+
+    def _classify_edits(self):
+        """Assign semantic operation to each pending edit and resolve file paths."""
+        for edit in self._pending_edits:
+            edit.resolved_path = self._resolve_file_path(edit.filename)
+            if edit.edit_type == "edit":
+                edit.operation = "search_replace"
+            elif edit.edit_type == "file":
+                if os.path.isfile(edit.resolved_path):
+                    edit.operation = "replace_file"
+                else:
+                    edit.operation = "create_file"
+
+    def _validate_edits(self):
+        """Run pre-display validation on classified edits.
+        Sets warnings and blocked flags on each ProposedEdit."""
+        for edit in self._pending_edits:
+            edit.warnings = []
+            edit.blocked = False
+            if edit.operation == "search_replace":
+                self._validate_search_replace(edit)
+            elif edit.operation == "replace_file":
+                self._validate_replace_file(edit)
+            elif edit.operation == "create_file":
+                self._validate_create_file(edit)
+            self._validate_filename_ambiguity(edit)
+
+    def _validate_search_replace(self, edit):
+        """Validate a search_replace edit against current file content."""
+        content = self._get_file_content_for_validation(edit)
+        if content is None:
+            edit.blocked = True
+            edit.warnings.append(f"file not found: {edit.filename}")
+            return
+        count = content.count(edit.old_text)
+        if count == 0:
+            edit.blocked = True
+            edit.warnings.append("anchor text not found in file")
+        elif count > 1:
+            edit.warnings.append(
+                f"anchor matches {count} locations, will replace first only")
+
+    def _validate_replace_file(self, edit):
+        """Validate a replace_file edit — warn on suspicious shrinkage."""
+        try:
+            existing_size = os.path.getsize(edit.resolved_path)
+        except OSError:
+            return
+        new_size = len(edit.new_text.encode('utf-8'))
+        if existing_size > 0 and new_size < existing_size * 0.5:
+            pct = int((1 - new_size / existing_size) * 100)
+            edit.warnings.append(
+                f"replaces file content, shrinks by {pct}%")
+
+    def _validate_create_file(self, edit):
+        """Validate a create_file edit — reclassify if file exists."""
+        if os.path.isfile(edit.resolved_path):
+            edit.operation = "replace_file"
+            edit.warnings.append("file already exists, will overwrite")
+
+    def _validate_filename_ambiguity(self, edit):
+        """Warn if the edit's filename matches multiple open files."""
+        if not self._editor_ref:
+            return
+        basename = os.path.basename(edit.filename)
+        matches = [fp for fp in self._editor_ref._editors
+                    if os.path.basename(fp) == basename]
+        if len(matches) > 1:
+            edit.warnings.append(
+                f"filename is ambiguous, matches {len(matches)} open files")
+
+    def _get_file_content_for_validation(self, edit):
+        """Get file content for validation: open editors first, then disk.
+        Returns content string or None if file not found."""
+        if self._editor_ref:
+            fp = self._editor_ref.find_file_by_name(edit.filename)
+            if fp:
+                files = self._editor_ref.get_all_files()
+                return files.get(fp, "")
+        if os.path.isfile(edit.resolved_path):
+            try:
+                with open(edit.resolved_path, 'r', encoding='utf-8') as f:
+                    return f.read()
+            except (OSError, UnicodeDecodeError):
+                return None
+        return None
+
     def _track_ai_edited_file(self, filename):
         """Record that the AI edited this file (for working set priority)."""
         proj = getattr(self, '_project_path', None) or ""
@@ -3027,72 +3120,79 @@ class ChatPanel(QWidget):
             pass  # abs_path not under proj
 
     def _apply_all_edits(self):
-        """Apply all parsed edits to the editor. Supports creating new files."""
+        """Apply all parsed edits to the editor. Skips blocked edits."""
         if not self._editor_ref or not self._pending_edits:
             return
         applied = 0
+        skipped = 0
         errors = []
 
-        for edit_type, filename, old, new in self._pending_edits:
-            # Try to find file in open tabs
-            fp = self._editor_ref.find_file_by_name(filename)
+        for edit in self._pending_edits:
+            if edit.blocked:
+                skipped += 1
+                continue
 
-            if not fp and edit_type == "file":
-                # NEW FILE CREATION: file not open and it's a <<<FILE block
-                abs_path = self._resolve_file_path(filename)
+            abs_path = edit.resolved_path or self._resolve_file_path(edit.filename)
+            fp = self._editor_ref.find_file_by_name(edit.filename)
+
+            if not fp and edit.operation == "create_file":
                 parent_dir = os.path.dirname(abs_path)
                 try:
                     os.makedirs(parent_dir, exist_ok=True)
                     with open(abs_path, 'w', encoding='utf-8') as f:
-                        f.write(new)
-                    # Open the new file in the editor
+                        f.write(edit.new_text)
                     self._editor_ref.open_file(abs_path)
                     applied += 1
-                    self._track_ai_edited_file(filename)
+                    self._track_ai_edited_file(edit.filename)
                     continue
                 except OSError as e:
-                    errors.append(f"Could not create {filename}: {e}")
+                    errors.append(f"Could not create {edit.filename}: {e}")
                     continue
 
-            if not fp and edit_type == "edit":
-                # For EDIT blocks, try to find file on disk even if not open
-                abs_path = self._resolve_file_path(filename)
+            if not fp and edit.operation in ("search_replace", "replace_file"):
                 if os.path.isfile(abs_path):
                     self._editor_ref.open_file(abs_path)
                     fp = abs_path
                 else:
-                    errors.append(f"File not found: {filename}")
+                    errors.append(f"File not found: {edit.filename}")
                     continue
 
             if not fp:
-                errors.append(f"File not found: {filename}")
+                errors.append(f"File not found: {edit.filename}")
                 continue
 
-            if edit_type == "file":
-                # Full file replacement
-                if self._editor_ref.set_file_content(fp, new):
+            if edit.operation == "replace_file":
+                if self._editor_ref.set_file_content(fp, edit.new_text):
                     applied += 1
-                    self._track_ai_edited_file(filename)
+                    self._track_ai_edited_file(edit.filename)
                 else:
-                    errors.append(f"Could not write: {filename}")
-            elif edit_type == "edit":
-                # Search & replace
+                    errors.append(f"Could not write: {edit.filename}")
+            elif edit.operation == "search_replace":
                 files = self._editor_ref.get_all_files()
                 content = files.get(fp, "")
-                if old in content:
-                    new_content = content.replace(old, new, 1)
+                if edit.old_text in content:
+                    new_content = content.replace(edit.old_text, edit.new_text, 1)
                     if self._editor_ref.set_file_content(fp, new_content):
                         applied += 1
-                        self._track_ai_edited_file(filename)
+                        self._track_ai_edited_file(edit.filename)
                     else:
-                        errors.append(f"Could not write: {filename}")
+                        errors.append(f"Could not write: {edit.filename}")
                 else:
-                    errors.append(f"Could not find matching code in {filename}")
+                    errors.append(f"Could not find matching code in {edit.filename}")
+            elif edit.operation == "create_file":
+                # create_file but file is already open — replace content
+                if self._editor_ref.set_file_content(fp, edit.new_text):
+                    applied += 1
+                    self._track_ai_edited_file(edit.filename)
+                else:
+                    errors.append(f"Could not write: {edit.filename}")
 
-        status = f"Applied {applied} change{'s' if applied != 1 else ''}."
+        parts = [f"Applied {applied} change{'s' if applied != 1 else ''}."]
+        if skipped:
+            parts.append(f"Skipped {skipped} blocked.")
         if errors:
-            status += " Errors: " + "; ".join(errors)
-        self._add_info_msg(status,
+            parts.append("Errors: " + "; ".join(errors))
+        self._add_info_msg(" ".join(parts),
                            C['fg_ok'] if not errors else C['fg_warn'])
         self.apply_bar.hide()
         self._pending_edits = []
@@ -3122,25 +3222,39 @@ class ChatPanel(QWidget):
         self._clear_apply_file_rows()
         from collections import OrderedDict
         by_file = OrderedDict()
-        for edit_type, filename, old, new in edits:
-            by_file.setdefault(filename, []).append(edit_type)
-        n = len(edits)
+        for edit in edits:
+            by_file.setdefault(edit.filename, []).append(edit)
+        n_total = len(edits)
+        n_blocked = sum(1 for e in edits if e.blocked)
         nf = len(by_file)
-        self.apply_label.setText(
-            f"{n} edit{'s' if n != 1 else ''} in {nf} file{'s' if nf != 1 else ''}")
+        summary = f"{n_total} edit{'s' if n_total != 1 else ''} in {nf} file{'s' if nf != 1 else ''}"
+        if n_blocked:
+            summary += f" ({n_blocked} blocked)"
+        self.apply_label.setText(summary)
         if self._error_diagnostics:
             self._intent_badge.show()
         else:
             self._intent_badge.hide()
-        for filename, types in by_file.items():
-            count = len(types)
-            has_new = "file" in types
+        for filename, file_edits in by_file.items():
+            count = len(file_edits)
+            has_new = any(e.operation == "create_file" for e in file_edits)
+            has_replace = any(e.operation == "replace_file" for e in file_edits)
             label_text = f"{filename} \u2014 {count} edit{'s' if count != 1 else ''}"
             if has_new:
                 label_text += " (new file)"
+            elif has_replace:
+                label_text += " (replace)"
             row = QLabel(label_text)
             row.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
             self._apply_file_rows_layout.addWidget(row)
+            # Per-edit warnings
+            for edit in file_edits:
+                for warning in edit.warnings:
+                    prefix = "\u26d4" if edit.blocked else "\u26a0"
+                    color = C['fg_err'] if edit.blocked else C['fg_warn']
+                    warn_label = QLabel(f"  {prefix} {warning}")
+                    warn_label.setStyleSheet(f"color:{color};{FONT_SMALL}")
+                    self._apply_file_rows_layout.addWidget(warn_label)
         self.apply_bar.show()
 
     def _dismiss_edits(self):
