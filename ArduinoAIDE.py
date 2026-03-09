@@ -1657,6 +1657,7 @@ class ChatPanel(QWidget):
     generation_started = pyqtSignal()
     generation_finished = pyqtSignal()
     edits_applied = pyqtSignal()             # emitted after edits are successfully applied
+    recompile_requested = pyqtSignal()       # emitted when user clicks Recompile after apply
     model_switch_requested = pyqtSignal(str)  # model name — request toolbar combo update
 
     def __init__(self, parent=None):
@@ -1769,6 +1770,26 @@ class ChatPanel(QWidget):
         ab_layout.addWidget(self.dismiss_btn)
         self.apply_bar.hide()
         layout.addWidget(self.apply_bar)
+
+        # Recompile bar — shown after applying edits when diagnostics exist
+        self.recompile_bar = QWidget()
+        self.recompile_bar.setStyleSheet(f"background:{C['bg']};border-top:1px solid {C['border']};")
+        rc_layout = QHBoxLayout(self.recompile_bar)
+        rc_layout.setContentsMargins(16, 8, 16, 8)
+        self._recompile_label = QLabel("Edits applied. Recompile to check?")
+        self._recompile_label.setStyleSheet(f"color:{C['fg']};{FONT_BODY}")
+        rc_layout.addWidget(self._recompile_label)
+        rc_layout.addStretch()
+        recompile_btn = QPushButton("Recompile")
+        recompile_btn.setStyleSheet(BTN_PRIMARY)
+        recompile_btn.clicked.connect(self._on_recompile_clicked)
+        rc_layout.addWidget(recompile_btn)
+        rc_dismiss = QPushButton("Dismiss")
+        rc_dismiss.setStyleSheet(BTN_SECONDARY)
+        rc_dismiss.clicked.connect(lambda: self.recompile_bar.hide())
+        rc_layout.addWidget(rc_dismiss)
+        self.recompile_bar.hide()
+        layout.addWidget(self.recompile_bar)
 
         # Input area
         inp = QWidget()
@@ -3045,6 +3066,14 @@ class ChatPanel(QWidget):
         # Notify MainWindow to refresh file browser after creates/edits
         if applied > 0:
             self.edits_applied.emit()
+            # Show recompile bar if there are active diagnostics
+            if self._error_diagnostics:
+                self.recompile_bar.show()
+
+    def _on_recompile_clicked(self):
+        """Handle Recompile button click."""
+        self.recompile_bar.hide()
+        self.recompile_requested.emit()
 
     def _dismiss_edits(self):
         self.apply_bar.hide()
@@ -4808,6 +4837,7 @@ class MainWindow(QMainWindow):
         self.chat_panel.generation_started.connect(lambda: self.ai_spinner.start())
         self.chat_panel.generation_finished.connect(lambda: self.ai_spinner.stop())
         self.chat_panel.edits_applied.connect(self._on_edits_applied)
+        self.chat_panel.recompile_requested.connect(self._compile)
         self.chat_panel.model_switch_requested.connect(self._on_model_switch)
         self.view_stack.addWidget(self.chat_panel)
 
