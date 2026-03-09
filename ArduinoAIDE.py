@@ -237,6 +237,7 @@ class ProposedEdit:
     warnings: list = field(default_factory=list)  # validation warnings
     blocked: bool = False         # if True, skip during apply
     resolved_path: str = ""       # cached absolute path after resolution
+    matched_text: str = ""        # actual text matched in file (for normalized matches)
 
 @dataclass
 class StructuredDiagnostic:
@@ -265,6 +266,46 @@ _GCC_DIAG_RE = re.compile(
     r'^(.+?):(\d+):(?:(\d+):)?\s*(error|warning|note):\s*(.+)$')
 _LINKER_RE = re.compile(
     r"(undefined reference to|multiple definition of)\s+[`'](.+?)[`']")
+
+def _normalize_ws(text):
+    """Normalize whitespace for fuzzy anchor matching.
+    - Strips leading/trailing whitespace from each line
+    - Collapses runs of spaces/tabs within each line to a single space
+    - Preserves line boundaries (newlines)
+    Returns the normalized string."""
+    lines = text.splitlines()
+    out = []
+    for line in lines:
+        # Strip leading/trailing, collapse internal whitespace runs
+        out.append(re.sub(r'[ \t]+', ' ', line.strip()))
+    return '\n'.join(out)
+
+
+def _find_normalized_matches(content, anchor):
+    """Find regions in content that match anchor under whitespace normalization.
+    Returns list of (start, end) index pairs into the original content."""
+    norm_anchor = _normalize_ws(anchor)
+    if not norm_anchor:
+        return []
+    # Build a normalized version of content with index mapping
+    # For each line in content, record its start/end in original and its normalized form
+    content_lines = content.splitlines(True)  # keep line endings
+    matches = []
+    anchor_lines = norm_anchor.split('\n')
+    n_anchor = len(anchor_lines)
+    # Normalize each content line (strip + collapse whitespace)
+    norm_content_lines = [re.sub(r'[ \t]+', ' ', ln.rstrip('\n\r').strip())
+                          for ln in content_lines]
+    # Sliding window search
+    for i in range(len(norm_content_lines) - n_anchor + 1):
+        window = norm_content_lines[i:i + n_anchor]
+        if window == anchor_lines:
+            # Found a match — compute original byte range
+            start = sum(len(ln) for ln in content_lines[:i])
+            end = sum(len(ln) for ln in content_lines[:i + n_anchor])
+            matches.append((start, end))
+    return matches
+
 
 def _parse_compiler_diagnostics(stderr_text):
     """Parse gcc/arduino-cli stderr into StructuredDiagnostic objects.
@@ -3048,19 +3089,36 @@ class ChatPanel(QWidget):
             self._validate_filename_ambiguity(edit)
 
     def _validate_search_replace(self, edit):
-        """Validate a search_replace edit against current file content."""
+        """Validate a search_replace edit against current file content.
+        Tries exact match first, then normalized whitespace match."""
         content = self._get_file_content_for_validation(edit)
         if content is None:
             edit.blocked = True
             edit.warnings.append(f"file not found: {edit.filename}")
             return
+        # 1. Try exact match
         count = content.count(edit.old_text)
-        if count == 0:
-            edit.blocked = True
-            edit.warnings.append("anchor text not found in file")
-        elif count > 1:
+        if count == 1:
+            return  # exact unique match — ideal
+        if count > 1:
             edit.warnings.append(
                 f"anchor matches {count} locations, will replace first only")
+            return
+        # 2. Exact match failed (count == 0) — try normalized whitespace
+        norm_matches = _find_normalized_matches(content, edit.old_text)
+        if len(norm_matches) == 1:
+            start, end = norm_matches[0]
+            edit.matched_text = content[start:end]
+            edit.warnings.append("anchor matched using normalized whitespace")
+        elif len(norm_matches) > 1:
+            edit.warnings.append(
+                f"normalized anchor matches {len(norm_matches)} locations, "
+                f"will replace first only")
+            start, end = norm_matches[0]
+            edit.matched_text = content[start:end]
+        else:
+            edit.blocked = True
+            edit.warnings.append("anchor text not found in file")
 
     def _validate_replace_file(self, edit):
         """Validate a replace_file edit — warn on suspicious shrinkage."""
@@ -3170,8 +3228,10 @@ class ChatPanel(QWidget):
             elif edit.operation == "search_replace":
                 files = self._editor_ref.get_all_files()
                 content = files.get(fp, "")
-                if edit.old_text in content:
-                    new_content = content.replace(edit.old_text, edit.new_text, 1)
+                # Use matched_text from normalized matching if available
+                anchor = edit.matched_text or edit.old_text
+                if anchor in content:
+                    new_content = content.replace(anchor, edit.new_text, 1)
                     if self._editor_ref.set_file_content(fp, new_content):
                         applied += 1
                         self._track_ai_edited_file(edit.filename)
