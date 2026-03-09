@@ -913,6 +913,30 @@ class SettingsSidebarButton(SidebarButton):
         p.end()
 
 
+class SerialSidebarButton(SidebarButton):
+    """Sidebar button with a custom-painted terminal/serial icon."""
+    def __init__(self, tooltip, parent=None):
+        super().__init__("", tooltip, parent)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        col = QColor(C['fg']) if self.isChecked() or self.underMouse() else QColor(C['fg_dim'])
+        p.setPen(QPen(col, 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        cx, cy = self.width() / 2, self.height() / 2
+        # Terminal screen outline (20×14)
+        p.drawRoundedRect(int(cx - 10), int(cy - 7), 20, 14, 2, 2)
+        # Prompt cursor ">" inside
+        p.setPen(QPen(col, 1.8))
+        p.drawLine(int(cx - 5), int(cy - 1), int(cx - 1), int(cy + 2))
+        p.drawLine(int(cx - 1), int(cy + 2), int(cx - 5), int(cy + 5))
+        # Cursor underscore
+        p.drawLine(int(cx + 1), int(cy + 5), int(cx + 6), int(cy + 5))
+        p.end()
+
+
 class NavBadge(QLabel):
     """Small circular count badge overlaid on a sidebar icon button."""
     def __init__(self, parent=None):
@@ -4532,88 +4556,296 @@ class DiagnosticPanel(QWidget):
 # Serial Monitor
 # =============================================================================
 
-class SerialMonitor(QWidget):
+class SerialReaderThread(QThread):
+    """Background thread that reads from serial port and emits data."""
+    data_received = pyqtSignal(bytes)
+    error_occurred = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
-
-        self.display = QPlainTextEdit()
-        self.display.setReadOnly(True)
-        self.display.setPlaceholderText("Serial output will appear here...")
-        layout.addWidget(self.display)
-
-        ctrl = QWidget()
-        ctrl.setStyleSheet(f"background: {C['bg']}; border-top: 1px solid {C['border']};")
-        cl = QHBoxLayout(ctrl); cl.setContentsMargins(8, 4, 8, 4)
-        cl.setSpacing(8)
-        port_lbl = QLabel("Port:")
-        port_lbl.setStyleSheet(f"color:{C['fg']};{FONT_BODY}background:transparent;border:none;")
-        cl.addWidget(port_lbl)
-        self.port_combo = QComboBox(); self.port_combo.setEditable(True); self.port_combo.setMinimumWidth(140)
-        cl.addWidget(self.port_combo)
-        baud_lbl = QLabel("Baud:")
-        baud_lbl.setStyleSheet(f"color:{C['fg']};{FONT_BODY}background:transparent;border:none;")
-        cl.addWidget(baud_lbl)
-        self.baud_combo = QComboBox()
-        self.baud_combo.addItems(["9600","19200","38400","57600","115200","250000","500000","1000000"])
-        self.baud_combo.setCurrentText("9600")
-        cl.addWidget(self.baud_combo)
-        self.start_btn = QPushButton("Start")
-        self.start_btn.setStyleSheet(BTN_PRIMARY)
-        self.start_btn.clicked.connect(self._toggle)
-        cl.addWidget(self.start_btn)
-        clr = QPushButton("Clear")
-        clr.setStyleSheet(BTN_GHOST)
-        clr.clicked.connect(self.display.clear)
-        cl.addWidget(clr)
-        self.send_input = QLineEdit(); self.send_input.setPlaceholderText("Send...")
-        self.send_input.setFixedWidth(140); self.send_input.returnPressed.connect(self._send)
-        cl.addWidget(self.send_input); cl.addStretch()
-        layout.addWidget(ctrl)
+        self._serial = None
         self._running = False
+
+    def configure(self, port, baud):
+        import serial as _serial_mod
+        self._serial = _serial_mod.Serial(port, baud, timeout=0.1)
+        self._running = True
+
+    def run(self):
+        while self._running and self._serial and self._serial.is_open:
+            try:
+                waiting = self._serial.in_waiting
+                if waiting > 0:
+                    data = self._serial.read(waiting)
+                    if data:
+                        self.data_received.emit(data)
+                else:
+                    self.msleep(20)
+            except Exception as e:
+                if self._running:
+                    self.error_occurred.emit(str(e))
+                break
+
+    def stop(self):
+        self._running = False
+        self.wait(1000)
+        if self._serial and self._serial.is_open:
+            try:
+                self._serial.close()
+            except Exception:
+                pass
+        self._serial = None
+
+    def write_data(self, data: bytes):
+        if self._serial and self._serial.is_open:
+            try:
+                self._serial.write(data)
+            except Exception as e:
+                self.error_occurred.emit(str(e))
+
+
+class SerialMonitor(QWidget):
+    """Full serial monitor panel with threaded reader, toolbar, output, and input row."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._reader = None
+        self._connected = False
+        self._timestamps = False
+        self._auto_scroll = True
+        self._line_buffer = ""  # Buffer for incomplete lines
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # --- Panel header ---
+        header, title, hl = _make_panel_header("SERIAL MONITOR")
+        layout.addWidget(header)
+
+        # --- Toolbar row ---
+        toolbar = QWidget()
+        toolbar.setStyleSheet(f"background:{C['bg']};border-bottom:1px solid {C['border']};")
+        tb_layout = QHBoxLayout(toolbar)
+        tb_layout.setContentsMargins(10, 6, 10, 6)
+        tb_layout.setSpacing(8)
+
+        port_lbl = QLabel("Port")
+        port_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}background:transparent;border:none;")
+        tb_layout.addWidget(port_lbl)
+        self.port_combo = QComboBox()
+        self.port_combo.setEditable(True)
+        self.port_combo.setMinimumWidth(160)
+        tb_layout.addWidget(self.port_combo)
+
+        refresh_btn = QPushButton("↻")
+        refresh_btn.setToolTip("Refresh ports")
+        refresh_btn.setFixedSize(28, 28)
+        refresh_btn.setStyleSheet(BTN_GHOST)
+        refresh_btn.clicked.connect(self.refresh_ports)
+        tb_layout.addWidget(refresh_btn)
+
+        baud_lbl = QLabel("Baud")
+        baud_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}background:transparent;border:none;")
+        tb_layout.addWidget(baud_lbl)
+        self.baud_combo = QComboBox()
+        self.baud_combo.addItems(["300", "1200", "2400", "4800", "9600", "19200",
+                                   "38400", "57600", "115200", "250000", "500000", "1000000"])
+        self.baud_combo.setCurrentText("115200")
+        tb_layout.addWidget(self.baud_combo)
+
+        tb_layout.addSpacing(8)
+
+        self.connect_btn = QPushButton("Connect")
+        self.connect_btn.setStyleSheet(BTN_PRIMARY)
+        self.connect_btn.setFixedWidth(90)
+        self.connect_btn.clicked.connect(self._toggle_connection)
+        tb_layout.addWidget(self.connect_btn)
+
+        tb_layout.addSpacing(8)
+
+        self.ts_check = QPushButton("⏱")
+        self.ts_check.setToolTip("Toggle timestamps")
+        self.ts_check.setCheckable(True)
+        self.ts_check.setFixedSize(28, 28)
+        self.ts_check.setStyleSheet(BTN_GHOST)
+        self.ts_check.toggled.connect(self._toggle_timestamps)
+        tb_layout.addWidget(self.ts_check)
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setStyleSheet(BTN_GHOST)
+        clear_btn.clicked.connect(self._clear_output)
+        tb_layout.addWidget(clear_btn)
+
+        tb_layout.addStretch()
+        layout.addWidget(toolbar)
+
+        # --- Output area ---
+        self.output = QPlainTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setPlaceholderText("Serial output will appear here...")
+        self.output.setStyleSheet(
+            f"background:{C['bg_dark']};color:{C['fg']};border:none;{FONT_CODE}padding:8px;")
+        self.output.setMaximumBlockCount(10000)
+        # Track user scroll position
+        self.output.verticalScrollBar().valueChanged.connect(self._on_scroll)
+        layout.addWidget(self.output, stretch=1)
+
+        # --- Input row ---
+        input_row = QWidget()
+        input_row.setStyleSheet(f"background:{C['bg']};border-top:1px solid {C['border']};")
+        ir_layout = QHBoxLayout(input_row)
+        ir_layout.setContentsMargins(10, 6, 10, 6)
+        ir_layout.setSpacing(8)
+
+        self.send_input = QLineEdit()
+        self.send_input.setPlaceholderText("Type message to send...")
+        self.send_input.returnPressed.connect(self._send)
+        ir_layout.addWidget(self.send_input, stretch=1)
+
+        self.line_ending_combo = QComboBox()
+        self.line_ending_combo.addItems(["NL", "CR", "CR+NL", "None"])
+        self.line_ending_combo.setCurrentText("NL")
+        self.line_ending_combo.setFixedWidth(70)
+        ir_layout.addWidget(self.line_ending_combo)
+
+        send_btn = QPushButton("Send")
+        send_btn.setStyleSheet(BTN_PRIMARY)
+        send_btn.clicked.connect(self._send)
+        ir_layout.addWidget(send_btn)
+
+        layout.addWidget(input_row)
 
     def refresh_ports(self):
+        """Scan for available serial ports."""
+        current = self.port_combo.currentText()
         self.port_combo.clear()
+        # Try arduino-cli first for accurate detection
+        try:
+            r = subprocess.run(["arduino-cli", "board", "list", "--format", "json"],
+                               capture_output=True, text=True, timeout=10)
+            if r.stdout:
+                d = json.loads(r.stdout)
+                pts = d if isinstance(d, list) else d.get("detected_ports", [])
+                for pi in pts:
+                    a = pi.get("port", {}).get("address", "")
+                    if a:
+                        self.port_combo.addItem(a)
+        except Exception:
+            pass
+        # Fallback: glob for common serial device paths
         for pat in ["/dev/cu.usbmodem*", "/dev/ttyACM*", "/dev/cu.usbserial*"]:
-            for p in glob.glob(pat): self.port_combo.addItem(p)
+            for p in glob.glob(pat):
+                if self.port_combo.findText(p) == -1:
+                    self.port_combo.addItem(p)
+        # Restore previous selection if still available
+        if current:
+            idx = self.port_combo.findText(current)
+            if idx >= 0:
+                self.port_combo.setCurrentIndex(idx)
 
-    def _toggle(self):
-        if self._running: self._stop()
-        else: self._start()
+    def _toggle_connection(self):
+        if self._connected:
+            self._disconnect()
+        else:
+            self._connect()
 
-    def _start(self):
+    def _connect(self):
         port = self.port_combo.currentText().strip()
         baud = self.baud_combo.currentText().strip()
-        if not port: return
+        if not port:
+            self._append_system("No port selected.")
+            return
         try:
-            import serial
-            self._serial = serial.Serial(port, int(baud), timeout=0.1)
-            self._running = True
-            self.start_btn.setText("Stop")
-            self.start_btn.setStyleSheet(BTN_DANGER)
-            self._timer = QTimer(); self._timer.timeout.connect(self._read); self._timer.start(50)
-        except ImportError: self.display.appendPlainText("pyserial not installed. Run: pip install pyserial")
-        except Exception as e: self.display.appendPlainText(f"Error: {e}")
+            self._reader = SerialReaderThread(self)
+            self._reader.data_received.connect(self._on_data)
+            self._reader.error_occurred.connect(self._on_error)
+            self._reader.configure(port, int(baud))
+            self._reader.start()
+            self._connected = True
+            self._line_buffer = ""
+            self.connect_btn.setText("Disconnect")
+            self.connect_btn.setStyleSheet(BTN_DANGER)
+            self.port_combo.setEnabled(False)
+            self.baud_combo.setEnabled(False)
+            self._append_system(f"Connected to {port} at {baud} baud")
+        except ImportError:
+            self._append_system("pyserial not installed. Run: pip install pyserial")
+        except Exception as e:
+            self._append_system(f"Connection failed: {e}")
 
-    def _stop(self):
-        self._running = False
-        if hasattr(self, '_timer'): self._timer.stop()
-        if hasattr(self, '_serial') and self._serial.is_open: self._serial.close()
-        self.start_btn.setText("Start")
-        self.start_btn.setStyleSheet(BTN_PRIMARY)
+    def _disconnect(self):
+        if self._reader:
+            self._reader.stop()
+            self._reader = None
+        self._connected = False
+        self._line_buffer = ""
+        self.connect_btn.setText("Connect")
+        self.connect_btn.setStyleSheet(BTN_PRIMARY)
+        self.port_combo.setEnabled(True)
+        self.baud_combo.setEnabled(True)
+        self._append_system("Disconnected")
 
-    def _read(self):
-        if hasattr(self, '_serial') and self._serial.is_open:
-            try:
-                d = self._serial.read(self._serial.in_waiting or 1)
-                if d: self.display.appendPlainText(d.decode("utf-8", errors="replace").rstrip())
-            except: pass
+    def _on_data(self, data: bytes):
+        text = data.decode("utf-8", errors="replace")
+        # Buffer incomplete lines for timestamp-accurate display
+        self._line_buffer += text
+        while "\n" in self._line_buffer:
+            line, self._line_buffer = self._line_buffer.split("\n", 1)
+            self._append_line(line)
+        # If buffer has content but no newline yet, show it after a short delay
+        if self._line_buffer and "\r" in self._line_buffer:
+            line = self._line_buffer.rstrip("\r")
+            self._line_buffer = ""
+            self._append_line(line)
+
+    def _append_line(self, text):
+        if self._timestamps:
+            from datetime import datetime
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            self.output.appendPlainText(f"[{ts}] {text}")
+        else:
+            self.output.appendPlainText(text)
+        if self._auto_scroll:
+            sb = self.output.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
+    def _append_system(self, msg):
+        self.output.appendPlainText(f"--- {msg} ---")
+        if self._auto_scroll:
+            sb = self.output.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
+    def _on_error(self, msg):
+        self._append_system(f"Error: {msg}")
+        self._disconnect()
+
+    def _on_scroll(self, value):
+        sb = self.output.verticalScrollBar()
+        # Auto-scroll if user is near the bottom
+        self._auto_scroll = value >= sb.maximum() - 10
+
+    def _toggle_timestamps(self, checked):
+        self._timestamps = checked
+
+    def _clear_output(self):
+        self.output.clear()
 
     def _send(self):
-        if hasattr(self, '_serial') and self._serial.is_open:
-            try: self._serial.write((self.send_input.text() + "\n").encode()); self.send_input.clear()
-            except: pass
+        if not self._connected or not self._reader:
+            return
+        text = self.send_input.text()
+        if not text:
+            return
+        ending_map = {"NL": "\n", "CR": "\r", "CR+NL": "\r\n", "None": ""}
+        ending = ending_map.get(self.line_ending_combo.currentText(), "\n")
+        self._reader.write_data((text + ending).encode("utf-8"))
+        self.send_input.clear()
+
+    def cleanup(self):
+        """Stop reader thread. Call from MainWindow.closeEvent."""
+        if self._reader:
+            self._reader.stop()
+            self._reader = None
 
 
 # =============================================================================
@@ -6761,6 +6993,7 @@ class MainWindow(QMainWindow):
         self.btn_chat = SidebarButton("AI", "AI Chat")
         self.btn_files = FileSidebarButton("Files")
         self.btn_git = GitSidebarButton("Git")
+        self.btn_serial = SerialSidebarButton("Serial Monitor")
         self.btn_settings = SettingsSidebarButton("Settings")
 
         self.btn_code.clicked.connect(lambda: self._switch_view(0))
@@ -6768,11 +7001,13 @@ class MainWindow(QMainWindow):
         self.btn_files.clicked.connect(lambda: self._switch_view(2))
         self.btn_settings.clicked.connect(lambda: self._switch_view(3))
         self.btn_git.clicked.connect(lambda: self._switch_view(4))
+        self.btn_serial.clicked.connect(lambda: self._switch_view(5))
 
         sb_layout.addWidget(self.btn_code)
         sb_layout.addWidget(self.btn_chat)
         sb_layout.addWidget(self.btn_files)
         sb_layout.addWidget(self.btn_git)
+        sb_layout.addWidget(self.btn_serial)
         sb_layout.addStretch()
         sb_layout.addWidget(self.btn_settings)
 
@@ -6811,8 +7046,6 @@ class MainWindow(QMainWindow):
         self._diag_panel.hide()
         ow_layout.addWidget(self._diag_panel)
         self.bottom_tabs.addTab(output_wrapper, "Output")
-        self.serial_monitor = SerialMonitor()
-        self.bottom_tabs.addTab(self.serial_monitor, "Serial Monitor")
 
         v_splitter.addWidget(self.bottom_tabs)
         v_splitter.setSizes([675, 225])
@@ -6848,15 +7081,21 @@ class MainWindow(QMainWindow):
         self.git_panel.branch_changed.connect(self._on_branch_changed)
         self.view_stack.addWidget(self.git_panel)
 
+        # View 5: Serial Monitor (full panel)
+        self.serial_monitor = SerialMonitor()
+        self.view_stack.addWidget(self.serial_monitor)
+
         main_layout.addWidget(self.view_stack)
 
     def _switch_view(self, idx):
         self.view_stack.setCurrentIndex(idx)
         for i, btn in enumerate([self.btn_code, self.btn_chat, self.btn_files,
-                                 self.btn_settings, self.btn_git]):
+                                 self.btn_settings, self.btn_git, self.btn_serial]):
             btn.setChecked(i == idx)
         if idx == 4:
             self.git_panel.refresh_status()
+        elif idx == 5:
+            self.serial_monitor.refresh_ports()
 
     def _setup_statusbar(self):
         sb = QStatusBar()
@@ -7427,7 +7666,7 @@ class MainWindow(QMainWindow):
         self._switch_view(0)
         self.editor.goto_line(filepath, line)
 
-    _PANEL_NAMES = {0: "editor", 1: "chat", 2: "files", 3: "settings", 4: "git"}
+    _PANEL_NAMES = {0: "editor", 1: "chat", 2: "files", 3: "settings", 4: "git", 5: "serial"}
     _PANEL_INDICES = {v: k for k, v in _PANEL_NAMES.items()}
 
     def _save_project_state(self):
@@ -7538,6 +7777,7 @@ class MainWindow(QMainWindow):
         }
         _save_config(config)
         # Thread cleanup
+        self.serial_monitor.cleanup()
         if self.chat_panel.thread.isRunning():
             self.chat_panel.worker.stop(); self.chat_panel.thread.quit(); self.chat_panel.thread.wait(2000)
         event.accept()
