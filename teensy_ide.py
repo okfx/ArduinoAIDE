@@ -265,7 +265,7 @@ void initPins();
 # =============================================================================
 STYLESHEET = f"""
 QMainWindow {{ background-color: {C['bg']}; }}
-QWidget {{ background-color: {C['bg']}; color: {C['fg']}; font-size: 13px; }}
+QWidget {{ background-color: {C['bg']}; color: {C['fg']}; {FONT_BODY} }}
 
 QToolBar {{
     background-color: {C['bg']};
@@ -306,7 +306,7 @@ QTabBar#fileTabBar::tab {{
     text-align: left;
 }}
 QTabBar#fileTabBar::tab:selected {{
-    background-color: {C['bg']}; color: {C['fg']};
+    background-color: {C['bg']}; color: {C['fg_head']};
     border-bottom: 2px solid {C['teal']};
 }}
 QTabBar#fileTabBar::tab:hover:!selected {{
@@ -326,7 +326,7 @@ QTabWidget#bottomTabs > QTabBar::tab {{
     padding: 6px 14px; min-width: 80px;
 }}
 QTabWidget#bottomTabs > QTabBar::tab:selected {{
-    background-color: {C['bg']}; color: {C['fg']};
+    background-color: {C['bg']}; color: {C['fg_head']};
     border-bottom: 2px solid {C['teal']};
 }}
 QTabWidget#bottomTabs > QTabBar::tab:hover:!selected {{
@@ -453,7 +453,7 @@ QTabWidget#settingsTabs > QTabBar::tab {{
     padding: 6px 16px; min-width: 90px;
 }}
 QTabWidget#settingsTabs > QTabBar::tab:selected {{
-    background-color: {C['bg']}; color: {C['fg']};
+    background-color: {C['bg']}; color: {C['fg_head']};
     border-bottom: 2px solid {C['teal']};
 }}
 QTabWidget#settingsTabs > QTabBar::tab:hover:!selected {{
@@ -1016,14 +1016,15 @@ class TabbedEditor(QWidget):
         return False
 
     def open_all_project_files(self, project_path):
-        """Open all project files as tabs, scanning subdirectories."""
+        """Open root-level project files as tabs, like Arduino IDE.
+        Only opens sketch files (.ino, .cpp, .c, .h, .hpp) from the
+        project root — the AI context scanner handles deeper scanning."""
+        sketch_extensions = {".ino", ".cpp", ".c", ".h", ".hpp"}
         files = []
-        for root, dirs, filenames in os.walk(project_path):
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in PROJECT_SKIP_DIRS]
-            for f in sorted(filenames):
-                ext = os.path.splitext(f)[1].lower()
-                if ext in PROJECT_EXTENSIONS:
-                    files.append(os.path.join(root, f))
+        for f in sorted(os.listdir(project_path)):
+            ext = os.path.splitext(f)[1].lower()
+            if ext in sketch_extensions:
+                files.append(os.path.join(project_path, f))
         # Open .ino first, then others
         ino_files = [f for f in files if f.endswith(".ino")]
         other_files = [f for f in files if not f.endswith(".ino")]
@@ -1420,19 +1421,15 @@ class ChatPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Context header
-        ctx_panel = QWidget()
-        ctx_panel.setStyleSheet(f"background:{C['bg']};border-bottom:1px solid {C['border']};")
-        ctx_hdr = QHBoxLayout(ctx_panel)
-        ctx_hdr.setContentsMargins(16, 8, 16, 8)
-        ctx_hdr.setSpacing(8)
-        self.project_label = QLabel("No project open")
-        self.project_label.setStyleSheet(f"color:{C['fg_head']};{FONT_BODY}font-weight:bold;")
-        ctx_hdr.addWidget(self.project_label)
-        ctx_hdr.addStretch()
+        # Context header — standardized panel header with project info
+        ctx_panel, self._chat_title, ctx_hdr = _make_panel_header("AI Chat")
+        self._ctx_info = QLabel("")
+        self._ctx_info.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        ctx_hdr.insertWidget(1, self._ctx_info)  # After title, before stretch
         self.toggle_files_btn = QPushButton("Show Files")
         self.toggle_files_btn.setStyleSheet(BTN_GHOST)
         self.toggle_files_btn.clicked.connect(self._toggle_file_list)
+        self.toggle_files_btn.hide()
         ctx_hdr.addWidget(self.toggle_files_btn)
         layout.addWidget(ctx_panel)
 
@@ -1954,7 +1951,7 @@ class ChatPanel(QWidget):
 
     def _update_context_display(self, proj_name, proj_path, names):
         """Update the context panel with project info and file list."""
-        self.project_label.setText(f"Project: {proj_name}  \u2014  {len(names)} files loaded")
+        self._ctx_info.setText(f"{proj_name} \u2014 {len(names)} files")
         self.path_label.setText(proj_path)
         # Show abbreviated paths for long lists
         display_names = names[:20]
@@ -1988,7 +1985,7 @@ class ChatPanel(QWidget):
                 names = [os.path.basename(fp) for fp in files]
                 self._update_context_display(proj_name, proj, names)
                 return
-        self.project_label.setText("No project open")
+        self._ctx_info.setText("")
         self.path_label.setText("")
         self.file_list_widget.setText("")
         self._ctx_detail.hide()
@@ -2085,11 +2082,11 @@ class ChatPanel(QWidget):
         wrapper = QWidget()
         wrapper.setStyleSheet("background: transparent;")
         wl = QHBoxLayout(wrapper)
-        wl.setContentsMargins(0, 0, 40, 0)
+        wl.setContentsMargins(0, 0, 0, 0)
         label = QLabel(text)
         label.setWordWrap(True)
         label.setStyleSheet(
-            f"color: {color or C['fg_ok']}; {FONT_SMALL} padding: 4px 0;")
+            f"color: {color or C['fg_ok']}; {FONT_CHAT} padding-left: 2px;")
         label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         wl.addWidget(label)
@@ -2444,22 +2441,27 @@ class ModelsTab(QWidget):
     def _setup_ui(self):
         layout = QHBoxLayout(self); layout.setContentsMargins(4, 4, 4, 4)
 
+        # ========== LEFT COLUMN: Manage Models (installed + pull) ==========
         left = QVBoxLayout()
+
+        # Header: title + Refresh button
         hdr = QHBoxLayout()
-        models_title = QLabel("Installed Models")
+        models_title = QLabel("Manage Models")
         models_title.setStyleSheet(f"color:{C['fg_head']};{FONT_TITLE}")
         hdr.addWidget(models_title)
-        rb = QPushButton("Refresh"); rb.setStyleSheet(BTN_SECONDARY); rb.setFixedWidth(65)
+        hdr.addStretch()
+        rb = QPushButton("Refresh"); rb.setStyleSheet(BTN_SECONDARY)
         rb.clicked.connect(self.refresh_models)
         hdr.addWidget(rb); left.addLayout(hdr)
 
+        # Installed models tree
         self.model_list = QTreeView()
         self.model_list.setHeaderHidden(False); self.model_list.setRootIsDecorated(False)
         self._lm = QStandardItemModel()
         self._lm.setHorizontalHeaderLabels(["Model", "Size", "Modified"])
         self.model_list.setModel(self._lm)
         self.model_list.clicked.connect(self._on_select)
-        left.addWidget(self.model_list)
+        left.addWidget(self.model_list, stretch=3)
 
         # Model action buttons
         model_btns = QHBoxLayout()
@@ -2484,8 +2486,54 @@ class ModelsTab(QWidget):
         self.model_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
         left.addWidget(self.model_status)
 
-        lw = QWidget(); lw.setLayout(left); lw.setMinimumWidth(260)
+        # -- Pull Model section (in left column, below installed models) --
+        pull_label = QLabel("Pull Model")
+        pull_label.setStyleSheet(f"color:{C['fg_head']};{FONT_SECTION} padding-top: 8px;")
+        left.addWidget(pull_label)
 
+        self.pull_filter = QLineEdit()
+        self.pull_filter.setPlaceholderText("Filter models...")
+        self.pull_filter.textChanged.connect(self._filter_curated)
+        left.addWidget(self.pull_filter)
+
+        self.curated_list = QTreeView()
+        self.curated_list.setHeaderHidden(False)
+        self.curated_list.setRootIsDecorated(False)
+        self.curated_list.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers)
+        self._curated_model = QStandardItemModel()
+        self._curated_model.setHorizontalHeaderLabels(["Model", "Size", "Description"])
+        self.curated_list.setModel(self._curated_model)
+        left.addWidget(self.curated_list, stretch=2)
+
+        pull_row = QHBoxLayout()
+        pull_row.setSpacing(4)
+        pull_btn = QPushButton("Pull Selected")
+        pull_btn.setStyleSheet(BTN_PRIMARY)
+        pull_btn.clicked.connect(self._pull_curated)
+        pull_row.addWidget(pull_btn)
+        pull_row.addStretch()
+        left.addLayout(pull_row)
+
+        custom_row = QHBoxLayout()
+        custom_row.setSpacing(4)
+        custom_row.addWidget(QLabel("Or pull any:"))
+        self.custom_pull_name = QLineEdit()
+        self.custom_pull_name.setPlaceholderText("e.g. mistral:7b")
+        self.custom_pull_name.returnPressed.connect(self._pull_custom)
+        custom_row.addWidget(self.custom_pull_name)
+        pull_custom_btn = QPushButton("Pull")
+        pull_custom_btn.setStyleSheet(BTN_SECONDARY)
+        pull_custom_btn.clicked.connect(self._pull_custom)
+        custom_row.addWidget(pull_custom_btn)
+        left.addLayout(custom_row)
+
+        self.pull_status = QLabel("")
+        self.pull_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        left.addWidget(self.pull_status)
+
+        lw = QWidget(); lw.setLayout(left); lw.setMinimumWidth(280)
+
+        # ========== RIGHT COLUMN: Model Details + Create/Edit ==========
         right = QVBoxLayout()
 
         dg = QGroupBox("Model Details")
@@ -2501,12 +2549,10 @@ class ModelsTab(QWidget):
         self.desc_edit.setPlaceholderText("Short description (shown in toolbar)")
         desc_row.addWidget(self.desc_edit)
         save_desc_btn = QPushButton("Save")
-        save_desc_btn.setFixedWidth(55)
         save_desc_btn.setStyleSheet(BTN_PRIMARY)
         save_desc_btn.clicked.connect(self._save_desc)
         desc_row.addWidget(save_desc_btn)
         gen_desc_btn = QPushButton("Auto-Generate")
-        gen_desc_btn.setFixedWidth(100)
         gen_desc_btn.setStyleSheet(BTN_SECONDARY)
         gen_desc_btn.clicked.connect(self._auto_gen_desc)
         desc_row.addWidget(gen_desc_btn)
@@ -2546,53 +2592,7 @@ class ModelsTab(QWidget):
 
         right.addWidget(cg)
 
-        # -- Pull Model section --
-        pg = QGroupBox("Pull Model")
-        pl = QVBoxLayout(pg)
-        pl.setSpacing(6)
-
-        self.pull_filter = QLineEdit()
-        self.pull_filter.setPlaceholderText("Filter models...")
-        self.pull_filter.textChanged.connect(self._filter_curated)
-        pl.addWidget(self.pull_filter)
-
-        self.curated_list = QTreeView()
-        self.curated_list.setHeaderHidden(False)
-        self.curated_list.setRootIsDecorated(False)
-        self.curated_list.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers)
-        self.curated_list.setMaximumHeight(180)
-        self._curated_model = QStandardItemModel()
-        self._curated_model.setHorizontalHeaderLabels(["Model", "Size", "Description"])
-        self.curated_list.setModel(self._curated_model)
-        pl.addWidget(self.curated_list)
-
-        pull_row = QHBoxLayout()
-        pull_btn = QPushButton("Pull Selected")
-        pull_btn.setStyleSheet(BTN_PRIMARY)
-        pull_btn.clicked.connect(self._pull_curated)
-        pull_row.addWidget(pull_btn)
-        pull_row.addStretch()
-        pl.addLayout(pull_row)
-
-        custom_row = QHBoxLayout()
-        custom_row.addWidget(QLabel("Or pull any model:"))
-        self.custom_pull_name = QLineEdit()
-        self.custom_pull_name.setPlaceholderText("e.g. mistral:7b")
-        self.custom_pull_name.returnPressed.connect(self._pull_custom)
-        custom_row.addWidget(self.custom_pull_name)
-        pull_custom_btn = QPushButton("Pull")
-        pull_custom_btn.setStyleSheet(BTN_SECONDARY)
-        pull_custom_btn.clicked.connect(self._pull_custom)
-        custom_row.addWidget(pull_custom_btn)
-        pl.addLayout(custom_row)
-
-        self.pull_status = QLabel("")
-        self.pull_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        pl.addWidget(self.pull_status)
-
-        right.addWidget(pg)
-
-        # Use a scroll area for the right column so everything fits
+        # Wrap right column in scroll area
         rw = QWidget(); rw.setLayout(right)
         right_scroll = QScrollArea()
         right_scroll.setWidget(rw)
@@ -2600,7 +2600,7 @@ class ModelsTab(QWidget):
         right_scroll.setStyleSheet(f"QScrollArea {{ border: none; background: {C['bg']}; }}")
 
         sp = QSplitter(Qt.Orientation.Horizontal)
-        sp.addWidget(lw); sp.addWidget(right_scroll); sp.setSizes([260, 500])
+        sp.addWidget(lw); sp.addWidget(right_scroll); sp.setSizes([320, 440])
         layout.addWidget(sp)
 
         self._populate_curated_list()
@@ -2990,12 +2990,12 @@ class SettingsPanel(QWidget):
         self.tabs.setObjectName("settingsTabs")
         self.tabs.tabBar().setExpanding(False)
 
-        self.ai_tools_tab = AIToolsTab()
-        self.tabs.addTab(self.ai_tools_tab, "AI Tools")
-
         self.models_tab = ModelsTab()
         self.models_tab.model_changed.connect(self.model_changed.emit)
         self.tabs.addTab(self.models_tab, "Models")
+
+        self.ai_tools_tab = AIToolsTab()
+        self.tabs.addTab(self.ai_tools_tab, "AI Tools")
 
         layout.addWidget(self.tabs)
 
@@ -3704,7 +3704,7 @@ class MainWindow(QMainWindow):
     def _setup_statusbar(self):
         sb = QStatusBar()
         sb.setStyleSheet(
-            f"QStatusBar {{ background: {C['bg_sidebar']}; color: {C['fg_muted']};"
+            f"QStatusBar {{ background: {C['bg_sidebar']}; color: {C['fg_dim']};"
             f" border-top: 1px solid {C['border']}; {FONT_SMALL} }}"
             f" QStatusBar::item {{ border: none; }}")
         sb.setFixedHeight(26)
@@ -3714,15 +3714,15 @@ class MainWindow(QMainWindow):
         dot.setStyleSheet(f"color:{C['teal']};{FONT_SMALL} padding: 0 0 0 8px;")
         sb.addWidget(dot)
         self._status_board = QLabel("")
-        self._status_board.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL} padding: 0 8px;")
+        self._status_board.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL} padding: 0 8px;")
         sb.addWidget(self._status_board)
         self._update_status_board()
         # Right: model name + cursor position
         self._status_model = QLabel(OLLAMA_MODEL)
-        self._status_model.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL} padding: 0 8px;")
+        self._status_model.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL} padding: 0 8px;")
         sb.addPermanentWidget(self._status_model)
         self._status_cursor = QLabel("Ln 1, Col 1")
-        self._status_cursor.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL} padding: 0 8px;")
+        self._status_cursor.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL} padding: 0 8px;")
         sb.addPermanentWidget(self._status_cursor)
         # Connect board/port combo changes to status bar
         if hasattr(self, 'board_combo'):
@@ -3838,7 +3838,7 @@ class MainWindow(QMainWindow):
 
         self.model_desc_label = QLabel("")
         self.model_desc_label.setStyleSheet(
-            f"color:{C['fg_muted']};{FONT_SMALL}font-style:italic;"
+            f"color:{C['fg_dim']};{FONT_SMALL}font-style:italic;"
             f"background:transparent;border:none;margin-left:4px;")
         toolbar.addWidget(self.model_desc_label)
         self._update_model_desc()
