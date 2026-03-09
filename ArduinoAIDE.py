@@ -5176,6 +5176,7 @@ class MainWindow(QMainWindow):
         am = mb.addMenu("AI")
         am.addAction(self._make_action("Open AI Chat", lambda: self._switch_view(1), "Ctrl+Shift+A"))
         am.addAction(self._make_action("Send Errors to AI", self._send_errors_to_ai, "Ctrl+Shift+E"))
+        am.addAction(self._make_action("Fix Compile Errors", self.chat_panel._cmd_fix, "Ctrl+Shift+F"))
         am.addAction(self._make_action("Clear Chat", self.chat_panel.clear_chat))
 
         vm = mb.addMenu("View")
