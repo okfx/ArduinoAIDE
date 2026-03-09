@@ -262,6 +262,30 @@ class AIWorkResult:
     metadata: dict = field(default_factory=dict)
 
 
+def _diag_key(d):
+    """Identity key for a StructuredDiagnostic, ignoring line numbers
+    (which shift when code is edited). Matches on file + severity + message."""
+    return (os.path.basename(d.file), d.severity, d.message)
+
+def _diff_diagnostics(prev, curr):
+    """Compare two diagnostic lists. Returns (resolved, remaining, new) counts.
+    Uses file+severity+message matching (line numbers ignored)."""
+    from collections import Counter
+    prev_counts = Counter(_diag_key(d) for d in prev)
+    curr_counts = Counter(_diag_key(d) for d in curr)
+    all_keys = set(prev_counts) | set(curr_counts)
+    resolved = 0
+    remaining = 0
+    new = 0
+    for k in all_keys:
+        p = prev_counts.get(k, 0)
+        c = curr_counts.get(k, 0)
+        matched = min(p, c)
+        remaining += matched
+        resolved += p - matched
+        new += c - matched
+    return resolved, remaining, new
+
 _GCC_DIAG_RE = re.compile(
     r'^(.+?):(\d+):(?:(\d+):)?\s*(error|warning|note):\s*(.+)$')
 _LINKER_RE = re.compile(
@@ -2595,12 +2619,25 @@ class ChatPanel(QWidget):
             lines.append(f"  /{cmd}  —  {desc}")
         self._add_info_msg("\n".join(lines), C['fg'])
 
-    def show_fix_continuation(self, n_diags, attempt=0):
-        """Show the fix continuation bar after compile-after-AI-edits failure."""
-        s = "s" if n_diags != 1 else ""
-        attempt_prefix = f"Fix attempt {attempt} — " if attempt > 0 else ""
-        self._fix_continuation_label.setText(
-            f"{attempt_prefix}{n_diags} error{s} remain. Fix remaining errors?")
+    def show_fix_continuation(self, n_diags, attempt=0, diff=None):
+        """Show the fix continuation bar after compile-after-AI-edits failure.
+        diff is an optional (resolved, remaining, new) tuple from _diff_diagnostics."""
+        attempt_prefix = f"Fix attempt {attempt} \u2014 " if attempt > 0 else ""
+        if diff and attempt > 0:
+            resolved, remaining, new_count = diff
+            parts = []
+            if resolved:
+                parts.append(f"\u2713 {resolved} resolved")
+            if new_count:
+                parts.append(f"\u26a0 {new_count} new")
+            parts.append(f"\u2715 {remaining} remain")
+            diff_text = " \u00b7 ".join(parts)
+            self._fix_continuation_label.setText(
+                f"{attempt_prefix}{diff_text}. Fix remaining errors?")
+        else:
+            s = "s" if n_diags != 1 else ""
+            self._fix_continuation_label.setText(
+                f"{attempt_prefix}{n_diags} error{s} remain. Fix remaining errors?")
         self.fix_continuation_bar.show()
 
     def _on_fix_continuation_clicked(self):
@@ -5242,6 +5279,7 @@ class MainWindow(QMainWindow):
         self._ai_fix_pending_compile = False   # set True when AI edits are applied
         self._compile_follows_ai_edits = False  # captured at compile start
         self._fix_attempt_count = 0            # AI-assisted fix attempts in current session
+        self._prev_diagnostics = []            # snapshot before each fix attempt (for diff)
 
         self._setup_ui()
         self._setup_toolbar()
@@ -5692,6 +5730,7 @@ class MainWindow(QMainWindow):
         self._ai_fix_pending_compile = False
         self._compile_follows_ai_edits = False
         self._fix_attempt_count = 0
+        self._prev_diagnostics = []
         self.serial_monitor.refresh_ports()
         self.setWindowTitle(f"{WINDOW_TITLE} — {os.path.basename(path)}")
         self.editor.open_all_project_files(path)
@@ -5722,12 +5761,14 @@ class MainWindow(QMainWindow):
         self._ai_fix_pending_compile = True
 
     def _on_fix_triggered(self):
-        """Increment fix attempt counter when user invokes /fix or continuation fix."""
+        """Increment fix attempt counter and snapshot diagnostics for diffing."""
         self._fix_attempt_count += 1
+        self._prev_diagnostics = list(getattr(self, '_compiler_diagnostics', []))
 
     def _reset_fix_attempt_count(self):
-        """Reset fix attempt counter at the start of a new compile session."""
+        """Reset fix attempt counter and diagnostic snapshot."""
         self._fix_attempt_count = 0
+        self._prev_diagnostics = []
 
     def _on_model_switch(self, model_name):
         """Handle /model command — update toolbar combo and status bar."""
@@ -5901,7 +5942,11 @@ class MainWindow(QMainWindow):
             self._compile_follows_ai_edits = False
             hint = f"\nErrors remain after applying AI changes ({n} diagnostic{'s' if n != 1 else ''})."
             self.compiler_output.append_output(hint, C["fg_warn"])
-            self.chat_panel.show_fix_continuation(n, self._fix_attempt_count)
+            # Compute diagnostic diff if we have a previous snapshot
+            diff = None
+            if self._prev_diagnostics:
+                diff = _diff_diagnostics(self._prev_diagnostics, self._compiler_diagnostics)
+            self.chat_panel.show_fix_continuation(n, self._fix_attempt_count, diff)
         else:
             hint = f"\nType /fix in AI Chat to auto-fix ({n} diagnostic{'s' if n != 1 else ''})"
             self.compiler_output.append_output(hint, C["teal"])
