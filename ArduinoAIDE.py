@@ -11,6 +11,7 @@ Requirements:
 """
 
 import sys, os, json, glob, re, threading, subprocess, math, html
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -131,6 +132,93 @@ BTN_CHAT_STOP = (f"background:{C['bg_input']};color:{C['fg']};border:1px solid {
 PANEL_HEADER_STYLE = (
     f"background: {C['bg']}; border-bottom: 1px solid {C['border']};"
     f" min-height: 36px; max-height: 40px;")
+
+# =============================================================================
+# Working Set — prioritized file context with token budget
+# =============================================================================
+
+@dataclass
+class WorkingSetEntry:
+    """A single file in the working set with its priority and content."""
+    filepath: str          # absolute path
+    rel_path: str          # relative to project root
+    priority: int          # 0=active tab, 1=AI-edited, 2=user-opened, 3=project file
+    content: str
+    token_estimate: int    # len(content) // 4 approximation
+
+
+@dataclass
+class WorkingSet:
+    """Manages which project files the AI sees, constrained by a token budget.
+    High-priority files (active tab, AI-edited) are always included.
+    Lower-priority files are included until the budget is exhausted."""
+    entries: dict = field(default_factory=dict)   # rel_path -> WorkingSetEntry
+    budget: int = 12_000                          # max tokens for file content
+
+    def add(self, filepath, rel_path, priority, content):
+        """Add or update a file in the working set."""
+        est = len(content) // 4
+        self.entries[rel_path] = WorkingSetEntry(filepath, rel_path, priority, content, est)
+
+    def remove(self, rel_path):
+        """Remove a file from the working set."""
+        self.entries.pop(rel_path, None)
+
+    def clear(self):
+        """Remove all entries."""
+        self.entries.clear()
+
+    def build_context(self, project_name, project_path, tree_str):
+        """Build context string fitting within token budget.
+        High-priority files are included first; overflow gets a one-line stub."""
+        sorted_entries = sorted(self.entries.values(), key=lambda e: e.priority)
+        included = []
+        stubs = []
+        used = 0
+        for entry in sorted_entries:
+            if used + entry.token_estimate <= self.budget or entry.priority == 0:
+                included.append(entry)
+                used += entry.token_estimate
+            else:
+                size_chars = len(entry.content)
+                stubs.append(
+                    f"[FILE: {entry.rel_path} — {size_chars} chars, not included (budget)]")
+        parts = [
+            f"[PROJECT: {project_name}]",
+            f"[DIRECTORY: {project_path}]",
+            "",
+            "[PROJECT STRUCTURE]",
+            tree_str,
+            "",
+        ]
+        if included:
+            parts.append(
+                f"[Included {len(included)} file(s), {len(stubs)} excluded by budget]")
+            parts.append("")
+            for e in included:
+                parts.append(f"========== FILE: {e.rel_path} ==========")
+                parts.append(e.content)
+                parts.append(f"========== END: {e.rel_path} ==========\n")
+        if stubs:
+            parts.extend(stubs)
+        return "\n".join(parts)
+
+    @property
+    def total_tokens(self):
+        """Total estimated tokens across all entries."""
+        return sum(e.token_estimate for e in self.entries.values())
+
+    @property
+    def included_count(self):
+        """Number of files that would fit within the budget."""
+        sorted_entries = sorted(self.entries.values(), key=lambda e: e.priority)
+        used = 0
+        count = 0
+        for e in sorted_entries:
+            if used + e.token_estimate <= self.budget or e.priority == 0:
+                used += e.token_estimate
+                count += 1
+        return count
 
 
 def _make_panel_header(title_text=""):
@@ -1420,6 +1508,10 @@ class ChatPanel(QWidget):
         self._error_context = ""
         self._editor_ref = None          # will be set by MainWindow
         self._pending_edits = []         # list of parsed edit operations
+        self._working_set = WorkingSet()          # shadow context tracker (Step 2)
+        self._ai_edited_files = set()             # rel_paths of files the AI has edited
+        self._use_working_set_context = True      # WorkingSet is default; /debug-use-ws off for old path
+        self._last_prompt_stats = None            # dict: stats from the last actual prompt sent
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1559,6 +1651,9 @@ class ChatPanel(QWidget):
     def set_project_path(self, path):
         """Set the project directory path for context."""
         self._project_path = path
+        # Reset working set and edit tracking for new project
+        self._working_set.clear()
+        self._ai_edited_files.clear()
         # Update system prompt (picks up .aide_prompt if present)
         if self._conversation and self._conversation[0]["role"] == "system":
             self._conversation[0]["content"] = self._build_system_prompt()
@@ -1662,48 +1757,133 @@ class ChatPanel(QWidget):
         return os.path.abspath(filename)
 
     def _build_file_context(self):
-        """Build a string with ALL project files for the AI to see.
-        Reads from disk so the AI sees everything, not just open tabs."""
+        """Build file context string for AI prompts. Uses WorkingSet with token budget
+        by default. Hidden fallback to full-context via /debug-use-ws off."""
         proj = getattr(self, '_project_path', None) or ""
 
         if not proj:
-            # Fallback: use open editor files if no project path
+            # No project path: include all open editor files directly
+            self._working_set.clear()
             if not self._editor_ref:
                 return ""
             files = self._editor_ref.get_all_files()
             if not files:
                 return ""
-            parts = ["[PROJECT: unknown]\n"]
             names = []
             for fp, content in files.items():
                 basename = os.path.basename(fp)
                 names.append(basename)
-                parts.append(f"========== FILE: {basename} ==========\n{content}\n========== END: {basename} ==========\n")
+                self._working_set.add(fp, basename, 2, content)
             self._update_context_display("unknown", "", names)
-            return "\n".join(parts)
+            context = self._working_set.build_context("unknown", "", "")
+            self._last_prompt_stats = {
+                "mode": "WorkingSet",
+                "file_count": len(names),
+                "excluded_count": 0,
+                "tokens": len(context) // 4,
+                "active_included": True,
+                "ai_edited_included": True,
+                "warnings": [],
+            }
+            return context
 
         proj_name = os.path.basename(proj)
         tree = self._build_directory_tree(proj)
         all_files = self._scan_project_files(proj)
 
-        parts = [
-            f"[PROJECT: {proj_name}]",
-            f"[DIRECTORY: {proj}]",
-            "",
-            "[PROJECT STRUCTURE]",
-            tree,
-            "",
-            f"[The following {len(all_files)} files are in the project. "
-            f"This is the COMPLETE content of each file.]",
-            "",
-        ]
-        names = []
-        for rel_path, content in sorted(all_files.items()):
-            names.append(rel_path)
-            parts.append(f"========== FILE: {rel_path} ==========\n{content}\n========== END: {rel_path} ==========\n")
+        # Populate working set with priorities
+        # 0=active tab, 1=AI-edited, 2=open-but-not-active, 3=other project file
+        self._working_set.clear()
+        active_file = self._editor_ref.current_file() if self._editor_ref else None
+        open_files = self._editor_ref.get_all_files() if self._editor_ref else {}
+        open_paths = {os.path.normpath(fp) for fp in open_files}
+        for rel_path, content in all_files.items():
+            abs_path = os.path.join(proj, rel_path)
+            norm_path = os.path.normpath(abs_path)
+            if active_file and norm_path == os.path.normpath(active_file):
+                priority = 0
+            elif rel_path in self._ai_edited_files:
+                priority = 1
+            elif norm_path in open_paths:
+                priority = 2
+            else:
+                priority = 3
+            self._working_set.add(abs_path, rel_path, priority, content)
 
-        self._update_context_display(proj_name, proj, names)
-        return "\n".join(parts)
+        self._update_context_display(proj_name, proj, sorted(all_files.keys()))
+
+        # Debug fallback: old full-context (all files, no budget)
+        if not self._use_working_set_context:
+            parts = [
+                f"[PROJECT: {proj_name}]", f"[DIRECTORY: {proj}]", "",
+                "[PROJECT STRUCTURE]", tree, "",
+                f"[The following {len(all_files)} files are in the project. "
+                f"This is the COMPLETE content of each file.]", "",
+            ]
+            for rel_path, content in sorted(all_files.items()):
+                parts.append(f"========== FILE: {rel_path} ==========\n{content}\n========== END: {rel_path} ==========\n")
+            old_context = "\n".join(parts)
+            self._last_prompt_stats = {
+                "mode": "old full-context",
+                "file_count": len(all_files),
+                "excluded_count": 0,
+                "tokens": len(old_context) // 4,
+                "active_included": True,
+                "ai_edited_included": True,
+                "warnings": [],
+            }
+            return old_context
+
+        # Primary path: WorkingSet with token budget
+        context = self._working_set.build_context(proj_name, proj, tree)
+        included = set()
+        excluded = set()
+        sorted_entries = sorted(self._working_set.entries.values(), key=lambda e: e.priority)
+        used = 0
+        for e in sorted_entries:
+            if used + e.token_estimate <= self._working_set.budget or e.priority == 0:
+                included.add(e.rel_path)
+                used += e.token_estimate
+            else:
+                excluded.add(e.rel_path)
+
+        active_ok = any(e.priority == 0 and e.rel_path in included
+                        for e in self._working_set.entries.values())
+        edited_ok = all(f in included for f in self._ai_edited_files) if self._ai_edited_files else True
+        warnings = self._check_working_set_safety(included)
+
+        self._last_prompt_stats = {
+            "mode": "WorkingSet",
+            "file_count": len(included),
+            "excluded_count": len(excluded),
+            "tokens": len(context) // 4,
+            "active_included": active_ok,
+            "ai_edited_included": edited_ok,
+            "warnings": warnings,
+        }
+        return context
+
+    def _check_working_set_safety(self, included_files):
+        """Check that WorkingSet includes critical files. Returns list of warning strings.
+        Also emits debug warnings to chat if problems are found."""
+        warnings = []
+        # Check active file
+        active_entry = None
+        for e in self._working_set.entries.values():
+            if e.priority == 0:
+                active_entry = e
+                break
+        if active_entry and active_entry.rel_path not in included_files:
+            msg = f"[debug] WARNING: active file '{active_entry.rel_path}' excluded by budget!"
+            warnings.append(msg)
+            self._add_info_msg(msg, C['fg_err'])
+        # Check AI-edited files
+        for rel_path in self._ai_edited_files:
+            if rel_path not in included_files:
+                msg = f"[debug] WARNING: AI-edited file '{rel_path}' excluded by budget!"
+                warnings.append(msg)
+                self._add_info_msg(msg, C['fg_err'])
+        return warnings
 
     def _build_git_context(self):
         """Build git status context for the AI (branch, recent commits, diff stat)."""
@@ -1781,6 +1961,10 @@ class ChatPanel(QWidget):
             self._cmd_help()
         elif cmd == "context":
             self._cmd_context()
+        elif cmd == "debug-ws":
+            self._cmd_debug_working_set()
+        elif cmd == "debug-use-ws":
+            self._cmd_debug_use_ws(args)
         else:
             self._add_info_msg(
                 f"Unknown command: /{cmd} — type /help for available commands.",
@@ -1894,6 +2078,97 @@ class ChatPanel(QWidget):
         if len(total) > 2000:
             preview += f"\n... ({len(total) - 2000:,} more chars)"
         self._add_info_msg(f"{summary}\n\n{preview}", C['fg_dim'])
+
+    def _cmd_debug_working_set(self):
+        """Debug command: dump WorkingSet contents and last prompt stats."""
+        PRIORITY_LABELS = {0: "active-tab", 1: "ai-edited", 2: "open-tab", 3: "project"}
+        ws = self._working_set
+        if not ws.entries:
+            self._add_info_msg(
+                "[debug] WorkingSet is empty.\n"
+                "Send a message first to populate it.",
+                C['fg_dim'])
+            return
+
+        # Summary counts by priority
+        counts = {}
+        for e in ws.entries.values():
+            label = PRIORITY_LABELS.get(e.priority, f"p{e.priority}")
+            counts[label] = counts.get(label, 0) + 1
+
+        live_mode = "WorkingSet (default)" if self._use_working_set_context else "old full-context (debug fallback)"
+        lines = [
+            f"[debug] WorkingSet — {len(ws.entries)} entries, "
+            f"~{ws.total_tokens:,} tokens total, budget={ws.budget:,}",
+            f"  LIVE MODE: {live_mode}",
+            f"  would include: {ws.included_count} files",
+            f"  breakdown: {', '.join(f'{v} {k}' for k, v in sorted(counts.items()))}",
+            f"  ai_edited_files: {sorted(self._ai_edited_files) if self._ai_edited_files else '(none)'}",
+            "",
+        ]
+        # Per-file listing sorted by priority then path
+        sorted_entries = sorted(ws.entries.values(), key=lambda e: (e.priority, e.rel_path))
+        for e in sorted_entries:
+            label = PRIORITY_LABELS.get(e.priority, f"p{e.priority}")
+            in_budget = "✓" if self._entry_in_budget(e) else "✗"
+            lines.append(f"  {in_budget} [{label}] {e.rel_path}  (~{e.token_estimate:,} tok)")
+
+        # Last actual prompt stats
+        lps = self._last_prompt_stats
+        if lps:
+            lines.append("")
+            lines.append("--- last prompt ---")
+            lines.append(f"  mode: {lps['mode']}")
+            lines.append(f"  files: {lps['file_count']} included" +
+                         (f", {lps['excluded_count']} excluded" if lps['excluded_count'] else ""))
+            lines.append(f"  tokens: ~{lps['tokens']:,}")
+            lines.append(f"  active file included: {'yes' if lps['active_included'] else 'NO'}")
+            lines.append(f"  all AI-edited included: {'yes' if lps['ai_edited_included'] else 'NO'}")
+            if lps['warnings']:
+                lines.append(f"  warnings ({len(lps['warnings'])}):")
+                for w in lps['warnings']:
+                    lines.append(f"    {w}")
+        else:
+            lines.append("")
+            lines.append("--- last prompt: (none sent yet) ---")
+
+        self._add_info_msg("\n".join(lines), C['fg_dim'])
+
+    def _entry_in_budget(self, target_entry):
+        """Check if a specific entry would be included within the token budget."""
+        sorted_entries = sorted(self._working_set.entries.values(), key=lambda e: e.priority)
+        used = 0
+        for e in sorted_entries:
+            if used + e.token_estimate <= self._working_set.budget or e.priority == 0:
+                used += e.token_estimate
+                if e.rel_path == target_entry.rel_path:
+                    return True
+            else:
+                if e.rel_path == target_entry.rel_path:
+                    return False
+        return False
+
+    def _cmd_debug_use_ws(self, args):
+        """Debug toggle: switch between WorkingSet (default) and old full-context (fallback)."""
+        arg = args.strip().lower()
+        if arg == "on":
+            self._use_working_set_context = True
+            self._add_info_msg(
+                "[debug] Live context: WorkingSet (default, budget-constrained)\n"
+                "This is the normal default mode.",
+                C['fg_ok'])
+        elif arg == "off":
+            self._use_working_set_context = False
+            self._add_info_msg(
+                "[debug] Live context: old full-context (debug fallback)\n"
+                "All project files will be included. Use /debug-use-ws on to restore default.",
+                C['fg_warn'])
+        else:
+            mode = "WorkingSet (default)" if self._use_working_set_context else "old full-context (debug fallback)"
+            self._add_info_msg(
+                f"[debug] Current live context mode: {mode}\n"
+                f"Usage: /debug-use-ws on | off",
+                C['fg_dim'])
 
     def send_ai_action(self, prompt):
         """Called from the right-click AI context menu in the code editor."""
@@ -2155,6 +2430,18 @@ class ChatPanel(QWidget):
             # Fallback: detect fenced code blocks (```...```) and offer to insert
             self._parse_code_blocks(response)
 
+    def _track_ai_edited_file(self, filename):
+        """Record that the AI edited this file (for working set priority)."""
+        proj = getattr(self, '_project_path', None) or ""
+        if not proj:
+            return
+        abs_path = self._resolve_file_path(filename)
+        try:
+            rel = os.path.relpath(abs_path, proj)
+            self._ai_edited_files.add(rel)
+        except ValueError:
+            pass  # abs_path not under proj
+
     def _apply_all_edits(self):
         """Apply all parsed edits to the editor. Supports creating new files."""
         if not self._editor_ref or not self._pending_edits:
@@ -2177,6 +2464,7 @@ class ChatPanel(QWidget):
                     # Open the new file in the editor
                     self._editor_ref.open_file(abs_path)
                     applied += 1
+                    self._track_ai_edited_file(filename)
                     continue
                 except OSError as e:
                     errors.append(f"Could not create {filename}: {e}")
@@ -2200,6 +2488,7 @@ class ChatPanel(QWidget):
                 # Full file replacement
                 if self._editor_ref.set_file_content(fp, new):
                     applied += 1
+                    self._track_ai_edited_file(filename)
                 else:
                     errors.append(f"Could not write: {filename}")
             elif edit_type == "edit":
@@ -2210,6 +2499,7 @@ class ChatPanel(QWidget):
                     new_content = content.replace(old, new, 1)
                     if self._editor_ref.set_file_content(fp, new_content):
                         applied += 1
+                        self._track_ai_edited_file(filename)
                     else:
                         errors.append(f"Could not write: {filename}")
                 else:
@@ -2270,6 +2560,8 @@ class ChatPanel(QWidget):
         self._conversation = [{"role": "system", "content": self._build_system_prompt()}]
         self.apply_bar.hide()
         self._pending_edits = []
+        self._ai_edited_files.clear()
+        self._working_set.clear()
         self._update_context_bar()
 
     def _update_context_display(self, proj_name, proj_path, names):
