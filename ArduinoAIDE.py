@@ -3023,24 +3023,61 @@ class ChatPanel(QWidget):
         self.worker.error_occurred.connect(self._on_error)
         self.thread.started.connect(self.worker.run)
 
+    def _extract_edit_blocks(self, text):
+        """Parse <<<EDIT and <<<FILE blocks using a line-by-line state machine.
+        Handles >>> and <<< inside code content, blank lines between markers,
+        and trailing newlines in captured sections. Returns list[ProposedEdit]."""
+        edits = []
+        lines = text.split('\n')
+        state = 'idle'
+        filename = ''
+        old_lines = []
+        new_lines = []
+        file_lines = []
+
+        for line in lines:
+            stripped = line.strip()
+            if state == 'idle':
+                if stripped.startswith('<<<EDIT') and len(stripped) > 7:
+                    filename = stripped[7:].strip()
+                    old_lines = []; new_lines = []
+                    state = 'expect_old'
+                elif stripped.startswith('<<<FILE') and len(stripped) > 7:
+                    filename = stripped[7:].strip()
+                    file_lines = []
+                    state = 'file'
+            elif state == 'expect_old':
+                if stripped == '<<<OLD':
+                    state = 'old'
+                # else: skip any prose between <<<EDIT and <<<OLD
+            elif state == 'old':
+                if stripped == '>>>NEW':
+                    state = 'new'
+                else:
+                    old_lines.append(line)
+            elif state == 'new':
+                if stripped == '>>>END':
+                    edits.append(ProposedEdit(
+                        "edit", filename,
+                        '\n'.join(old_lines).rstrip('\n'),
+                        '\n'.join(new_lines).rstrip('\n')))
+                    state = 'idle'; filename = ''; old_lines = []; new_lines = []
+                else:
+                    new_lines.append(line)
+            elif state == 'file':
+                if stripped == '>>>FILE':
+                    edits.append(ProposedEdit(
+                        "file", filename, None,
+                        '\n'.join(file_lines)))
+                    state = 'idle'; filename = ''; file_lines = []
+                else:
+                    file_lines.append(line)
+        return edits
+
     def _parse_edits(self, response, result=None):
         """Parse <<<EDIT and <<<FILE blocks from the AI response.
         Populates result.proposed_edits if an AIWorkResult is provided."""
-        edits = []  # list[ProposedEdit]
-
-        # Parse <<<EDIT filename\n<<<OLD\n...\n>>>NEW\n...\n>>>END
-        edit_pat = re.compile(
-            r'<<<EDIT\s+(\S+)\s*\n<<<OLD\n(.*?)\n>>>NEW\n(.*?)\n>>>END',
-            re.DOTALL)
-        for m in edit_pat.finditer(response):
-            edits.append(ProposedEdit("edit", m.group(1), m.group(2), m.group(3)))
-
-        # Parse <<<FILE filename\n...\n>>>FILE
-        file_pat = re.compile(
-            r'<<<FILE\s+(\S+)\s*\n(.*?)\n>>>FILE',
-            re.DOTALL)
-        for m in file_pat.finditer(response):
-            edits.append(ProposedEdit("file", m.group(1), None, m.group(2)))
+        edits = self._extract_edit_blocks(response)
 
         if result is not None:
             result.proposed_edits.extend(edits)
@@ -3165,7 +3202,8 @@ class ChatPanel(QWidget):
             edit.warnings.append("anchor text not found in file")
 
     def _validate_replace_file(self, edit):
-        """Validate a replace_file edit — warn on suspicious shrinkage."""
+        """Validate a replace_file edit — block if new content is <50% of original
+        (likely a truncated snippet masquerading as a full file replacement)."""
         try:
             existing_size = os.path.getsize(edit.resolved_path)
         except OSError:
@@ -3173,8 +3211,10 @@ class ChatPanel(QWidget):
         new_size = len(edit.new_text.encode('utf-8'))
         if existing_size > 0 and new_size < existing_size * 0.5:
             pct = int((1 - new_size / existing_size) * 100)
+            edit.blocked = True
             edit.warnings.append(
-                f"replaces file content, shrinks by {pct}%")
+                f"blocked: new content is {pct}% smaller than original "
+                f"— likely a truncated snippet. Dismiss and ask AI to use <<<EDIT blocks.")
 
     def _validate_create_file(self, edit):
         """Validate a create_file edit — reclassify if file exists."""
@@ -3183,15 +3223,18 @@ class ChatPanel(QWidget):
             edit.warnings.append("file already exists, will overwrite")
 
     def _validate_filename_ambiguity(self, edit):
-        """Warn if the edit's filename matches multiple open files."""
+        """Block if the edit's filename matches multiple open files — applying to
+        the wrong file silently would be worse than blocking."""
         if not self._editor_ref:
             return
         basename = os.path.basename(edit.filename)
         matches = [fp for fp in self._editor_ref._editors
                     if os.path.basename(fp) == basename]
         if len(matches) > 1:
+            edit.blocked = True
             edit.warnings.append(
-                f"filename is ambiguous, matches {len(matches)} open files")
+                f"blocked: \"{basename}\" matches {len(matches)} open files "
+                f"— specify the full path")
 
     def _get_file_content_for_validation(self, edit):
         """Get file content for validation: open editors first, then disk.
@@ -3222,7 +3265,8 @@ class ChatPanel(QWidget):
             pass  # abs_path not under proj
 
     def _apply_all_edits(self):
-        """Apply all parsed edits to the editor. Skips blocked and rejected edits."""
+        """Apply all parsed edits to the editor. Skips blocked and rejected edits.
+        Re-validates anchors at apply time (files may have changed since parse)."""
         if not self._editor_ref or not self._pending_edits:
             return
         applied = 0
@@ -3260,11 +3304,11 @@ class ChatPanel(QWidget):
                     self._editor_ref.open_file(abs_path)
                     fp = abs_path
                 else:
-                    errors.append(f"File not found: {edit.filename}")
+                    errors.append(f"✗ File not found: {edit.filename}")
                     continue
 
             if not fp:
-                errors.append(f"File not found: {edit.filename}")
+                errors.append(f"✗ File not found: {edit.filename}")
                 continue
 
             if edit.operation == "replace_file":
@@ -3272,36 +3316,49 @@ class ChatPanel(QWidget):
                     applied += 1
                     self._track_ai_edited_file(edit.filename)
                 else:
-                    errors.append(f"Could not write: {edit.filename}")
+                    errors.append(f"✗ Could not write: {edit.filename}")
             elif edit.operation == "search_replace":
                 files = self._editor_ref.get_all_files()
                 content = files.get(fp, "")
-                # Use matched_text from normalized matching if available
-                anchor = edit.matched_text or edit.old_text
-                if anchor in content:
+                # Re-validate anchor at apply time (file may have changed since parse)
+                anchor = None
+                if edit.matched_text and edit.matched_text in content:
+                    anchor = edit.matched_text
+                elif edit.old_text and edit.old_text in content:
+                    anchor = edit.old_text
+                else:
+                    # Last-resort: re-run normalized matching
+                    norm_matches = _find_normalized_matches(content, edit.old_text)
+                    if norm_matches:
+                        start, end = norm_matches[0]
+                        anchor = content[start:end]
+                if anchor is not None:
+                    line_num = content[:content.find(anchor)].count('\n') + 1
                     new_content = content.replace(anchor, edit.new_text, 1)
                     if self._editor_ref.set_file_content(fp, new_content):
                         applied += 1
                         self._track_ai_edited_file(edit.filename)
                     else:
-                        errors.append(f"Could not write: {edit.filename}")
+                        errors.append(f"✗ Could not write {edit.filename}")
                 else:
-                    errors.append(f"Could not find matching code in {edit.filename}")
+                    errors.append(
+                        f"✗ Anchor not found in {edit.filename} — "
+                        f"copy the change manually or ask AI to retry")
             elif edit.operation == "create_file":
                 # create_file but file is already open — replace content
                 if self._editor_ref.set_file_content(fp, edit.new_text):
                     applied += 1
                     self._track_ai_edited_file(edit.filename)
                 else:
-                    errors.append(f"Could not write: {edit.filename}")
+                    errors.append(f"✗ Could not write: {edit.filename}")
 
-        parts = [f"Applied {applied} change{'s' if applied != 1 else ''}."]
+        parts = [f"Applied {applied}/{applied + len(errors)} change{'s' if applied != 1 else ''}."]
         if rejected:
-            parts.append(f"Rejected {rejected} file{'s' if rejected != 1 else ''}.")
+            parts.append(f"Rejected {rejected}.")
         if skipped:
             parts.append(f"Skipped {skipped} blocked.")
         if errors:
-            parts.append("Errors: " + "; ".join(errors))
+            parts.extend(errors)
         self._add_info_msg(" ".join(parts),
                            C['fg_ok'] if not errors else C['fg_warn'])
         self.apply_bar.hide()
