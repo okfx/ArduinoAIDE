@@ -1186,11 +1186,18 @@ class TabbedEditor(QWidget):
         return result
 
     def set_file_content(self, filepath, content):
-        """Set content of an open file by path. Returns True if found."""
+        """Set content of an open file by path. Updates editor and saves to disk.
+        Returns True if found."""
         if filepath in self._editors:
             ed = self._editors[filepath]
             if hasattr(ed, 'setText'): ed.setText(content)
             else: ed.setPlainText(content)
+            # Save to disk so changes persist
+            try:
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(content)
+            except OSError:
+                pass  # Editor updated even if disk write fails
             return True
         return False
 
