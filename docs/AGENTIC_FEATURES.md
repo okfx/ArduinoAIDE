@@ -34,7 +34,7 @@ For visual styling, see `DESIGN_SYSTEM.md`. For existing behavior, see `APP_BEHA
 | Attach Diff button | 4d | NOT STARTED |
 | `/audit`, `/refactor` commands | 5b | NOT STARTED |
 | `/diff`, `/commit` commands | 5b | NOT STARTED |
-| Slash command autocomplete | 5c | NOT STARTED |
+| Slash command autocomplete | 5c | **DONE** — popup with keyboard nav, filtering |
 | AI-triggered compile | 7 | NOT STARTED (AIWorkResult has `request_compile` field ready) |
 | Conversation persistence | 8 | NOT STARTED |
 | Project-level .aide_prompt | 9 | NOT STARTED |
@@ -387,7 +387,7 @@ This integrates with the `<<<COMPILE` command (Section 7) and the WorkingSet sys
 14. **AI commit messages** — Section 4b
 
 ### Phase 4 — Polish
-15. **Slash command autocomplete popup** — Section 5c
+15. ~~Slash command autocomplete popup~~ — Section 5c (DONE)
 16. **Conversation persistence** — Section 8
 17. **Attach Diff button** — Section 4d
 18. **Merge conflict resolution** — Section 4c
