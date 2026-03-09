@@ -109,8 +109,8 @@ FONT_SECTION  = "font-size: 13px; font-weight: bold;"     # Section headers (Bra
 FONT_BODY     = "font-size: 13px;"                        # Standard body text
 FONT_SMALL    = "font-size: 11px;"                        # Hints, status, secondary labels
 FONT_CODE     = "font-family: Menlo, Monaco, 'Courier New', monospace; font-size: 13px;"
-FONT_CHAT     = "font-family: -apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 14px;"
-FONT_CHAT_BOLD = "font-family: -apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 14px; font-weight: bold;"
+FONT_CHAT     = "font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 14px;"
+FONT_CHAT_BOLD = "font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 14px; font-weight: bold;"
 FONT_ICON      = "font-size: 16px;"                        # Sidebar icon characters
 
 # Shared button style strings
