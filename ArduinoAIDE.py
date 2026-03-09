@@ -1989,6 +1989,13 @@ class ChatPanel(QWidget):
         # Reset working set and edit tracking for new project
         self._working_set.clear()
         self._ai_edited_files.clear()
+        # Discard any pending edits from the previous project
+        self._pending_edits = []
+        self._file_acceptance = {}
+        self._clear_apply_file_rows()
+        self.apply_bar.hide()
+        self.recompile_bar.hide()
+        self.fix_continuation_bar.hide()
         # Update system prompt (picks up .aide_prompt if present)
         if self._conversation and self._conversation[0]["role"] == "system":
             self._conversation[0]["content"] = self._build_system_prompt()
@@ -1996,6 +2003,9 @@ class ChatPanel(QWidget):
     def set_error_context(self, e, diagnostics=None):
         self._error_context = e
         self._error_diagnostics = diagnostics or []
+        # If the apply bar is open, refresh its intent badge with updated diagnostics
+        if self._pending_edits:
+            self._refresh_apply_summary()
 
     def _build_diagnostic_context(self):
         """Build structured diagnostic context for the AI prompt.
