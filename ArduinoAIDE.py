@@ -2824,6 +2824,7 @@ class ChatPanel(QWidget):
         row.setContentsMargins(0, 0, 12, 0)
         row.addStretch()
         bubble = QFrame()
+        bubble.setMinimumWidth(200)
         bubble.setMaximumWidth(600)
         bubble.setStyleSheet(
             f"QFrame {{ background-color:{C['bg_input']}; border-radius:14px; }}")
