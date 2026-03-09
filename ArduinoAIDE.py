@@ -1609,7 +1609,7 @@ class ChatPanel(QWidget):
         chat_container.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._chat_layout = QVBoxLayout(chat_container)
-        self._chat_layout.setContentsMargins(20, 16, 20, 16)
+        self._chat_layout.setContentsMargins(10, 16, 10, 16)
         self._chat_layout.setSpacing(20)
         self._chat_layout.addStretch()
         outer_layout.addWidget(chat_container)
