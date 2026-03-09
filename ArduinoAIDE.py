@@ -2062,7 +2062,7 @@ class ChatPanel(QWidget):
 
     def eventFilter(self, obj, event):
         """Handle keyboard navigation for slash command popup."""
-        if obj == self.input_field and self._slash_popup.isVisible():
+        if obj == self.input_field and hasattr(self, '_slash_popup') and self._slash_popup.isVisible():
             from PyQt6.QtCore import QEvent
             if event.type() == QEvent.Type.KeyPress:
                 key = event.key()
