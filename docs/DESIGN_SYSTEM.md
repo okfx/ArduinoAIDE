@@ -55,6 +55,8 @@ C = {
     "syn_pp":       "#c586c0",   # Preprocessor, control flow
     "syn_type":     "#4ec9b0",   # Types (int, void, uint8_t)
     "syn_fn":       "#dcdcaa",   # Function names
+    # Operators (+, -, =, etc.) and identifiers use C['fg'] (#d4d4d4)
+    # — they must be explicitly set in the lexer to avoid black defaults
 }
 ```
 
@@ -222,10 +224,31 @@ Speaker "You": FONT_CHAT_BOLD, color C['fg_link'], right-aligned, 6px right padd
 ### Chat AI Message
 ```
 Alignment: left
+Max width: 700px (wrapper QWidget)
 Background: transparent (no bubble)
 Text: FONT_CHAT, color C['fg'], in a QTextEdit (for streaming)
 QTextEdit: transparent bg, no border, no scrollbars, auto-resize
 Speaker: FONT_CHAT_BOLD, color C['teal'], left-aligned, 2px left padding
+```
+
+### Chat Code Block (in AI responses, post-rendered HTML)
+```
+Background: C['bg_input']
+Border: 1px solid C['border_light']
+Font: Menlo, Monaco, Courier New, monospace — 13px
+Padding: 10px, margin: 6px 0
+Language label: C['fg_dim'], 11px
+```
+
+### Chat Edit Block (<<<EDIT / <<<FILE in AI responses)
+```
+Background: C['bg_input']
+Border: 1px solid C['border_light'], border-left: 3px solid C['teal']
+Font: Menlo, Monaco, Courier New, monospace — 13px
+Padding: 10px, margin: 6px 0
+Header ("EDIT: filename"): C['teal'], 12px, bold
+OLD marker: C['fg_dim']
+NEW marker: C['teal']
 ```
 
 ### Chat Input

@@ -86,11 +86,11 @@ Layout:
 
 ### AI Message (left-aligned, NO bubble)
 
-The AI response should look like Claude Code's responses — clean text flowing directly on the dark background with no container.
+The AI response should look like Claude Code's responses — clean text flowing directly on the dark background with no container. The wrapper is constrained to 700px max width to keep text at a comfortable reading width.
 
 ```
 Layout:
-  QWidget container
+  QWidget container (max-width: 700px)
     QVBoxLayout (margins: 0, spacing: 4)
       QLabel model_name
         style: color: C['teal'] (#00979d), FONT_CHAT_BOLD
@@ -113,6 +113,7 @@ Layout:
 **Key details:**
 - NO bubble, NO background color, NO border. Just text on the dark bg.
 - The QTextEdit must have `background: transparent` — it should be invisible as a container.
+- Max width 700px on the wrapper keeps text readable on wide windows.
 - Speaker name is the same 14px size as the message text, just bold and teal.
 - The streaming QTextEdit auto-resizes its height as tokens arrive.
 - Scrollbars must be off on the QTextEdit — the parent QScrollArea handles scrolling.
@@ -132,6 +133,40 @@ Layout:
         style: color: C['fg_err_text'] (#f08080), FONT_CHAT
         background: transparent, border: none
         padding-left: 2px
+```
+
+### Code Blocks in AI Responses (post-rendered)
+
+After streaming completes, `_render_formatted_response()` re-renders the AI QTextEdit HTML. Fenced code blocks and edit blocks each have distinct styling.
+
+**Fenced code blocks** (` ``` `)  — terminal-style:
+```
+Container: <div> inside QTextEdit HTML
+  background: C['bg_input']
+  border: 1px solid C['border_light']
+  padding: 10px
+  margin: 6px 0
+  font: Menlo, Monaco, Courier New, monospace, 13px
+Language label (if present):
+  color: C['fg_dim'], font-size: 11px, margin-bottom: 4px
+Content: <pre> with white-space: pre-wrap
+```
+
+**Edit blocks** (`<<<EDIT` / `<<<FILE`) — teal accent:
+```
+Container: <div> inside QTextEdit HTML
+  background: C['bg_input']
+  border: 1px solid C['border_light']
+  border-left: 3px solid C['teal']   ← distinguishes from regular code blocks
+  padding: 10px
+  margin: 6px 0
+  font: Menlo, Monaco, Courier New, monospace, 13px
+Header: "EDIT: filename" or "FILE: filename"
+  color: C['teal'], font-size: 12px, font-weight: bold, margin-bottom: 4px
+Section markers (<<<OLD / >>>NEW):
+  ── OLD ── in C['fg_dim']
+  ── NEW ── in C['teal']
+Content: <pre> with white-space: pre-wrap
 ```
 
 ### Info Line (e.g. "Found 2 edits")

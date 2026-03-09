@@ -155,9 +155,11 @@ All colors live in the `C = {}` dict at the top of `ArduinoAIDE.py`.
 **AI messages (left-aligned, NO bubble):**
 - Speaker label: 14px bold, teal, left-aligned
 - Content: QTextEdit (for streaming), transparent bg, no border, no scrollbars
+- Max width: 700px (wrapper QWidget) — keeps text readable on wide windows
 - Text: 14px, color `#d4d4d4`
 - Auto-resizes height via `document().contentsChanged`
-- Code snippets in AI responses should eventually render in monospace (future enhancement)
+- Code blocks (``` fenced): post-rendered with `bg_input` bg, `1px solid border_light` border, monospace font (Menlo), language label
+- Edit blocks (<<<EDIT/<<<FILE): same as code blocks but with `3px solid teal` left border, teal header with filename, OLD/NEW section markers
 
 **Error messages (left-aligned):**
 - Speaker "Error": 14px bold, `#f44747`

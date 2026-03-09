@@ -87,10 +87,16 @@
   .chat-user { display: flex; flex-direction: column; align-items: flex-end; margin-bottom: 16px; }
   .chat-user .name { font-size: 14px; color: #7aafff; font-weight: 600; margin-bottom: 4px; padding-right: 6px; }
   .chat-user .bubble { background: #2a2a2a; border-radius: 14px; padding: 10px 16px; max-width: 70%; font-size: 14px; color: #e0e0e0; }
-  .chat-ai { margin-bottom: 16px; }
+  .chat-ai { margin-bottom: 16px; max-width: 700px; }
   .chat-ai .name { font-size: 14px; color: #00979d; font-weight: 600; margin-bottom: 4px; padding-left: 2px; }
   .chat-ai .text { font-size: 14px; color: #d4d4d4; padding-left: 2px; line-height: 1.6; }
   .chat-ai code { background: #2a2a2a; color: #e06c75; padding: 1px 5px; border-radius: 4px; font-family: 'SF Mono', Menlo, monospace; font-size: 13px; }
+  .chat-ai .code-block { background: #2a2a2a; border: 1px solid #333; padding: 10px; margin: 6px 0; font-family: Menlo, Monaco, 'Courier New', monospace; font-size: 13px; white-space: pre-wrap; color: #d4d4d4; }
+  .chat-ai .code-block .lang { color: #888; font-size: 11px; margin-bottom: 4px; }
+  .chat-ai .edit-block { background: #2a2a2a; border: 1px solid #333; border-left: 3px solid #00979d; padding: 10px; margin: 6px 0; font-family: Menlo, Monaco, 'Courier New', monospace; font-size: 13px; white-space: pre-wrap; color: #d4d4d4; }
+  .chat-ai .edit-block .edit-header { color: #00979d; font-size: 12px; font-weight: bold; margin-bottom: 4px; }
+  .chat-ai .edit-block .old-marker { color: #888; font-size: 11px; margin: 4px 0 2px 0; }
+  .chat-ai .edit-block .new-marker { color: #00979d; font-size: 11px; margin: 4px 0 2px 0; }
   .chat-err .name { font-size: 14px; color: #f44747; font-weight: 600; margin-bottom: 4px; padding-left: 2px; }
   .chat-err .text { font-size: 14px; color: #f08080; padding-left: 2px; }
 
@@ -259,13 +265,25 @@
       <div class="chat-ai">
         <div class="name">qwen3:14b</div>
         <div class="text">I can see the issue in <code>oscilloscope.h</code>. The <code>drawWaveform()</code> function needs frame rate limiting.</div>
+        <div class="code-block"><div class="lang">cpp</div>void drawWaveform() {
+  static unsigned long lastFrame = 0;
+  if (millis() - lastFrame &lt; 16) return;
+  lastFrame = millis();
+}</div>
+        <div class="edit-block"><div class="edit-header">EDIT: oscilloscope.h</div><div class="old-marker">── OLD ──</div>void drawWaveform() {
+  clearScreen();
+<div class="new-marker">── NEW ──</div>void drawWaveform() {
+  static unsigned long lastFrame = 0;
+  if (millis() - lastFrame &lt; 16) return;
+  lastFrame = millis();
+  clearScreen();</div>
       </div>
       <div class="chat-err">
         <div class="name">Error</div>
         <div class="text">Cannot connect to Ollama. Is 'ollama serve' running?</div>
       </div>
     </div>
-    <div class="spec">User: right-aligned, bg_input, radius 14px, max 500px | AI: left-aligned, no bubble | Error: left, red text</div>
+    <div class="spec">User: right-aligned, bg_input, radius 14px, max 500px | AI: left, no bubble, max 700px | Code: bordered, monospace | Edit: teal left border</div>
   </div>
 
   <!-- Input -->

@@ -10,7 +10,7 @@ Requirements:
     pip3 install PyQt6 PyQt6-QScintilla requests
 """
 
-import sys, os, json, glob, re, threading, subprocess, math
+import sys, os, json, glob, re, threading, subprocess, math, html
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -863,6 +863,8 @@ if HAS_QSCINTILLA:
             lexer.setColor(QColor(C["syn_num"]), QsciLexerCPP.Number)
             lexer.setColor(QColor(C["syn_pp"]),  QsciLexerCPP.PreProcessor)
             lexer.setColor(QColor(C["syn_type"]),QsciLexerCPP.GlobalClass)
+            lexer.setColor(QColor(C["fg"]),      QsciLexerCPP.Operator)
+            lexer.setColor(QColor(C["fg"]),      QsciLexerCPP.Identifier)
             try: lexer.setKeywords(1, "setup loop pinMode digitalWrite digitalRead analogWrite analogRead Serial delay millis micros attachInterrupt digitalWriteFast IntervalTimer AudioStream AudioConnection AudioMemory Wire SPI INPUT OUTPUT HIGH LOW volatile")
             except: pass
             self.setLexer(lexer)
@@ -1408,10 +1410,12 @@ class ChatPanel(QWidget):
     generation_started = pyqtSignal()
     generation_finished = pyqtSignal()
     edits_applied = pyqtSignal()             # emitted after edits are successfully applied
+    model_switch_requested = pyqtSignal(str)  # model name — request toolbar combo update
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._conversation = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self._project_path = None
+        self._conversation = [{"role": "system", "content": self._build_system_prompt()}]
         self._current_response = ""
         self._error_context = ""
         self._editor_ref = None          # will be set by MainWindow
@@ -1555,9 +1559,28 @@ class ChatPanel(QWidget):
     def set_project_path(self, path):
         """Set the project directory path for context."""
         self._project_path = path
+        # Update system prompt (picks up .aide_prompt if present)
+        if self._conversation and self._conversation[0]["role"] == "system":
+            self._conversation[0]["content"] = self._build_system_prompt()
 
     def set_error_context(self, e):
         self._error_context = e
+
+    def _build_system_prompt(self):
+        """Build system prompt, prepending project-level .aide_prompt if found."""
+        base = SYSTEM_PROMPT
+        proj = getattr(self, '_project_path', None) or ""
+        if proj:
+            custom_file = os.path.join(proj, ".aide_prompt")
+            if os.path.isfile(custom_file):
+                try:
+                    with open(custom_file, 'r', encoding='utf-8') as f:
+                        custom = f.read().strip()
+                    if custom:
+                        return custom + "\n\n" + base
+                except OSError:
+                    pass
+        return base
 
     def _scan_project_files(self, project_path):
         """Recursively scan project directory and return dict of {relative_path: content}.
@@ -1586,8 +1609,18 @@ class ChatPanel(QWidget):
                     continue
         return result
 
+    @staticmethod
+    def _fmt_size(size_bytes):
+        """Format file size as human-readable string."""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        else:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+
     def _build_directory_tree(self, project_path):
-        """Build a text directory tree listing for the AI context."""
+        """Build a text directory tree listing with file sizes for AI context."""
         if not project_path or not os.path.isdir(project_path):
             return ""
         lines = [os.path.basename(project_path) + "/"]
@@ -1609,7 +1642,12 @@ class ChatPanel(QWidget):
                     extension = "    " if i == len(items) - 1 else "\u2502   "
                     _walk(os.path.join(dir_path, name), prefix + extension)
                 else:
-                    lines.append(f"{prefix}{connector}{name}")
+                    try:
+                        sz = os.path.getsize(os.path.join(dir_path, name))
+                        size_str = f"  ({self._fmt_size(sz)})"
+                    except OSError:
+                        size_str = ""
+                    lines.append(f"{prefix}{connector}{name}{size_str}")
 
         _walk(project_path)
         return "\n".join(lines)
@@ -1652,7 +1690,7 @@ class ChatPanel(QWidget):
             f"[PROJECT: {proj_name}]",
             f"[DIRECTORY: {proj}]",
             "",
-            "[DIRECTORY TREE:]",
+            "[PROJECT STRUCTURE]",
             tree,
             "",
             f"[The following {len(all_files)} files are in the project. "
@@ -1667,11 +1705,195 @@ class ChatPanel(QWidget):
         self._update_context_display(proj_name, proj, names)
         return "\n".join(parts)
 
+    def _build_git_context(self):
+        """Build git status context for the AI (branch, recent commits, diff stat)."""
+        proj = getattr(self, '_project_path', None) or ""
+        if not proj or not os.path.isdir(os.path.join(proj, ".git")):
+            return ""
+
+        def _git(args):
+            try:
+                r = subprocess.run(
+                    ["git"] + args, cwd=proj,
+                    capture_output=True, text=True, timeout=5)
+                return r.stdout.strip() if r.returncode == 0 else ""
+            except Exception:
+                return ""
+
+        branch = _git(["branch", "--show-current"])
+        if not branch:
+            return ""
+
+        parts = ["[GIT STATUS]", f"Branch: {branch}"]
+
+        log = _git(["log", "--oneline", "-5"])
+        if log:
+            parts.append("Last commits:")
+            for line in log.split("\n"):
+                parts.append(f"  {line}")
+
+        diff_stat = _git(["diff", "--stat"])
+        if diff_stat:
+            parts.append(f"Uncommitted changes:\n{diff_stat}")
+
+        untracked = _git(["ls-files", "--others", "--exclude-standard"])
+        if untracked:
+            files = [f.strip() for f in untracked.split("\n") if f.strip()]
+            if files:
+                parts.append("Untracked: " + ", ".join(files[:10]))
+
+        return "\n".join(parts)
+
+    # ---- Slash Commands ----
+
+    SLASH_COMMANDS = {
+        "clear":   "Clear conversation history",
+        "model":   "Switch AI model — /model <name>",
+        "compact": "Summarize and compress conversation history",
+        "help":    "Show available slash commands",
+        "context": "Show what the AI sees (file list, git status, context size)",
+    }
+
     def send_message(self):
         text = self.input_field.text().strip()
         if not text:
             return
+        if text.startswith("/"):
+            self.input_field.clear()
+            self._handle_slash_command(text)
+            return
         self._send_prompt(text, display_text=text)
+
+    def _handle_slash_command(self, text):
+        """Parse and dispatch a /command."""
+        parts = text.split(None, 1)
+        cmd = parts[0][1:].lower()  # strip leading /
+        args = parts[1] if len(parts) > 1 else ""
+
+        if cmd == "clear":
+            self.clear_chat()
+            self._add_info_msg("Conversation cleared.", C['fg_ok'])
+        elif cmd == "model":
+            self._cmd_model(args)
+        elif cmd == "compact":
+            self._cmd_compact()
+        elif cmd == "help":
+            self._cmd_help()
+        elif cmd == "context":
+            self._cmd_context()
+        else:
+            self._add_info_msg(
+                f"Unknown command: /{cmd} — type /help for available commands.",
+                C['fg_warn'])
+
+    def _cmd_model(self, args):
+        """Switch the active Ollama model."""
+        global OLLAMA_MODEL
+        name = args.strip()
+        if not name:
+            self._add_info_msg(
+                f"Current model: {OLLAMA_MODEL}\nUsage: /model <name>", C['fg'])
+            return
+        OLLAMA_MODEL = name
+        self.model_switch_requested.emit(name)
+        self._add_info_msg(f"Switched to model: {name}", C['fg_ok'])
+
+    def _cmd_compact(self):
+        """Summarize conversation to free context window space."""
+        if len(self._conversation) < 4:
+            self._add_info_msg(
+                "Conversation too short to compact.", C['fg_warn'])
+            return
+        old_len = len(self._conversation)
+        self._add_info_msg("Compacting conversation...", C['fg_dim'])
+        self.input_field.setEnabled(False)
+
+        # Build summary request from conversation history
+        history_text = ""
+        for msg in self._conversation[1:]:  # skip system prompt
+            role = msg["role"]
+            content = msg["content"]
+            # Truncate very long messages for the summary request
+            if len(content) > 500:
+                content = content[:500] + "..."
+            history_text += f"{role}: {content}\n\n"
+
+        summary_prompt = (
+            "Summarize the key points of this conversation in a concise paragraph. "
+            "Include: what files were discussed, what changes were made, what issues remain. "
+            "Return ONLY the summary, nothing else.\n\n" + history_text
+        )
+
+        # One-shot Ollama request in a background thread
+        class CompactWorker(QThread):
+            finished = pyqtSignal(str)
+            error = pyqtSignal(str)
+
+            def run(self_w):
+                try:
+                    resp = requests.post(
+                        OLLAMA_URL.replace("/api/chat", "/api/generate"),
+                        json={"model": OLLAMA_MODEL, "prompt": summary_prompt,
+                              "stream": False},
+                        timeout=(5, 60))
+                    resp.raise_for_status()
+                    data = resp.json()
+                    self_w.finished.emit(data.get("response", "").strip())
+                except Exception as e:
+                    self_w.error.emit(str(e))
+
+        self._compact_worker = CompactWorker()
+
+        def _on_summary(summary):
+            sys_prompt = self._build_system_prompt()
+            last_msgs = self._conversation[-2:] if len(self._conversation) >= 2 else []
+            self._conversation = [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": f"[CONVERSATION SUMMARY]\n{summary}"},
+                {"role": "assistant", "content":
+                    "Understood. I have the context from our previous discussion."},
+            ] + last_msgs
+            self._add_info_msg(
+                f"Compacted: {old_len} messages \u2192 {len(self._conversation)} messages",
+                C['fg_ok'])
+            self.input_field.setEnabled(True)
+            self.input_field.setFocus()
+
+        def _on_error(err):
+            self._add_info_msg(f"Compact failed: {err}", C['fg_err'])
+            self.input_field.setEnabled(True)
+
+        self._compact_worker.finished.connect(_on_summary)
+        self._compact_worker.error.connect(_on_error)
+        self._compact_worker.start()
+
+    def _cmd_help(self):
+        """Show available slash commands."""
+        lines = ["Available commands:"]
+        for cmd, desc in self.SLASH_COMMANDS.items():
+            lines.append(f"  /{cmd}  —  {desc}")
+        self._add_info_msg("\n".join(lines), C['fg'])
+
+    def _cmd_context(self):
+        """Show the full AI context preview."""
+        file_ctx = self._build_file_context()
+        git_ctx = self._build_git_context()
+        total = file_ctx + ("\n" + git_ctx if git_ctx else "")
+        # Count files
+        file_count = total.count("========== FILE:")
+        size_chars = len(total)
+        summary = f"Context: {file_count} files, {size_chars:,} chars"
+        if git_ctx:
+            # Extract branch from git context
+            for line in git_ctx.split("\n"):
+                if line.startswith("Branch:"):
+                    summary += f", git: {line.split(':', 1)[1].strip()}"
+                    break
+        # Show truncated preview
+        preview = total[:2000]
+        if len(total) > 2000:
+            preview += f"\n... ({len(total) - 2000:,} more chars)"
+        self._add_info_msg(f"{summary}\n\n{preview}", C['fg_dim'])
 
     def send_ai_action(self, prompt):
         """Called from the right-click AI context menu in the code editor."""
@@ -1691,8 +1913,11 @@ class ChatPanel(QWidget):
 
     def _send_prompt(self, text, display_text=None, display_code=None):
         """Core send method used by both manual chat and AI actions."""
-        # Build the full message with automatic file context
+        # Build the full message with automatic file + git context
         msg = self._build_file_context()
+        git_ctx = self._build_git_context()
+        if git_ctx:
+            msg += f"\n{git_ctx}\n"
         if self.send_errors_btn.isChecked() and self._error_context:
             msg += f"\n[COMPILER ERRORS:]\n```\n{self._error_context}\n```\n\n"
             self.send_errors_btn.setChecked(False)
@@ -1748,11 +1973,109 @@ class ChatPanel(QWidget):
             self._current_ai_widget.setTextCursor(cur)
         self._scroll_to_bottom()
 
+    # Styles for code blocks and edit blocks in AI responses (QTextEdit HTML)
+    _CODE_BLOCK_STYLE = (
+        f'background:{C["bg_input"]};'
+        f'border:1px solid {C["border_light"]};'
+        f'padding:10px;margin:6px 0;'
+        f'font-family:Menlo,Monaco,Courier New,monospace;font-size:13px;')
+    _EDIT_BLOCK_STYLE = (
+        f'background:{C["bg_input"]};'
+        f'border:1px solid {C["border_light"]};'
+        f'border-left:3px solid {C["teal"]};'
+        f'padding:10px;margin:6px 0;'
+        f'font-family:Menlo,Monaco,Courier New,monospace;font-size:13px;')
+    _EDIT_HEADER_STYLE = (
+        f'color:{C["teal"]};font-size:12px;font-weight:bold;margin-bottom:4px;')
+
+    def _render_formatted_response(self):
+        """Re-render the completed AI response with styled code blocks and edit blocks."""
+        if not self._current_ai_widget or not self._current_response:
+            return
+        text = self._current_response
+        # Only render if there are code fences or edit blocks
+        if "```" not in text and "<<<" not in text:
+            return
+        html_parts = []
+        in_code = False
+        in_edit = False
+        lines = text.split("\n")
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            # <<<EDIT or <<<FILE block start
+            if not in_code and not in_edit and (
+                    line.startswith("<<<EDIT ") or line.startswith("<<<FILE ")):
+                kind = "EDIT" if line.startswith("<<<EDIT") else "FILE"
+                filename = line.split(None, 1)[1].strip() if " " in line else ""
+                html_parts.append(f'<div style="{self._EDIT_BLOCK_STYLE}">')
+                label = f"{kind}: {html.escape(filename)}" if filename else kind
+                html_parts.append(
+                    f'<div style="{self._EDIT_HEADER_STYLE}">{label}</div>')
+                html_parts.append('<pre style="margin:0;white-space:pre-wrap;">')
+                in_edit = True
+                i += 1
+                continue
+            # <<<OLD / >>>NEW / >>>END / >>>FILE markers inside edit blocks
+            if in_edit:
+                if line.startswith(">>>END") or line.startswith(">>>FILE"):
+                    html_parts.append("</pre></div>")
+                    in_edit = False
+                    i += 1
+                    continue
+                elif line.startswith("<<<OLD"):
+                    html_parts.append(
+                        f'<div style="color:{C["fg_dim"]};font-size:11px;'
+                        f'margin:4px 0 2px 0;">\u2500 OLD \u2500</div>')
+                    i += 1
+                    continue
+                elif line.startswith(">>>NEW"):
+                    html_parts.append(
+                        f'<div style="color:{C["teal"]};font-size:11px;'
+                        f'margin:4px 0 2px 0;">\u2500 NEW \u2500</div>')
+                    i += 1
+                    continue
+                else:
+                    html_parts.append(html.escape(line) + "\n")
+                    i += 1
+                    continue
+            # Fenced code block start
+            if line.startswith("```") and not in_code:
+                lang = line[3:].strip()
+                html_parts.append(f'<div style="{self._CODE_BLOCK_STYLE}">')
+                if lang:
+                    html_parts.append(
+                        f'<div style="color:{C["fg_dim"]};font-size:11px;'
+                        f'margin-bottom:4px;">{html.escape(lang)}</div>')
+                html_parts.append('<pre style="margin:0;white-space:pre-wrap;">')
+                in_code = True
+                i += 1
+                continue
+            # Fenced code block end
+            if line.startswith("```") and in_code:
+                html_parts.append("</pre></div>")
+                in_code = False
+                i += 1
+                continue
+            # Inside code block
+            if in_code:
+                html_parts.append(html.escape(line) + "\n")
+                i += 1
+                continue
+            # Regular text
+            html_parts.append(html.escape(line) + "<br>")
+            i += 1
+        # Close any unclosed blocks
+        if in_code or in_edit:
+            html_parts.append("</pre></div>")
+        self._current_ai_widget.setHtml("".join(html_parts))
+
     def _on_complete(self):
         if self.thread.isRunning():
             self.thread.quit()
         if self._current_response:
             self._conversation.append({"role": "assistant", "content": self._current_response})
+            self._render_formatted_response()
             self._parse_edits(self._current_response)
         self._current_ai_widget = None
         self.input_field.setEnabled(True)
@@ -1944,7 +2267,7 @@ class ChatPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._current_ai_widget = None
-        self._conversation = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self._conversation = [{"role": "system", "content": self._build_system_prompt()}]
         self.apply_bar.hide()
         self._pending_edits = []
         self._update_context_bar()
@@ -2044,6 +2367,7 @@ class ChatPanel(QWidget):
         """Add a left-aligned AI message area with model name label."""
         wrapper = QWidget()
         wrapper.setStyleSheet("background: transparent;")
+        wrapper.setMaximumWidth(700)
         vl = QVBoxLayout(wrapper)
         vl.setContentsMargins(0, 0, 0, 0)
         vl.setSpacing(4)
@@ -3673,6 +3997,7 @@ class MainWindow(QMainWindow):
         self.chat_panel.generation_started.connect(lambda: self.ai_spinner.start())
         self.chat_panel.generation_finished.connect(lambda: self.ai_spinner.stop())
         self.chat_panel.edits_applied.connect(self._on_edits_applied)
+        self.chat_panel.model_switch_requested.connect(self._on_model_switch)
         self.view_stack.addWidget(self.chat_panel)
 
         # View 2: File Manager (full panel)
@@ -4033,6 +4358,22 @@ class MainWindow(QMainWindow):
         if self.project_path:
             self.file_manager.file_browser._refresh()
         self.chat_panel._update_context_bar()
+
+    def _on_model_switch(self, model_name):
+        """Handle /model command — update toolbar combo and status bar."""
+        global OLLAMA_MODEL
+        OLLAMA_MODEL = model_name
+        if hasattr(self, 'model_combo'):
+            # Try to find and select the model in the combo box
+            idx = self.model_combo.findText(model_name)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            else:
+                # Model not in list — add it
+                self.model_combo.addItem(model_name)
+                self.model_combo.setCurrentText(model_name)
+        if hasattr(self, '_status_model'):
+            self._status_model.setText(model_name)
 
     def _on_editor_file_changed(self, fp):
         self.setWindowTitle(f"{WINDOW_TITLE} — {os.path.basename(fp)}")
