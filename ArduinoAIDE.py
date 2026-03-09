@@ -913,6 +913,39 @@ class SettingsSidebarButton(SidebarButton):
         p.end()
 
 
+class NavBadge(QLabel):
+    """Small circular count badge overlaid on a sidebar icon button."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(16, 16)
+        self.setAlignment(
+            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+        self.hide()
+        self._update_style(C['fg_err'])
+
+    def _update_style(self, bg_color):
+        self.setStyleSheet(
+            f"background:{bg_color};color:white;border-radius:8px;"
+            f"font-size:9px;font-weight:bold;border:none;")
+
+    def set_count(self, errors, warnings):
+        if errors > 0:
+            self._update_style(C['fg_err'])
+            self.setText("9+" if errors > 9 else str(errors))
+            self.show()
+        elif warnings > 0:
+            self._update_style(C['fg_warn'])
+            self.setText("9+" if warnings > 9 else str(warnings))
+            self.show()
+        else:
+            self.hide()
+
+    def reposition(self):
+        if self.parentWidget():
+            pw = self.parentWidget().width()
+            self.move(pw - 10, -2)
+
+
 class SpinnerWidget(QWidget):
     """Animated spinning gear indicator for AI activity."""
     def __init__(self, parent=None):
@@ -6723,6 +6756,8 @@ class MainWindow(QMainWindow):
 
         self.btn_code = SidebarButton("</>", "Code Editor")
         self.btn_code.setChecked(True)
+        self._compile_badge = NavBadge(self.btn_code)
+        self._compile_badge.reposition()
         self.btn_chat = SidebarButton("AI", "AI Chat")
         self.btn_files = FileSidebarButton("Files")
         self.btn_git = GitSidebarButton("Git")
@@ -7226,6 +7261,7 @@ class MainWindow(QMainWindow):
         self._compiler_diagnostics = []
         self.editor.clear_diagnostics()
         self._diag_panel.hide()
+        self._compile_badge.set_count(0, 0)
         def go():
             try:
                 r = subprocess.run(["arduino-cli"]+args, capture_output=True, text=True, timeout=120)
@@ -7374,6 +7410,9 @@ class MainWindow(QMainWindow):
         """Populate diagnostic panel and show/hide it."""
         self._diag_panel.populate(diags)
         self._diag_panel.setVisible(bool(diags))
+        errors = sum(1 for d in diags if d.severity == "error")
+        warnings = sum(1 for d in diags if d.severity == "warning")
+        self._compile_badge.set_count(errors, warnings)
 
     def _apply_compile_diagnostics(self):
         """Apply gutter markers to editors based on compiler diagnostics."""
