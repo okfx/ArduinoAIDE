@@ -262,6 +262,30 @@ class AIWorkResult:
     metadata: dict = field(default_factory=dict)
 
 
+def _diag_key(d):
+    """Identity key for a StructuredDiagnostic, ignoring line numbers
+    (which shift when code is edited). Matches on file + severity + message."""
+    return (os.path.basename(d.file), d.severity, d.message)
+
+def _diff_diagnostics(prev, curr):
+    """Compare two diagnostic lists. Returns (resolved, remaining, new) counts.
+    Uses file+severity+message matching (line numbers ignored)."""
+    from collections import Counter
+    prev_counts = Counter(_diag_key(d) for d in prev)
+    curr_counts = Counter(_diag_key(d) for d in curr)
+    all_keys = set(prev_counts) | set(curr_counts)
+    resolved = 0
+    remaining = 0
+    new = 0
+    for k in all_keys:
+        p = prev_counts.get(k, 0)
+        c = curr_counts.get(k, 0)
+        matched = min(p, c)
+        remaining += matched
+        resolved += p - matched
+        new += c - matched
+    return resolved, remaining, new
+
 _GCC_DIAG_RE = re.compile(
     r'^(.+?):(\d+):(?:(\d+):)?\s*(error|warning|note):\s*(.+)$')
 _LINKER_RE = re.compile(
@@ -1724,6 +1748,8 @@ class ChatPanel(QWidget):
     edits_applied = pyqtSignal()             # emitted after edits are successfully applied
     recompile_requested = pyqtSignal()       # emitted when user clicks Recompile after apply
     model_switch_requested = pyqtSignal(str)  # model name — request toolbar combo update
+    fix_triggered = pyqtSignal()             # emitted when /fix or continuation fix is invoked
+    chat_cleared = pyqtSignal()              # emitted when conversation is cleared
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1808,8 +1834,8 @@ class ChatPanel(QWidget):
         chat_container.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._chat_layout = QVBoxLayout(chat_container)
-        self._chat_layout.setContentsMargins(8, 16, 8, 16)
-        self._chat_layout.setSpacing(20)
+        self._chat_layout.setContentsMargins(12, 16, 12, 16)
+        self._chat_layout.setSpacing(24)
         self._chat_layout.addStretch()
         outer_layout.addWidget(chat_container)
         outer_layout.addStretch()
@@ -2593,11 +2619,25 @@ class ChatPanel(QWidget):
             lines.append(f"  /{cmd}  —  {desc}")
         self._add_info_msg("\n".join(lines), C['fg'])
 
-    def show_fix_continuation(self, n_diags):
-        """Show the fix continuation bar after compile-after-AI-edits failure."""
-        s = "s" if n_diags != 1 else ""
-        self._fix_continuation_label.setText(
-            f"Errors remain after applying changes ({n_diags} diagnostic{s}). Continue fixing?")
+    def show_fix_continuation(self, n_diags, attempt=0, diff=None):
+        """Show the fix continuation bar after compile-after-AI-edits failure.
+        diff is an optional (resolved, remaining, new) tuple from _diff_diagnostics."""
+        attempt_prefix = f"Fix attempt {attempt} \u2014 " if attempt > 0 else ""
+        if diff and attempt > 0:
+            resolved, remaining, new_count = diff
+            parts = []
+            if resolved:
+                parts.append(f"\u2713 {resolved} resolved")
+            if new_count:
+                parts.append(f"\u26a0 {new_count} new")
+            parts.append(f"\u2715 {remaining} remain")
+            diff_text = " \u00b7 ".join(parts)
+            self._fix_continuation_label.setText(
+                f"{attempt_prefix}{diff_text}. Fix remaining errors?")
+        else:
+            s = "s" if n_diags != 1 else ""
+            self._fix_continuation_label.setText(
+                f"{attempt_prefix}{n_diags} error{s} remain. Fix remaining errors?")
         self.fix_continuation_bar.show()
 
     def _on_fix_continuation_clicked(self):
@@ -2611,6 +2651,7 @@ class ChatPanel(QWidget):
             self._add_info_msg(
                 "No compile errors to fix. Compile first (Ctrl+R).", C['fg_warn'])
             return
+        self.fix_triggered.emit()
         n_diags = len(self._error_diagnostics)
         n_errors = sum(1 for d in self._error_diagnostics if d.severity == "error")
         if n_diags:
@@ -3023,24 +3064,61 @@ class ChatPanel(QWidget):
         self.worker.error_occurred.connect(self._on_error)
         self.thread.started.connect(self.worker.run)
 
+    def _extract_edit_blocks(self, text):
+        """Parse <<<EDIT and <<<FILE blocks using a line-by-line state machine.
+        Handles >>> and <<< inside code content, blank lines between markers,
+        and trailing newlines in captured sections. Returns list[ProposedEdit]."""
+        edits = []
+        lines = text.split('\n')
+        state = 'idle'
+        filename = ''
+        old_lines = []
+        new_lines = []
+        file_lines = []
+
+        for line in lines:
+            stripped = line.strip()
+            if state == 'idle':
+                if stripped.startswith('<<<EDIT') and len(stripped) > 7:
+                    filename = stripped[7:].strip()
+                    old_lines = []; new_lines = []
+                    state = 'expect_old'
+                elif stripped.startswith('<<<FILE') and len(stripped) > 7:
+                    filename = stripped[7:].strip()
+                    file_lines = []
+                    state = 'file'
+            elif state == 'expect_old':
+                if stripped == '<<<OLD':
+                    state = 'old'
+                # else: skip any prose between <<<EDIT and <<<OLD
+            elif state == 'old':
+                if stripped == '>>>NEW':
+                    state = 'new'
+                else:
+                    old_lines.append(line)
+            elif state == 'new':
+                if stripped == '>>>END':
+                    edits.append(ProposedEdit(
+                        "edit", filename,
+                        '\n'.join(old_lines).rstrip('\n'),
+                        '\n'.join(new_lines).rstrip('\n')))
+                    state = 'idle'; filename = ''; old_lines = []; new_lines = []
+                else:
+                    new_lines.append(line)
+            elif state == 'file':
+                if stripped == '>>>FILE':
+                    edits.append(ProposedEdit(
+                        "file", filename, None,
+                        '\n'.join(file_lines)))
+                    state = 'idle'; filename = ''; file_lines = []
+                else:
+                    file_lines.append(line)
+        return edits
+
     def _parse_edits(self, response, result=None):
         """Parse <<<EDIT and <<<FILE blocks from the AI response.
         Populates result.proposed_edits if an AIWorkResult is provided."""
-        edits = []  # list[ProposedEdit]
-
-        # Parse <<<EDIT filename\n<<<OLD\n...\n>>>NEW\n...\n>>>END
-        edit_pat = re.compile(
-            r'<<<EDIT\s+(\S+)\s*\n<<<OLD\n(.*?)\n>>>NEW\n(.*?)\n>>>END',
-            re.DOTALL)
-        for m in edit_pat.finditer(response):
-            edits.append(ProposedEdit("edit", m.group(1), m.group(2), m.group(3)))
-
-        # Parse <<<FILE filename\n...\n>>>FILE
-        file_pat = re.compile(
-            r'<<<FILE\s+(\S+)\s*\n(.*?)\n>>>FILE',
-            re.DOTALL)
-        for m in file_pat.finditer(response):
-            edits.append(ProposedEdit("file", m.group(1), None, m.group(2)))
+        edits = self._extract_edit_blocks(response)
 
         if result is not None:
             result.proposed_edits.extend(edits)
@@ -3140,6 +3218,10 @@ class ChatPanel(QWidget):
             edit.blocked = True
             edit.warnings.append(f"file not found: {edit.filename}")
             return
+        if not edit.old_text:
+            edit.blocked = True
+            edit.warnings.append("empty anchor text \u2014 cannot apply search/replace")
+            return
         # 1. Try exact match
         count = content.count(edit.old_text)
         if count == 1:
@@ -3165,7 +3247,8 @@ class ChatPanel(QWidget):
             edit.warnings.append("anchor text not found in file")
 
     def _validate_replace_file(self, edit):
-        """Validate a replace_file edit — warn on suspicious shrinkage."""
+        """Validate a replace_file edit — block if new content is <50% of original
+        (likely a truncated snippet masquerading as a full file replacement)."""
         try:
             existing_size = os.path.getsize(edit.resolved_path)
         except OSError:
@@ -3173,8 +3256,10 @@ class ChatPanel(QWidget):
         new_size = len(edit.new_text.encode('utf-8'))
         if existing_size > 0 and new_size < existing_size * 0.5:
             pct = int((1 - new_size / existing_size) * 100)
+            edit.blocked = True
             edit.warnings.append(
-                f"replaces file content, shrinks by {pct}%")
+                f"blocked: new content is {pct}% smaller than original "
+                f"— likely a truncated snippet. Dismiss and ask AI to use <<<EDIT blocks.")
 
     def _validate_create_file(self, edit):
         """Validate a create_file edit — reclassify if file exists."""
@@ -3183,15 +3268,18 @@ class ChatPanel(QWidget):
             edit.warnings.append("file already exists, will overwrite")
 
     def _validate_filename_ambiguity(self, edit):
-        """Warn if the edit's filename matches multiple open files."""
+        """Block if the edit's filename matches multiple open files — applying to
+        the wrong file silently would be worse than blocking."""
         if not self._editor_ref:
             return
         basename = os.path.basename(edit.filename)
         matches = [fp for fp in self._editor_ref._editors
                     if os.path.basename(fp) == basename]
         if len(matches) > 1:
+            edit.blocked = True
             edit.warnings.append(
-                f"filename is ambiguous, matches {len(matches)} open files")
+                f"blocked: \"{basename}\" matches {len(matches)} open files "
+                f"— specify the full path")
 
     def _get_file_content_for_validation(self, edit):
         """Get file content for validation: open editors first, then disk.
@@ -3222,7 +3310,8 @@ class ChatPanel(QWidget):
             pass  # abs_path not under proj
 
     def _apply_all_edits(self):
-        """Apply all parsed edits to the editor. Skips blocked and rejected edits."""
+        """Apply all parsed edits to the editor. Skips blocked and rejected edits.
+        Re-validates anchors at apply time (files may have changed since parse)."""
         if not self._editor_ref or not self._pending_edits:
             return
         applied = 0
@@ -3260,11 +3349,11 @@ class ChatPanel(QWidget):
                     self._editor_ref.open_file(abs_path)
                     fp = abs_path
                 else:
-                    errors.append(f"File not found: {edit.filename}")
+                    errors.append(f"✗ File not found: {edit.filename}")
                     continue
 
             if not fp:
-                errors.append(f"File not found: {edit.filename}")
+                errors.append(f"✗ File not found: {edit.filename}")
                 continue
 
             if edit.operation == "replace_file":
@@ -3272,36 +3361,49 @@ class ChatPanel(QWidget):
                     applied += 1
                     self._track_ai_edited_file(edit.filename)
                 else:
-                    errors.append(f"Could not write: {edit.filename}")
+                    errors.append(f"✗ Could not write: {edit.filename}")
             elif edit.operation == "search_replace":
                 files = self._editor_ref.get_all_files()
                 content = files.get(fp, "")
-                # Use matched_text from normalized matching if available
-                anchor = edit.matched_text or edit.old_text
-                if anchor in content:
+                # Re-validate anchor at apply time (file may have changed since parse)
+                anchor = None
+                if edit.matched_text and edit.matched_text in content:
+                    anchor = edit.matched_text
+                elif edit.old_text and edit.old_text in content:
+                    anchor = edit.old_text
+                else:
+                    # Last-resort: re-run normalized matching
+                    norm_matches = _find_normalized_matches(content, edit.old_text)
+                    if norm_matches:
+                        start, end = norm_matches[0]
+                        anchor = content[start:end]
+                if anchor is not None:
+                    line_num = content[:content.find(anchor)].count('\n') + 1
                     new_content = content.replace(anchor, edit.new_text, 1)
                     if self._editor_ref.set_file_content(fp, new_content):
                         applied += 1
                         self._track_ai_edited_file(edit.filename)
                     else:
-                        errors.append(f"Could not write: {edit.filename}")
+                        errors.append(f"✗ Could not write {edit.filename}")
                 else:
-                    errors.append(f"Could not find matching code in {edit.filename}")
+                    errors.append(
+                        f"✗ Anchor not found in {edit.filename} — "
+                        f"copy the change manually or ask AI to retry")
             elif edit.operation == "create_file":
                 # create_file but file is already open — replace content
                 if self._editor_ref.set_file_content(fp, edit.new_text):
                     applied += 1
                     self._track_ai_edited_file(edit.filename)
                 else:
-                    errors.append(f"Could not write: {edit.filename}")
+                    errors.append(f"✗ Could not write: {edit.filename}")
 
-        parts = [f"Applied {applied} change{'s' if applied != 1 else ''}."]
+        parts = [f"Applied {applied}/{applied + len(errors)} change{'s' if applied != 1 else ''}."]
         if rejected:
-            parts.append(f"Rejected {rejected} file{'s' if rejected != 1 else ''}.")
+            parts.append(f"Rejected {rejected}.")
         if skipped:
             parts.append(f"Skipped {skipped} blocked.")
         if errors:
-            parts.append("Errors: " + "; ".join(errors))
+            parts.extend(errors)
         self._add_info_msg(" ".join(parts),
                            C['fg_ok'] if not errors else C['fg_warn'])
         self.apply_bar.hide()
@@ -3470,6 +3572,7 @@ class ChatPanel(QWidget):
         self._ai_edited_files.clear()
         self._working_set.clear()
         self._update_context_bar()
+        self.chat_cleared.emit()
 
     def _update_context_display(self, proj_name, proj_path, names):
         """Update the context panel with project info and file list."""
@@ -5179,6 +5282,8 @@ class MainWindow(QMainWindow):
         self._compiler_errors = ""
         self._ai_fix_pending_compile = False   # set True when AI edits are applied
         self._compile_follows_ai_edits = False  # captured at compile start
+        self._fix_attempt_count = 0            # AI-assisted fix attempts in current session
+        self._prev_diagnostics = []            # snapshot before each fix attempt (for diff)
 
         self._setup_ui()
         self._setup_toolbar()
@@ -5290,6 +5395,8 @@ class MainWindow(QMainWindow):
         self.chat_panel.edits_applied.connect(self._on_edits_applied)
         self.chat_panel.recompile_requested.connect(self._compile)
         self.chat_panel.model_switch_requested.connect(self._on_model_switch)
+        self.chat_panel.fix_triggered.connect(self._on_fix_triggered)
+        self.chat_panel.chat_cleared.connect(self._reset_fix_attempt_count)
         self.view_stack.addWidget(self.chat_panel)
 
         # View 2: File Manager (full panel)
@@ -5624,6 +5731,10 @@ class MainWindow(QMainWindow):
 
     def _open_project(self, path):
         self.project_path = path
+        self._ai_fix_pending_compile = False
+        self._compile_follows_ai_edits = False
+        self._fix_attempt_count = 0
+        self._prev_diagnostics = []
         self.serial_monitor.refresh_ports()
         self.setWindowTitle(f"{WINDOW_TITLE} — {os.path.basename(path)}")
         self.editor.open_all_project_files(path)
@@ -5652,6 +5763,16 @@ class MainWindow(QMainWindow):
             self.file_manager.file_browser._refresh()
         self.chat_panel._update_context_bar()
         self._ai_fix_pending_compile = True
+
+    def _on_fix_triggered(self):
+        """Increment fix attempt counter and snapshot diagnostics for diffing."""
+        self._fix_attempt_count += 1
+        self._prev_diagnostics = list(getattr(self, '_compiler_diagnostics', []))
+
+    def _reset_fix_attempt_count(self):
+        """Reset fix attempt counter and diagnostic snapshot."""
+        self._fix_attempt_count = 0
+        self._prev_diagnostics = []
 
     def _on_model_switch(self, model_name):
         """Handle /model command — update toolbar combo and status bar."""
@@ -5716,6 +5837,7 @@ class MainWindow(QMainWindow):
                         QTimer.singleShot(0, lambda l=l,c=c: self.compiler_output.append_output(l,c))
                 if r.returncode == 0:
                     QTimer.singleShot(0, lambda: self.compiler_output.append_output("\nDone compiling.", C["fg_ok"]))
+                    QTimer.singleShot(0, self._reset_fix_attempt_count)
                 else:
                     QTimer.singleShot(0, lambda: self.compiler_output.append_output("\nCompilation failed.", C["fg_err"]))
                     QTimer.singleShot(0, lambda: self.chat_panel.set_error_context(
@@ -5824,7 +5946,11 @@ class MainWindow(QMainWindow):
             self._compile_follows_ai_edits = False
             hint = f"\nErrors remain after applying AI changes ({n} diagnostic{'s' if n != 1 else ''})."
             self.compiler_output.append_output(hint, C["fg_warn"])
-            self.chat_panel.show_fix_continuation(n)
+            # Compute diagnostic diff if we have a previous snapshot
+            diff = None
+            if self._prev_diagnostics:
+                diff = _diff_diagnostics(self._prev_diagnostics, self._compiler_diagnostics)
+            self.chat_panel.show_fix_continuation(n, self._fix_attempt_count, diff)
         else:
             hint = f"\nType /fix in AI Chat to auto-fix ({n} diagnostic{'s' if n != 1 else ''})"
             self.compiler_output.append_output(hint, C["teal"])
