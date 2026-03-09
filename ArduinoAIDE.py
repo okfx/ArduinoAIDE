@@ -3512,9 +3512,44 @@ class ChatPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+    def _build_edit_diff_html(self, edit):
+        """Build an HTML diff view of old_text vs new_text using difflib."""
+        import difflib
+        if edit.operation in ("create_file", "replace_file"):
+            # For file-level ops, show new content as all additions
+            lines = []
+            for line in (edit.new_text or "").splitlines():
+                lines.append(f'<span style="color:#7ee0d8;">+ {html.escape(line)}</span>')
+            diff_body = "<br>".join(lines) if lines else "<em>empty</em>"
+        else:
+            old_lines = (edit.old_text or "").splitlines()
+            new_lines = (edit.new_text or "").splitlines()
+            diff = difflib.unified_diff(old_lines, new_lines, n=3, lineterm="")
+            lines = []
+            for line in diff:
+                if line.startswith('---') or line.startswith('+++'):
+                    continue  # skip file headers
+                if line.startswith('@@'):
+                    lines.append(
+                        f'<span style="color:{C["fg_dim"]};">{html.escape(line)}</span>')
+                elif line.startswith('-'):
+                    lines.append(
+                        f'<span style="color:#f08080;">{html.escape(line)}</span>')
+                elif line.startswith('+'):
+                    lines.append(
+                        f'<span style="color:#7ee0d8;">{html.escape(line)}</span>')
+                else:
+                    lines.append(
+                        f'<span style="color:{C["fg_dim"]};">{html.escape(line)}</span>')
+            diff_body = "<br>".join(lines) if lines else "<em>no changes</em>"
+        return (f'<div style="font-family:Menlo,Monaco,Courier New,monospace;'
+                f'font-size:12px;white-space:pre;line-height:1.4;">'
+                f'{diff_body}</div>')
+
     def _populate_apply_bar(self, edits):
         """Group edits by file, reset acceptance state, and populate the apply bar."""
         self._file_acceptance = {}  # reset on each new set of edits
+        self._edit_expanded = {}    # track which edit indices are expanded
         for e in edits:
             e._user_rejected = False  # init per-edit rejection tracking
         self._refresh_apply_summary()
@@ -3647,6 +3682,18 @@ class ChatPanel(QWidget):
                     el.addWidget(desc_label)
                     el.addStretch()
 
+                    # Expand toggle for diff view
+                    is_expanded = self._edit_expanded.get(idx, False)
+                    expand_btn = QPushButton("\u25bc" if is_expanded else "\u25b6")
+                    expand_btn.setFixedSize(20, 20)
+                    expand_btn.setStyleSheet(
+                        f"background:transparent;color:{C['fg_dim']};"
+                        f"border:none;font-size:10px;")
+                    expand_btn.setToolTip("Show diff" if not is_expanded else "Hide diff")
+                    expand_btn.clicked.connect(
+                        lambda checked, i=idx: self._toggle_edit_diff(i))
+                    el.addWidget(expand_btn)
+
                     if not validation_blocked:
                         if user_rejected:
                             undo_btn = QPushButton("Accept")
@@ -3662,6 +3709,27 @@ class ChatPanel(QWidget):
                             el.addWidget(rej_btn)
 
                     self._apply_file_rows_layout.addWidget(edit_row)
+
+                    # Inline diff panel (shown when expanded)
+                    if is_expanded:
+                        diff_widget = QTextEdit()
+                        diff_widget.setReadOnly(True)
+                        diff_widget.setHtml(self._build_edit_diff_html(edit))
+                        diff_widget.setStyleSheet(
+                            f"QTextEdit {{ background:{C['bg_input']};"
+                            f"border:1px solid {C['border_light']};"
+                            f"border-left:3px solid {C['teal']};"
+                            f"color:{C['fg']};padding:6px;"
+                            f"margin:0 0 0 16px; }}")
+                        diff_widget.setVerticalScrollBarPolicy(
+                            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+                        diff_widget.setHorizontalScrollBarPolicy(
+                            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                        diff_widget.setMaximumHeight(200)
+                        # Auto-size height to content, up to max
+                        doc_h = int(diff_widget.document().size().height()) + 16
+                        diff_widget.setFixedHeight(min(doc_h, 200))
+                        self._apply_file_rows_layout.addWidget(diff_widget)
 
                     # Warnings for this edit
                     for warning in edit.warnings:
@@ -3709,10 +3777,16 @@ class ChatPanel(QWidget):
         self._refresh_apply_summary()
         self._refresh_file_rows()
 
+    def _toggle_edit_diff(self, edit_idx):
+        """Toggle inline diff visibility for a specific edit."""
+        self._edit_expanded[edit_idx] = not self._edit_expanded.get(edit_idx, False)
+        self._refresh_file_rows()
+
     def _dismiss_edits(self):
         self.apply_bar.hide()
         self._pending_edits = []
         self._file_acceptance = {}
+        self._edit_expanded = {}
         self._clear_apply_file_rows()
 
     def clear_chat(self):
