@@ -3515,40 +3515,42 @@ class ChatPanel(QWidget):
     def _populate_apply_bar(self, edits):
         """Group edits by file, reset acceptance state, and populate the apply bar."""
         self._file_acceptance = {}  # reset on each new set of edits
+        for e in edits:
+            e._user_rejected = False  # init per-edit rejection tracking
         self._refresh_apply_summary()
         self._refresh_file_rows()
         self.apply_bar.show()
 
     def _refresh_apply_summary(self):
-        """Update the header summary label."""
+        """Update the header summary label and Apply button count."""
         edits = self._pending_edits
         n_total = len(edits)
-        n_blocked = sum(1 for e in edits if e.blocked)
-        n_rejected = sum(1 for fn in self._file_acceptance
-                         if self._file_acceptance[fn] is False)
+        n_accepted = sum(1 for e in edits
+                         if not e.blocked
+                         and self._file_acceptance.get(e.filename) is not False)
         from collections import OrderedDict
         nf = len(OrderedDict((e.filename, None) for e in edits))
         summary = f"{n_total} edit{'s' if n_total != 1 else ''} in {nf} file{'s' if nf != 1 else ''}"
-        extras = []
-        if n_blocked:
-            extras.append(f"{n_blocked} blocked")
-        if n_rejected:
-            extras.append(f"{n_rejected} file{'s' if n_rejected != 1 else ''} rejected")
-        if extras:
-            summary += f" ({', '.join(extras)})"
+        n_excluded = n_total - n_accepted
+        if n_excluded:
+            summary += f" ({n_excluded} excluded)"
         self.apply_label.setText(summary)
+        # Update Apply button text with count
+        self.apply_all_btn.setText(
+            f"Apply {n_accepted} of {n_total}" if n_excluded else "Apply All Changes")
+        self.apply_all_btn.setEnabled(n_accepted > 0)
         if self._error_diagnostics:
             self._intent_badge.show()
         else:
             self._intent_badge.hide()
 
     def _refresh_file_rows(self):
-        """Rebuild per-file rows with current acceptance state."""
+        """Rebuild per-file rows with per-edit accept/reject controls."""
         self._clear_apply_file_rows()
         from collections import OrderedDict
         by_file = OrderedDict()
-        for edit in self._pending_edits:
-            by_file.setdefault(edit.filename, []).append(edit)
+        for i, edit in enumerate(self._pending_edits):
+            by_file.setdefault(edit.filename, []).append((i, edit))
 
         _BTN_SMALL = (f"background:{C['bg_input']};color:{C['fg']};"
                       f"border:1px solid {C['border_light']};border-radius:3px;"
@@ -3558,78 +3560,152 @@ class ChatPanel(QWidget):
         _BTN_REJECT_ON = (f"background:{C['fg_err']};color:white;border:none;"
                           f"border-radius:3px;padding:1px 8px;{FONT_SMALL}")
 
-        for filename, file_edits in by_file.items():
-            state = self._file_acceptance.get(filename)  # True/False/None
-            all_blocked = all(e.blocked for e in file_edits)
-            count = len(file_edits)
-            has_new = any(e.operation == "create_file" for e in file_edits)
-            has_replace = any(e.operation == "replace_file" for e in file_edits)
+        for filename, indexed_edits in by_file.items():
+            file_state = self._file_acceptance.get(filename)  # True/False/None
+            count = len(indexed_edits)
+            has_new = any(e.operation == "create_file" for _, e in indexed_edits)
+            has_replace = any(e.operation == "replace_file" for _, e in indexed_edits)
 
-            # File row: label + Accept + Reject buttons
-            row_widget = QWidget()
-            row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(4)
+            # File header row: filename + file-level Accept All / Reject All
+            file_row = QWidget()
+            file_layout = QHBoxLayout(file_row)
+            file_layout.setContentsMargins(0, 2, 0, 0)
+            file_layout.setSpacing(4)
 
-            label_text = f"{filename} \u2014 {count} edit{'s' if count != 1 else ''}"
+            label_text = f"{filename} ({count} edit{'s' if count != 1 else ''})"
             if has_new:
-                label_text += " (new file)"
+                label_text += " \u2014 new file"
             elif has_replace:
-                label_text += " (replace)"
-            if state is True:
+                label_text += " \u2014 replace"
+            if file_state is True:
                 label_text = "\u2713 " + label_text
                 label_color = C['fg_ok']
-            elif state is False:
+            elif file_state is False:
                 label_text = "\u2717 " + label_text
                 label_color = C['fg_dim']
             else:
-                label_color = C['fg_dim']
+                label_color = C['fg']
 
             lbl = QLabel(label_text)
-            lbl.setStyleSheet(f"color:{label_color};{FONT_SMALL}")
-            row_layout.addWidget(lbl)
-            row_layout.addStretch()
+            lbl.setStyleSheet(f"color:{label_color};{FONT_SMALL}font-weight:bold;")
+            file_layout.addWidget(lbl)
+            file_layout.addStretch()
 
-            # Accept button
-            accept_btn = QPushButton("\u2713" if state is True else "Accept")
-            accept_btn.setStyleSheet(_BTN_ACCEPT_ON if state is True else _BTN_SMALL)
-            accept_btn.setEnabled(not all_blocked)
-            accept_btn.clicked.connect(
+            all_blocked_by_validation = all(
+                e.blocked and any("blocked:" in w for w in e.warnings)
+                for _, e in indexed_edits)
+            accept_all = QPushButton("Accept All" if file_state is not True else "\u2713 All")
+            accept_all.setStyleSheet(_BTN_ACCEPT_ON if file_state is True else _BTN_SMALL)
+            accept_all.setEnabled(not all_blocked_by_validation)
+            accept_all.clicked.connect(
                 lambda checked, fn=filename: self._on_file_accept(fn))
-            row_layout.addWidget(accept_btn)
+            file_layout.addWidget(accept_all)
 
-            # Reject button
-            reject_btn = QPushButton("\u2717 Rejected" if state is False else "Reject")
-            reject_btn.setStyleSheet(_BTN_REJECT_ON if state is False else _BTN_SMALL)
-            reject_btn.clicked.connect(
+            reject_all = QPushButton("Reject All" if file_state is not False else "\u2717 All")
+            reject_all.setStyleSheet(_BTN_REJECT_ON if file_state is False else _BTN_SMALL)
+            reject_all.clicked.connect(
                 lambda checked, fn=filename: self._on_file_reject(fn))
-            row_layout.addWidget(reject_btn)
+            file_layout.addWidget(reject_all)
 
-            self._apply_file_rows_layout.addWidget(row_widget)
+            self._apply_file_rows_layout.addWidget(file_row)
 
-            # Per-edit warnings (dimmed if file is rejected)
-            if state is not False:
-                for edit in file_edits:
+            # Per-edit rows (hidden if entire file is rejected)
+            if file_state is not False:
+                for idx, edit in indexed_edits:
+                    edit_row = QWidget()
+                    el = QHBoxLayout(edit_row)
+                    el.setContentsMargins(16, 0, 0, 0)  # indent under file
+                    el.setSpacing(4)
+
+                    # Description: first line of new_text, truncated
+                    if edit.operation == "search_replace" and edit.new_text:
+                        first_line = edit.new_text.split('\n', 1)[0].strip()
+                        desc = first_line[:60] + ("\u2026" if len(first_line) > 60 else "")
+                    elif edit.operation == "create_file":
+                        desc = "create file"
+                    elif edit.operation == "replace_file":
+                        desc = "replace file content"
+                    else:
+                        desc = edit.edit_type
+
+                    # Blocked by validation vs user-rejected
+                    user_rejected = getattr(edit, '_user_rejected', False)
+                    validation_blocked = edit.blocked and not user_rejected
+
+                    if user_rejected:
+                        prefix = "\u2717"
+                        desc_color = C['fg_dim']
+                    elif validation_blocked:
+                        prefix = "\u26d4"
+                        desc_color = C['fg_err']
+                    else:
+                        prefix = "\u2713"
+                        desc_color = C['fg_ok']
+
+                    desc_label = QLabel(f"{prefix} {desc}")
+                    desc_label.setStyleSheet(f"color:{desc_color};{FONT_SMALL}")
+                    el.addWidget(desc_label)
+                    el.addStretch()
+
+                    if not validation_blocked:
+                        if user_rejected:
+                            undo_btn = QPushButton("Accept")
+                            undo_btn.setStyleSheet(_BTN_SMALL)
+                            undo_btn.clicked.connect(
+                                lambda checked, i=idx: self._on_edit_accept(i))
+                            el.addWidget(undo_btn)
+                        else:
+                            rej_btn = QPushButton("Reject")
+                            rej_btn.setStyleSheet(_BTN_SMALL)
+                            rej_btn.clicked.connect(
+                                lambda checked, i=idx: self._on_edit_reject(i))
+                            el.addWidget(rej_btn)
+
+                    self._apply_file_rows_layout.addWidget(edit_row)
+
+                    # Warnings for this edit
                     for warning in edit.warnings:
-                        prefix = "\u26d4" if edit.blocked else "\u26a0"
-                        color = C['fg_err'] if edit.blocked else C['fg_warn']
-                        warn_label = QLabel(f"  {prefix} {warning}")
-                        warn_label.setStyleSheet(f"color:{color};{FONT_SMALL}")
+                        wpre = "\u26d4" if edit.blocked else "\u26a0"
+                        wcolor = C['fg_err'] if edit.blocked else C['fg_warn']
+                        warn_label = QLabel(f"    {wpre} {warning}")
+                        warn_label.setStyleSheet(f"color:{wcolor};{FONT_SMALL}")
                         self._apply_file_rows_layout.addWidget(warn_label)
 
     def _on_file_accept(self, filename):
-        """Toggle acceptance for a file group."""
+        """Accept all edits in a file group."""
         current = self._file_acceptance.get(filename)
-        # Clicking Accept again → back to undecided
-        self._file_acceptance[filename] = None if current is True else True
+        if current is True:
+            self._file_acceptance[filename] = None
+        else:
+            self._file_acceptance[filename] = True
+            # Undo any per-edit rejections for this file
+            for e in self._pending_edits:
+                if e.filename == filename and getattr(e, '_user_rejected', False):
+                    e._user_rejected = False
+                    e.blocked = False
         self._refresh_apply_summary()
         self._refresh_file_rows()
 
     def _on_file_reject(self, filename):
-        """Toggle rejection for a file group."""
+        """Reject all edits in a file group."""
         current = self._file_acceptance.get(filename)
-        # Clicking Reject again → back to undecided
         self._file_acceptance[filename] = None if current is False else False
+        self._refresh_apply_summary()
+        self._refresh_file_rows()
+
+    def _on_edit_reject(self, edit_idx):
+        """Reject an individual edit by index."""
+        edit = self._pending_edits[edit_idx]
+        edit.blocked = True
+        edit._user_rejected = True
+        self._refresh_apply_summary()
+        self._refresh_file_rows()
+
+    def _on_edit_accept(self, edit_idx):
+        """Re-accept a previously user-rejected edit."""
+        edit = self._pending_edits[edit_idx]
+        edit.blocked = False
+        edit._user_rejected = False
         self._refresh_apply_summary()
         self._refresh_file_rows()
 
