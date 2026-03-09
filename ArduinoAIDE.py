@@ -1830,7 +1830,7 @@ class ChatPanel(QWidget):
         outer_layout.addStretch()
         chat_container = QWidget()
         chat_container.setStyleSheet(f"background:{C['bg_dark']};")
-        chat_container.setMaximumWidth(800)
+        chat_container.setMaximumWidth(960)
         chat_container.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._chat_layout = QVBoxLayout(chat_container)
@@ -1907,20 +1907,50 @@ class ChatPanel(QWidget):
         self.fix_continuation_bar = QWidget()
         self.fix_continuation_bar.setStyleSheet(
             f"background:{C['bg_dark']};border-top:2px solid {C['fg_warn']};")
-        fc_layout = QHBoxLayout(self.fix_continuation_bar)
-        fc_layout.setContentsMargins(16, 8, 16, 8)
+        fc_outer = QVBoxLayout(self.fix_continuation_bar)
+        fc_outer.setContentsMargins(16, 8, 16, 8)
+        fc_outer.setSpacing(6)
+        # Top row: status label + primary action buttons
+        fc_top = QHBoxLayout()
         self._fix_continuation_label = QLabel("Errors remain after applying changes.")
         self._fix_continuation_label.setStyleSheet(f"color:{C['fg_warn']};{FONT_BODY}")
-        fc_layout.addWidget(self._fix_continuation_label)
-        fc_layout.addStretch()
-        fix_continue_btn = QPushButton("Fix Remaining Errors")
-        fix_continue_btn.setStyleSheet(BTN_PRIMARY)
-        fix_continue_btn.clicked.connect(self._on_fix_continuation_clicked)
-        fc_layout.addWidget(fix_continue_btn)
+        self._fix_continuation_label.setWordWrap(True)
+        fc_top.addWidget(self._fix_continuation_label, stretch=1)
+        self._fix_retry_btn = QPushButton("Fix Remaining Errors")
+        self._fix_retry_btn.setStyleSheet(BTN_PRIMARY)
+        self._fix_retry_btn.clicked.connect(self._on_fix_continuation_clicked)
+        fc_top.addWidget(self._fix_retry_btn)
         fc_dismiss = QPushButton("Dismiss")
         fc_dismiss.setStyleSheet(BTN_SECONDARY)
         fc_dismiss.clicked.connect(self.fix_continuation_bar.hide)
-        fc_layout.addWidget(fc_dismiss)
+        fc_top.addWidget(fc_dismiss)
+        fc_outer.addLayout(fc_top)
+        # Escalation row: alternative actions shown when stalled
+        self._escalation_row = QWidget()
+        esc_layout = QHBoxLayout(self._escalation_row)
+        esc_layout.setContentsMargins(0, 0, 0, 0)
+        esc_layout.setSpacing(6)
+        esc_label = QLabel("Try a different approach:")
+        esc_label.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        esc_layout.addWidget(esc_label)
+        btn_explain = QPushButton("Explain Errors")
+        btn_explain.setStyleSheet(BTN_SECONDARY)
+        btn_explain.setToolTip("Ask AI to explain the errors without fixing")
+        btn_explain.clicked.connect(self._on_fix_explain)
+        esc_layout.addWidget(btn_explain)
+        btn_focus = QPushButton("Focus One File")
+        btn_focus.setStyleSheet(BTN_SECONDARY)
+        btn_focus.setToolTip("Fix only the first file with errors")
+        btn_focus.clicked.connect(self._on_fix_focus)
+        esc_layout.addWidget(btn_focus)
+        btn_narrow = QPushButton("Narrower Fix")
+        btn_narrow.setStyleSheet(BTN_SECONDARY)
+        btn_narrow.setToolTip("Ask for the smallest possible change")
+        btn_narrow.clicked.connect(self._on_fix_narrow)
+        esc_layout.addWidget(btn_narrow)
+        esc_layout.addStretch()
+        self._escalation_row.hide()
+        fc_outer.addWidget(self._escalation_row)
         self.fix_continuation_bar.hide()
         layout.addWidget(self.fix_continuation_bar)
 
@@ -2619,11 +2649,16 @@ class ChatPanel(QWidget):
             lines.append(f"  /{cmd}  —  {desc}")
         self._add_info_msg("\n".join(lines), C['fg'])
 
-    def show_fix_continuation(self, n_diags, attempt=0, diff=None):
+    def show_fix_continuation(self, n_diags, attempt=0, diff=None, stalled=False):
         """Show the fix continuation bar after compile-after-AI-edits failure.
-        diff is an optional (resolved, remaining, new) tuple from _diff_diagnostics."""
+        diff is an optional (resolved, remaining, new) tuple from _diff_diagnostics.
+        stalled=True shows escalation buttons for alternative approaches."""
         attempt_prefix = f"Fix attempt {attempt} \u2014 " if attempt > 0 else ""
-        if diff and attempt > 0:
+        if stalled:
+            self._fix_continuation_label.setText(
+                f"{attempt_prefix}no progress. Try a different approach?")
+            self._escalation_row.show()
+        elif diff and attempt > 0:
             resolved, remaining, new_count = diff
             parts = []
             if resolved:
@@ -2634,16 +2669,63 @@ class ChatPanel(QWidget):
             diff_text = " \u00b7 ".join(parts)
             self._fix_continuation_label.setText(
                 f"{attempt_prefix}{diff_text}. Fix remaining errors?")
+            self._escalation_row.hide()
         else:
             s = "s" if n_diags != 1 else ""
             self._fix_continuation_label.setText(
                 f"{attempt_prefix}{n_diags} error{s} remain. Fix remaining errors?")
+            self._escalation_row.hide()
         self.fix_continuation_bar.show()
 
     def _on_fix_continuation_clicked(self):
         """User confirmed continuing the fix cycle."""
         self.fix_continuation_bar.hide()
         self._cmd_fix()
+
+    def _on_fix_explain(self):
+        """Escalation: ask AI to explain errors instead of fixing."""
+        self.fix_continuation_bar.hide()
+        self.fix_triggered.emit()
+        self.send_errors_btn.setChecked(True)
+        self._send_prompt(
+            "Don't fix anything yet. Explain in plain terms what these compiler "
+            "errors mean and what's causing them. Be specific about which lines "
+            "and what the root cause is.",
+            display_text="/fix (explain)")
+
+    def _on_fix_focus(self):
+        """Escalation: focus on the first file with errors."""
+        self.fix_continuation_bar.hide()
+        self.fix_triggered.emit()
+        # Find the first diagnostic's file
+        target = None
+        if self._error_diagnostics:
+            target = self._error_diagnostics[0].file
+        self.send_errors_btn.setChecked(True)
+        if target:
+            basename = os.path.basename(target)
+            self._send_prompt(
+                f"Focus only on {basename}. What specifically needs to change "
+                f"to fix the errors in this file? Make the smallest targeted "
+                f"edit possible. Ignore errors in other files for now.",
+                display_text=f"/fix (focus: {basename})")
+        else:
+            self._send_prompt(
+                "Focus on the first error only. What specifically needs to change? "
+                "Make the smallest targeted edit possible.",
+                display_text="/fix (focus)")
+
+    def _on_fix_narrow(self):
+        """Escalation: ask for the smallest possible change."""
+        self.fix_continuation_bar.hide()
+        self.fix_triggered.emit()
+        self.send_errors_btn.setChecked(True)
+        self._send_prompt(
+            "The previous fixes haven't resolved these errors. Please make the "
+            "smallest possible change — modify as few lines as you can. Do not "
+            "rewrite functions or restructure code. Change only the exact lines "
+            "that cause the errors.",
+            display_text="/fix (narrow)")
 
     def _cmd_fix(self):
         """Send a compile-fix request using structured diagnostics."""
@@ -3671,7 +3753,7 @@ class ChatPanel(QWidget):
         """Add a left-aligned AI message area with model name label."""
         wrapper = QWidget()
         wrapper.setStyleSheet("background: transparent;")
-        wrapper.setMaximumWidth(700)
+        wrapper.setMaximumWidth(860)
         vl = QVBoxLayout(wrapper)
         vl.setContentsMargins(0, 0, 0, 0)
         vl.setSpacing(4)
@@ -4188,6 +4270,8 @@ class ModelsTab(QWidget):
         self.pull_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
         left.addWidget(self.pull_status)
 
+        pull_prog_row = QHBoxLayout()
+        pull_prog_row.setSpacing(6)
         self.pull_progress = QProgressBar()
         self.pull_progress.setRange(0, 100)
         self.pull_progress.setTextVisible(True)
@@ -4196,7 +4280,14 @@ class ModelsTab(QWidget):
             f"border-radius:3px;height:12px;{FONT_SMALL}}}"
             f"QProgressBar::chunk{{background:{C['teal']};border-radius:2px;}}")
         self.pull_progress.hide()
-        left.addWidget(self.pull_progress)
+        pull_prog_row.addWidget(self.pull_progress, stretch=1)
+        self._pull_cancel_btn = QPushButton("Cancel")
+        self._pull_cancel_btn.setStyleSheet(BTN_DANGER)
+        self._pull_cancel_btn.clicked.connect(self._cancel_pull)
+        self._pull_cancel_btn.hide()
+        pull_prog_row.addWidget(self._pull_cancel_btn)
+        left.addLayout(pull_prog_row)
+        self._pull_cancelled = False
 
         lw = QWidget(); lw.setLayout(left); lw.setMinimumWidth(280)
 
@@ -4631,6 +4722,8 @@ class ModelsTab(QWidget):
         self.pull_status.setStyleSheet(f"color:{C['teal']};{FONT_SMALL}")
         self.pull_progress.setValue(0)
         self.pull_progress.show()
+        self._pull_cancel_btn.show()
+        self._pull_cancelled = False
 
         def go():
             try:
@@ -4639,6 +4732,11 @@ class ModelsTab(QWidget):
                     json={"name": name}, stream=True, timeout=(10, 600))
                 last_status = ""
                 for line in r.iter_lines():
+                    if self._pull_cancelled:
+                        r.close()
+                        QTimer.singleShot(0, lambda: self._on_pull_done(
+                            f"Pull of '{name}' cancelled.", False))
+                        return
                     if line:
                         try:
                             chunk = json.loads(line)
@@ -4647,7 +4745,7 @@ class ModelsTab(QWidget):
                             total = chunk.get("total", 0)
                             if total and completed:
                                 pct = int(completed / total * 100)
-                                msg = f"{status} — {pct}%"
+                                msg = f"{status} \u2014 {pct}%"
                             else:
                                 pct = -1  # indeterminate
                                 msg = status
@@ -4661,6 +4759,11 @@ class ModelsTab(QWidget):
                 QTimer.singleShot(0, lambda: self._on_pull_done(str(e), False))
         threading.Thread(target=go, daemon=True).start()
 
+    def _cancel_pull(self):
+        """Cancel an in-progress model pull."""
+        self._pull_cancelled = True
+        self.pull_status.setText("Cancelling...")
+
     def _on_pull_progress(self, msg, pct=-1):
         self.pull_status.setText(msg)
         if pct >= 0:
@@ -4672,6 +4775,7 @@ class ModelsTab(QWidget):
 
     def _on_pull_done(self, name, success):
         self.pull_progress.hide()
+        self._pull_cancel_btn.hide()
         if success:
             self.pull_status.setText(f"'{name}' pulled successfully!")
             self.pull_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
@@ -5284,6 +5388,7 @@ class MainWindow(QMainWindow):
         self._compile_follows_ai_edits = False  # captured at compile start
         self._fix_attempt_count = 0            # AI-assisted fix attempts in current session
         self._prev_diagnostics = []            # snapshot before each fix attempt (for diff)
+        self._fix_stall_count = 0              # consecutive attempts with resolved == 0
 
         self._setup_ui()
         self._setup_toolbar()
@@ -5735,6 +5840,7 @@ class MainWindow(QMainWindow):
         self._compile_follows_ai_edits = False
         self._fix_attempt_count = 0
         self._prev_diagnostics = []
+        self._fix_stall_count = 0
         self.serial_monitor.refresh_ports()
         self.setWindowTitle(f"{WINDOW_TITLE} — {os.path.basename(path)}")
         self.editor.open_all_project_files(path)
@@ -5770,9 +5876,10 @@ class MainWindow(QMainWindow):
         self._prev_diagnostics = list(getattr(self, '_compiler_diagnostics', []))
 
     def _reset_fix_attempt_count(self):
-        """Reset fix attempt counter and diagnostic snapshot."""
+        """Reset fix attempt counter, diagnostic snapshot, and stall detection."""
         self._fix_attempt_count = 0
         self._prev_diagnostics = []
+        self._fix_stall_count = 0
 
     def _on_model_switch(self, model_name):
         """Handle /model command — update toolbar combo and status bar."""
@@ -5950,7 +6057,16 @@ class MainWindow(QMainWindow):
             diff = None
             if self._prev_diagnostics:
                 diff = _diff_diagnostics(self._prev_diagnostics, self._compiler_diagnostics)
-            self.chat_panel.show_fix_continuation(n, self._fix_attempt_count, diff)
+            # Track stall: consecutive attempts where resolved == 0
+            if diff:
+                resolved, _, _ = diff
+                if resolved == 0:
+                    self._fix_stall_count += 1
+                else:
+                    self._fix_stall_count = 0
+            stalled = self._fix_stall_count >= 2 and self._fix_attempt_count >= 3
+            self.chat_panel.show_fix_continuation(
+                n, self._fix_attempt_count, diff, stalled)
         else:
             hint = f"\nType /fix in AI Chat to auto-fix ({n} diagnostic{'s' if n != 1 else ''})"
             self.compiler_output.append_output(hint, C["teal"])
