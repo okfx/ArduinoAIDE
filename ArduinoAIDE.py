@@ -348,6 +348,7 @@ Rules:
 - Keep explanations brief and focused.
 - ALWAYS provide code. Never say you cannot modify files — the IDE does that for you.
 - Edit the CORRECT file. If the user says "add a comment to audio_init.h", edit audio_init.h — not any other file.
+- NEVER use unified diff format (diff --git, @@, +/- lines). The IDE does NOT understand diffs. ONLY use <<<EDIT or <<<FILE format.
 
 Example — editing an existing file:
 <<<EDIT sketch.ino
@@ -2661,9 +2662,56 @@ class ChatPanel(QWidget):
             self._add_info_msg(
                 f'Found {n} code edit{"s" if n > 1 else ""} — '
                 f'use the Apply bar below to apply.', C['fg_ok'])
-        # No fallback — if the AI didn't use <<<EDIT or <<<FILE syntax,
-        # we do NOT offer to blindly replace files with code block contents.
-        # The SYSTEM_PROMPT instructs the AI to use EDIT/FILE blocks.
+        # Fallback: parse unified diff format (diff --git a/file b/file)
+        # Some small models output this despite being told not to.
+        if not edits:
+            edits = self._parse_unified_diffs(response)
+            if edits:
+                if result is not None:
+                    for edit_type, filename, old, new in edits:
+                        result.proposed_edits.append(
+                            ProposedEdit(edit_type, filename, old, new))
+                self._pending_edits = edits
+                n = len(edits)
+                files_touched = set(e[1] for e in edits)
+                self.apply_label.setText(
+                    f"{n} change{'s' if n > 1 else ''} in {', '.join(files_touched)}")
+                self.apply_bar.show()
+                self._add_info_msg(
+                    f'Found {n} code edit{"s" if n > 1 else ""} (from diff) — '
+                    f'use the Apply bar below to apply.', C['fg_ok'])
+
+    def _parse_unified_diffs(self, response):
+        """Parse unified diff format as fallback when model ignores <<<EDIT instructions.
+        Returns list of (edit_type, filename, old_text, new_text) tuples."""
+        edits = []
+        # Strip code fences so diff content is exposed
+        stripped = re.sub(r'```\w*\n', '', response).replace('```', '')
+        # Match diff --git blocks with hunks
+        diff_pat = re.compile(
+            r'diff\s+--git\s+a/(\S+)\s+b/\S+.*?\n'
+            r'(?:.*?\n)*?'
+            r'(@@[^\n]*\n(?:[+ \-].*\n?)*)',
+            re.MULTILINE)
+        for m in diff_pat.finditer(stripped):
+            filename = m.group(1)
+            hunk_text = m.group(2)
+            old_lines = []
+            new_lines = []
+            for line in hunk_text.splitlines():
+                if line.startswith('@@'):
+                    continue
+                if line.startswith('-'):
+                    old_lines.append(line[1:])
+                elif line.startswith('+'):
+                    new_lines.append(line[1:])
+                elif line.startswith(' '):
+                    old_lines.append(line[1:])
+                    new_lines.append(line[1:])
+            if old_lines or new_lines:
+                edits.append(("edit", filename,
+                              "\n".join(old_lines), "\n".join(new_lines)))
+        return edits
 
     def _track_ai_edited_file(self, filename):
         """Record that the AI edited this file (for working set priority)."""
