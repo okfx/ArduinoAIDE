@@ -110,6 +110,7 @@ FONT_SMALL    = "font-size: 11px;"                        # Hints, status, secon
 FONT_CODE     = "font-family: 'SF Mono', Menlo, Monaco, 'Courier New', monospace; font-size: 13px;"
 FONT_CHAT     = "font-family: -apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 14px;"
 FONT_CHAT_BOLD = "font-family: -apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 14px; font-weight: bold;"
+FONT_ICON      = "font-size: 16px;"                        # Sidebar icon characters
 
 # Shared button style strings
 BTN_PRIMARY = (f"background:{C['teal']};color:white;border:none;"
@@ -122,6 +123,10 @@ BTN_TOOLBAR = (f"background:{C['teal']};color:white;border:none;"
                f"border-radius:4px;padding:6px 14px;{FONT_BODY}font-weight:bold;")
 BTN_GHOST = (f"background:transparent;color:{C['teal']};border:none;"
              f"{FONT_SMALL}text-decoration:underline;")
+BTN_CHAT_SEND = (f"background:{C['teal']};color:white;border:none;"
+                 f"border-radius:10px;font-weight:600;padding:8px 16px;{FONT_CHAT}")
+BTN_CHAT_STOP = (f"background:{C['bg_input']};color:{C['fg']};border:1px solid {C['border_light']};"
+                 f"border-radius:10px;padding:8px 14px;{FONT_CHAT}")
 
 PANEL_HEADER_STYLE = (
     f"background: {C['bg']}; border-bottom: 1px solid {C['border']};"
@@ -148,6 +153,36 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "teensy-coder"
 DEFAULT_FQBN = "teensy:avr:teensy40"
 
+# Unified application config file
+CONFIG_FILE = os.path.expanduser("~/.teensy_ide_config.json")
+
+def _load_config():
+    """Load application config from disk. Returns dict with defaults for missing keys."""
+    defaults = {
+        "project_path": None,
+        "ollama_model": "teensy-coder",
+        "board_fqbn": DEFAULT_FQBN,
+        "port": "",
+        "window_geometry": None,  # [x, y, width, height]
+    }
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            saved = json.load(f)
+        for k, v in saved.items():
+            if k in defaults:
+                defaults[k] = v
+        return defaults
+    except (FileNotFoundError, json.JSONDecodeError):
+        return defaults
+
+def _save_config(data):
+    """Save application config to disk."""
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
 # Board FQBN → friendly display name mapping
 BOARD_DISPLAY = {
     "teensy:avr:teensy40": "Teensy 4.0",
@@ -158,40 +193,46 @@ BOARD_DISPLAY = {
 }
 WINDOW_TITLE = "Teensy Ollama IDE"
 
+# File extensions recognized as project files (used by AI context and file scanner)
+PROJECT_EXTENSIONS = {".ino", ".cpp", ".c", ".h", ".hpp", ".md", ".txt", ".json", ".yaml", ".yml", ".cfg", ".ini"}
+PROJECT_SKIP_DIRS = {'.git', '__pycache__', 'build', 'node_modules', '.venv', 'venv'}
+
 SYSTEM_PROMPT = """You are an expert embedded C/C++ developer for Teensy microcontrollers (PJRC), running inside an IDE.
 You write clean, efficient code for real-time applications.
 You understand hardware registers, interrupts, DMA, timers, and peripheral configuration.
 
-The user's project files are provided automatically with every message so you can always see the full code.
+IMPORTANT CONTEXT: You can see the ENTIRE project — every file and the full directory structure are provided automatically with every message. You have complete project knowledge.
 
 CRITICAL: You are running inside a code editor IDE. You CAN and SHOULD write code directly.
-The IDE will parse your output and apply changes to the files — you are NOT writing to the filesystem yourself.
-You simply output text in the format below and the IDE handles the rest. NEVER refuse to write code.
+The IDE will parse your output and apply changes to the files. NEVER refuse to write code.
 ALWAYS provide concrete code when the user asks for changes.
 
 To replace existing code in a file, output this exact format:
-<<<EDIT filename.ino
+<<<EDIT path/to/filename.ext
 <<<OLD
 (exact lines to find and replace — must match the file EXACTLY)
 >>>NEW
 (replacement lines)
 >>>END
 
-To write or rewrite an entire file:
-<<<FILE filename.ino
+To write or rewrite an entire file (also used for CREATING NEW files):
+<<<FILE path/to/filename.ext
 (complete file contents)
 >>>FILE
 
 Rules:
+- Use the RELATIVE PATH as shown in the directory tree (e.g., src/helper.cpp, not just helper.cpp).
+- For files in the project root, just use the filename (e.g., sketch.ino).
 - The OLD block must match existing code EXACTLY (including whitespace/indentation).
 - You can include multiple EDIT or FILE blocks in one response.
-- Use EDIT for targeted changes; use FILE only for major rewrites or new files.
+- Use EDIT for targeted changes to existing files.
+- Use FILE for major rewrites of existing files OR creating brand new files.
+- You can create files in new subdirectories — the IDE will create the directories.
+- You can edit and create .ino, .cpp, .c, .h, .hpp, .md, .txt, .json, and other project files.
 - Keep explanations brief and focused.
 - ALWAYS provide code. Never say you cannot modify files — the IDE does that for you.
 
-Example:
-User asks to add a blinkLED function.
-You respond with explanation then:
+Example — editing an existing file:
 <<<EDIT sketch.ino
 <<<OLD
 void setup() {
@@ -208,7 +249,16 @@ void setup() {
   Serial.begin(115200);
   pinMode(LED_BUILTIN, OUTPUT);
 }
->>>END"""
+>>>END
+
+Example — creating a new file:
+<<<FILE src/utils.h
+#ifndef UTILS_H
+#define UTILS_H
+// Utility functions
+void initPins();
+#endif
+>>>FILE"""
 
 # =============================================================================
 # Stylesheet
@@ -435,7 +485,7 @@ class SidebarButton(QPushButton):
         self.setStyleSheet(f"""
             QPushButton {{
                 background-color: transparent; color: {C['fg_muted']};
-                border: none; font-size: 16px; border-radius: 6px;
+                border: none; {FONT_ICON} border-radius: 6px;
             }}
             QPushButton:hover {{ color: {C['fg_dim']}; background-color: {C['bg_hover']}; }}
             QPushButton:checked {{
@@ -966,14 +1016,15 @@ class TabbedEditor(QWidget):
         return False
 
     def open_all_project_files(self, project_path):
-        """Open all project files as tabs, like Arduino IDE."""
-        extensions = {".ino", ".cpp", ".c", ".h", ".hpp", ".md"}
+        """Open all project files as tabs, scanning subdirectories."""
         files = []
-        for f in sorted(os.listdir(project_path)):
-            ext = os.path.splitext(f)[1].lower()
-            if ext in extensions:
-                files.append(os.path.join(project_path, f))
-        # Open .ino first
+        for root, dirs, filenames in os.walk(project_path):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in PROJECT_SKIP_DIRS]
+            for f in sorted(filenames):
+                ext = os.path.splitext(f)[1].lower()
+                if ext in PROJECT_EXTENSIONS:
+                    files.append(os.path.join(root, f))
+        # Open .ino first, then others
         ino_files = [f for f in files if f.endswith(".ino")]
         other_files = [f for f in files if not f.endswith(".ino")]
         for f in ino_files + other_files:
@@ -1022,10 +1073,15 @@ class TabbedEditor(QWidget):
             return True
         return False
 
-    def find_file_by_name(self, basename):
-        """Find full path of an open file by its basename."""
+    def find_file_by_name(self, name):
+        """Find full path of an open file by basename or relative path."""
+        # Try exact basename match first
         for fp in self._editors:
-            if os.path.basename(fp) == basename:
+            if os.path.basename(fp) == name:
+                return fp
+        # Try relative path suffix match (e.g., "src/helper.cpp")
+        for fp in self._editors:
+            if fp.endswith("/" + name) or fp.endswith(os.sep + name):
                 return fp
         return None
 
@@ -1350,6 +1406,7 @@ class ChatPanel(QWidget):
     apply_file = pyqtSignal(str, str)        # filename, full content
     generation_started = pyqtSignal()
     generation_finished = pyqtSignal()
+    edits_applied = pyqtSignal()             # emitted after edits are successfully applied
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1462,18 +1519,14 @@ class ChatPanel(QWidget):
 
         self.send_btn = QPushButton("Send")
         self.send_btn.setFixedWidth(60)
-        self.send_btn.setStyleSheet(
-            f"background:{C['teal']};color:white;border:none;"
-            f"border-radius:10px;font-weight:600;padding:8px 16px;{FONT_CHAT}")
+        self.send_btn.setStyleSheet(BTN_CHAT_SEND)
         self.send_btn.clicked.connect(self.send_message)
         il.addWidget(self.send_btn)
 
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setFixedWidth(52)
         self.stop_btn.setEnabled(False)
-        self.stop_btn.setStyleSheet(
-            f"background:{C['bg_input']};color:{C['fg']};border:1px solid {C['border_light']};"
-            f"border-radius:10px;padding:8px 14px;{FONT_BODY}")
+        self.stop_btn.setStyleSheet(BTN_CHAT_STOP)
         self.stop_btn.clicked.connect(self.stop_generation)
         il.addWidget(self.stop_btn)
 
@@ -1509,23 +1562,111 @@ class ChatPanel(QWidget):
     def set_error_context(self, e):
         self._error_context = e
 
-    def _build_file_context(self):
-        """Build a string with all open project files for the AI to see."""
-        if not self._editor_ref:
+    def _scan_project_files(self, project_path):
+        """Recursively scan project directory and return dict of {relative_path: content}.
+        Skips hidden dirs, build artifacts, and binary files."""
+        if not project_path or not os.path.isdir(project_path):
+            return {}
+        result = {}
+        max_file_size = 100_000  # Skip files > 100KB
+        for root, dirs, files in os.walk(project_path):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in PROJECT_SKIP_DIRS]
+            for fname in sorted(files):
+                if fname.startswith('.'):
+                    continue
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in PROJECT_EXTENSIONS:
+                    continue
+                full_path = os.path.join(root, fname)
+                rel_path = os.path.relpath(full_path, project_path)
+                try:
+                    size = os.path.getsize(full_path)
+                    if size > max_file_size:
+                        continue
+                    with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
+                        result[rel_path] = f.read()
+                except (OSError, UnicodeDecodeError):
+                    continue
+        return result
+
+    def _build_directory_tree(self, project_path):
+        """Build a text directory tree listing for the AI context."""
+        if not project_path or not os.path.isdir(project_path):
             return ""
-        files = self._editor_ref.get_all_files()
-        if not files:
-            return ""
+        lines = [os.path.basename(project_path) + "/"]
+
+        def _walk(dir_path, prefix=""):
+            try:
+                entries = sorted(os.listdir(dir_path))
+            except PermissionError:
+                return
+            dirs = [e for e in entries if os.path.isdir(os.path.join(dir_path, e))
+                    and not e.startswith('.') and e not in PROJECT_SKIP_DIRS]
+            files = [e for e in entries if os.path.isfile(os.path.join(dir_path, e))
+                     and not e.startswith('.')]
+            items = [(d, True) for d in dirs] + [(f, False) for f in files]
+            for i, (name, is_dir) in enumerate(items):
+                connector = "\u2514\u2500\u2500 " if i == len(items) - 1 else "\u251c\u2500\u2500 "
+                if is_dir:
+                    lines.append(f"{prefix}{connector}{name}/")
+                    extension = "    " if i == len(items) - 1 else "\u2502   "
+                    _walk(os.path.join(dir_path, name), prefix + extension)
+                else:
+                    lines.append(f"{prefix}{connector}{name}")
+
+        _walk(project_path)
+        return "\n".join(lines)
+
+    def _resolve_file_path(self, filename):
+        """Resolve a filename from AI output to an absolute path."""
+        if os.path.isabs(filename):
+            return filename
         proj = getattr(self, '_project_path', None) or ""
-        proj_name = os.path.basename(proj) if proj else "unknown"
-        parts = [f"[PROJECT: {proj_name}]\n[DIRECTORY: {proj}]\n"]
-        parts.append(f"[The following {len(files)} files are open in the editor. "
-                     f"This is the COMPLETE content of each file.]\n")
+        if proj:
+            return os.path.join(proj, filename)
+        return os.path.abspath(filename)
+
+    def _build_file_context(self):
+        """Build a string with ALL project files for the AI to see.
+        Reads from disk so the AI sees everything, not just open tabs."""
+        proj = getattr(self, '_project_path', None) or ""
+
+        if not proj:
+            # Fallback: use open editor files if no project path
+            if not self._editor_ref:
+                return ""
+            files = self._editor_ref.get_all_files()
+            if not files:
+                return ""
+            parts = ["[PROJECT: unknown]\n"]
+            names = []
+            for fp, content in files.items():
+                basename = os.path.basename(fp)
+                names.append(basename)
+                parts.append(f"========== FILE: {basename} ==========\n{content}\n========== END: {basename} ==========\n")
+            self._update_context_display("unknown", "", names)
+            return "\n".join(parts)
+
+        proj_name = os.path.basename(proj)
+        tree = self._build_directory_tree(proj)
+        all_files = self._scan_project_files(proj)
+
+        parts = [
+            f"[PROJECT: {proj_name}]",
+            f"[DIRECTORY: {proj}]",
+            "",
+            "[DIRECTORY TREE:]",
+            tree,
+            "",
+            f"[The following {len(all_files)} files are in the project. "
+            f"This is the COMPLETE content of each file.]",
+            "",
+        ]
         names = []
-        for fp, content in files.items():
-            basename = os.path.basename(fp)
-            names.append(basename)
-            parts.append(f"========== FILE: {basename} ==========\n{content}\n========== END: {basename} ==========\n")
+        for rel_path, content in sorted(all_files.items()):
+            names.append(rel_path)
+            parts.append(f"========== FILE: {rel_path} ==========\n{content}\n========== END: {rel_path} ==========\n")
+
         self._update_context_display(proj_name, proj, names)
         return "\n".join(parts)
 
@@ -1695,16 +1836,46 @@ class ChatPanel(QWidget):
             self._parse_code_blocks(response)
 
     def _apply_all_edits(self):
-        """Apply all parsed edits to the editor."""
+        """Apply all parsed edits to the editor. Supports creating new files."""
         if not self._editor_ref or not self._pending_edits:
             return
         applied = 0
         errors = []
+
         for edit_type, filename, old, new in self._pending_edits:
+            # Try to find file in open tabs
             fp = self._editor_ref.find_file_by_name(filename)
+
+            if not fp and edit_type == "file":
+                # NEW FILE CREATION: file not open and it's a <<<FILE block
+                abs_path = self._resolve_file_path(filename)
+                parent_dir = os.path.dirname(abs_path)
+                try:
+                    os.makedirs(parent_dir, exist_ok=True)
+                    with open(abs_path, 'w', encoding='utf-8') as f:
+                        f.write(new)
+                    # Open the new file in the editor
+                    self._editor_ref.open_file(abs_path)
+                    applied += 1
+                    continue
+                except OSError as e:
+                    errors.append(f"Could not create {filename}: {e}")
+                    continue
+
+            if not fp and edit_type == "edit":
+                # For EDIT blocks, try to find file on disk even if not open
+                abs_path = self._resolve_file_path(filename)
+                if os.path.isfile(abs_path):
+                    self._editor_ref.open_file(abs_path)
+                    fp = abs_path
+                else:
+                    errors.append(f"File not found: {filename}")
+                    continue
+
             if not fp:
                 errors.append(f"File not found: {filename}")
                 continue
+
             if edit_type == "file":
                 # Full file replacement
                 if self._editor_ref.set_file_content(fp, new):
@@ -1731,6 +1902,10 @@ class ChatPanel(QWidget):
                            C['fg_ok'] if not errors else C['fg_warn'])
         self.apply_bar.hide()
         self._pending_edits = []
+
+        # Notify MainWindow to refresh file browser after creates/edits
+        if applied > 0:
+            self.edits_applied.emit()
 
     def _dismiss_edits(self):
         self.apply_bar.hide()
@@ -1779,9 +1954,13 @@ class ChatPanel(QWidget):
 
     def _update_context_display(self, proj_name, proj_path, names):
         """Update the context panel with project info and file list."""
-        self.project_label.setText(f"Project: {proj_name}  —  {len(names)} files loaded")
+        self.project_label.setText(f"Project: {proj_name}  \u2014  {len(names)} files loaded")
         self.path_label.setText(proj_path)
-        self.file_list_widget.setText("  •  ".join(names))
+        # Show abbreviated paths for long lists
+        display_names = names[:20]
+        if len(names) > 20:
+            display_names.append(f"... and {len(names) - 20} more")
+        self.file_list_widget.setText("  \u2022  ".join(display_names))
         self._ctx_detail.show()
         self.toggle_files_btn.show()
 
@@ -1795,10 +1974,16 @@ class ChatPanel(QWidget):
             self.toggle_files_btn.setText("Hide Files")
 
     def _update_context_bar(self):
+        proj = getattr(self, '_project_path', None) or ""
+        if proj and os.path.isdir(proj):
+            proj_name = os.path.basename(proj)
+            all_files = self._scan_project_files(proj)
+            names = sorted(all_files.keys())
+            self._update_context_display(proj_name, proj, names)
+            return
         if self._editor_ref:
             files = self._editor_ref.get_all_files()
             if files:
-                proj = getattr(self, '_project_path', None) or ""
                 proj_name = os.path.basename(proj) if proj else "unknown"
                 names = [os.path.basename(fp) for fp in files]
                 self._update_context_display(proj_name, proj, names)
@@ -2348,7 +2533,7 @@ class ModelsTab(QWidget):
         cl.addWidget(self.sys_in)
 
         r3 = QHBoxLayout()
-        pb = QPushButton("Preview"); pb.clicked.connect(self._preview); r3.addWidget(pb)
+        pb = QPushButton("Preview"); pb.setStyleSheet(BTN_SECONDARY); pb.clicked.connect(self._preview); r3.addWidget(pb)
         cb = QPushButton("Create Model")
         cb.setStyleSheet(BTN_PRIMARY)
         cb.clicked.connect(self._create); r3.addWidget(cb); r3.addStretch()
@@ -2803,6 +2988,7 @@ class SettingsPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("settingsTabs")
+        self.tabs.tabBar().setExpanding(False)
 
         self.ai_tools_tab = AIToolsTab()
         self.tabs.addTab(self.ai_tools_tab, "AI Tools")
@@ -3361,8 +3547,9 @@ class GitPanel(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, project_path=None):
+    def __init__(self, project_path=None, config=None):
         super().__init__()
+        self._config = config or {}
         self.setWindowTitle(WINDOW_TITLE)
         # Size to 75% of screen so it fits any display; fully resizable
         screen = QApplication.primaryScreen()
@@ -3383,6 +3570,31 @@ class MainWindow(QMainWindow):
         self._setup_toolbar()
         self._setup_menubar()
         self._setup_statusbar()
+
+        # Restore saved window geometry (validated against visible screens)
+        geom = self._config.get("window_geometry")
+        if geom and len(geom) == 4:
+            from PyQt6.QtGui import QGuiApplication
+            x, y, gw, gh = geom
+            for scr in QGuiApplication.screens():
+                sg = scr.availableGeometry()
+                if sg.contains(x, y):
+                    self.setGeometry(x, y, gw, gh)
+                    break
+
+        # Restore board selection
+        saved_fqbn = self._config.get("board_fqbn")
+        if saved_fqbn and hasattr(self, 'board_combo'):
+            idx = self.board_combo.findData(saved_fqbn)
+            if idx >= 0:
+                self.board_combo.setCurrentIndex(idx)
+
+        # Restore port selection
+        saved_port = self._config.get("port")
+        if saved_port and hasattr(self, 'port_combo'):
+            idx = self.port_combo.findText(saved_port)
+            if idx >= 0:
+                self.port_combo.setCurrentIndex(idx)
 
         if project_path:
             self._open_project(project_path)
@@ -3443,6 +3655,7 @@ class MainWindow(QMainWindow):
         # Bottom panel
         self.bottom_tabs = QTabWidget()
         self.bottom_tabs.setObjectName("bottomTabs")
+        self.bottom_tabs.tabBar().setExpanding(False)
         self.compiler_output = CompilerOutput()
         self.bottom_tabs.addTab(self.compiler_output, "Output")
         self.serial_monitor = SerialMonitor()
@@ -3459,6 +3672,7 @@ class MainWindow(QMainWindow):
         self.chat_panel.set_editor(self.editor)
         self.chat_panel.generation_started.connect(lambda: self.ai_spinner.start())
         self.chat_panel.generation_finished.connect(lambda: self.ai_spinner.stop())
+        self.chat_panel.edits_applied.connect(self._on_edits_applied)
         self.view_stack.addWidget(self.chat_panel)
 
         # View 2: File Manager (full panel)
@@ -3597,17 +3811,17 @@ class MainWindow(QMainWindow):
         for fqbn in fqbns:
             self.board_combo.addItem(BOARD_DISPLAY.get(fqbn, fqbn), fqbn)
         self.board_combo.setCurrentIndex(0)
-        self.board_combo.setMinimumContentsLength(12)
-        self.board_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.board_combo.setMinimumWidth(160)
+        self.board_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.board_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.board_combo.setMinimumWidth(100)
         toolbar.addWidget(self.board_combo)
 
         toolbar.addWidget(QLabel("Port"))
         self.port_combo = QComboBox()
         self.port_combo.setEditable(True)
-        self.port_combo.setMinimumContentsLength(12)
-        self.port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.port_combo.setMinimumWidth(160)
+        self.port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.port_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.port_combo.setMinimumWidth(100)
         self._refresh_ports()
         toolbar.addWidget(self.port_combo)
 
@@ -3615,9 +3829,9 @@ class MainWindow(QMainWindow):
 
         toolbar.addWidget(QLabel("AI"))
         self.model_combo = QComboBox()
-        self.model_combo.setMinimumContentsLength(16)
-        self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.model_combo.setMinimumWidth(200)
+        self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.model_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.model_combo.setMinimumWidth(140)
         self._refresh_models()
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
         toolbar.addWidget(self.model_combo)
@@ -3814,6 +4028,12 @@ class MainWindow(QMainWindow):
         self._switch_view(1)
         self.chat_panel.send_ai_action(prompt)
 
+    def _on_edits_applied(self):
+        """Refresh file browser and context after AI creates/edits files."""
+        if self.project_path:
+            self.file_manager.file_browser._refresh()
+        self.chat_panel._update_context_bar()
+
     def _on_editor_file_changed(self, fp):
         self.setWindowTitle(f"{WINDOW_TITLE} — {os.path.basename(fp)}")
         self.chat_panel._update_context_bar()
@@ -3954,6 +4174,19 @@ class MainWindow(QMainWindow):
             self._switch_view(1); self.chat_panel.input_field.setFocus()
 
     def closeEvent(self, event):
+        # Save application state before closing
+        config = {
+            "project_path": self.project_path,
+            "ollama_model": OLLAMA_MODEL,
+            "board_fqbn": self._current_fqbn(),
+            "port": self.port_combo.currentText() if hasattr(self, 'port_combo') else "",
+            "window_geometry": [
+                self.geometry().x(), self.geometry().y(),
+                self.geometry().width(), self.geometry().height()
+            ],
+        }
+        _save_config(config)
+        # Thread cleanup
         if self.chat_panel.thread.isRunning():
             self.chat_panel.worker.stop(); self.chat_panel.thread.quit(); self.chat_panel.thread.wait(2000)
         event.accept()
@@ -4000,12 +4233,19 @@ def main():
     app.setStyleSheet(STYLESHEET)
     # Ensure Ollama is running
     _ensure_ollama()
-    # Load persisted AI actions config
+    # Load persisted configs
     _load_ai_actions()
+    config = _load_config()
+    # CLI arg takes precedence over saved project path
     project_path = None
     if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
         project_path = os.path.abspath(sys.argv[1])
-    w = MainWindow(project_path)
+    elif config.get("project_path") and os.path.isdir(config["project_path"]):
+        project_path = config["project_path"]
+    # Set the global model from config before window creation
+    global OLLAMA_MODEL
+    OLLAMA_MODEL = config.get("ollama_model", "teensy-coder")
+    w = MainWindow(project_path, config=config)
     w.show()
     sys.exit(app.exec())
 
