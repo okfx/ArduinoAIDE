@@ -338,12 +338,15 @@ Rules:
 - For files in the project root, just use the filename (e.g., sketch.ino).
 - The OLD block must match existing code EXACTLY (including whitespace/indentation).
 - You can include multiple EDIT or FILE blocks in one response.
-- Use EDIT for targeted changes to existing files.
-- Use FILE for major rewrites of existing files OR creating brand new files.
+- STRONGLY PREFER <<<EDIT over <<<FILE for ALL changes to existing files. <<<EDIT is safer because it only replaces what you specify. <<<FILE replaces THE ENTIRE FILE — any code you don't include will be DELETED.
+- ONLY use <<<FILE for: (a) creating brand new files, or (b) completely rewriting a file from scratch when more than 50% of the code changes.
+- For adding code (comments, functions, includes), use <<<EDIT with enough OLD context to find the insertion point.
+- NEVER use <<<FILE just to add a comment or make a small change — use <<<EDIT.
 - You can create files in new subdirectories — the IDE will create the directories.
 - You can edit and create .ino, .cpp, .c, .h, .hpp, .md, .txt, .json, and other project files.
 - Keep explanations brief and focused.
 - ALWAYS provide code. Never say you cannot modify files — the IDE does that for you.
+- Edit the CORRECT file. If the user says "add a comment to audio_init.h", edit audio_init.h — not any other file.
 
 Example — editing an existing file:
 <<<EDIT sketch.ino
@@ -1709,7 +1712,7 @@ class ChatPanel(QWidget):
         if not project_path or not os.path.isdir(project_path):
             return {}
         result = {}
-        max_file_size = 100_000  # Skip files > 100KB
+        max_file_size = 256_000  # Skip files > 256KB
         for root, dirs, files in os.walk(project_path):
             dirs[:] = [d for d in dirs if not d.startswith('.') and d not in PROJECT_SKIP_DIRS]
             for fname in sorted(files):
@@ -1835,6 +1838,23 @@ class ChatPanel(QWidget):
             else:
                 priority = 3
             self._working_set.add(abs_path, rel_path, priority, content)
+
+        # Safety net: if active file wasn't found by scanner (wrong extension,
+        # too large, etc.), inject it directly from the editor content
+        if active_file:
+            active_norm = os.path.normpath(active_file)
+            found_active = False
+            for rel_path in all_files:
+                if os.path.normpath(os.path.join(proj, rel_path)) == active_norm:
+                    found_active = True
+                    break
+            if not found_active:
+                # Read directly from editor
+                content = self._editor_ref.current_text() if self._editor_ref else ""
+                if content:
+                    rel = os.path.relpath(active_file, proj)
+                    all_files[rel] = content
+                    self._working_set.add(active_file, rel, 0, content)
 
         self._update_context_display(proj_name, proj, sorted(all_files.keys()))
 
