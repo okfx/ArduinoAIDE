@@ -975,6 +975,10 @@ def _build_ai_context_menu(editor_widget, menu, selected_text):
 
 
 if HAS_QSCINTILLA:
+    # Marker numbers for QScintilla gutter (0-31 available)
+    _MARKER_ERROR = 8
+    _MARKER_WARNING = 9
+
     class CodeEditor(QsciScintilla):
         ai_action_requested = pyqtSignal(str)  # emits the full prompt
 
@@ -990,6 +994,16 @@ if HAS_QSCINTILLA:
             self.setMarginWidth(0, "00000")
             self.setMarginsForegroundColor(QColor(C["fg_dim"]))
             self.setMarginsBackgroundColor(QColor(C["bg"]))
+            # Margin 1: diagnostic markers (error/warning symbols)
+            self.setMarginType(1, QsciScintilla.MarginType.SymbolMargin)
+            self.setMarginWidth(1, 16)
+            self.setMarginMarkerMask(1, (1 << _MARKER_ERROR) | (1 << _MARKER_WARNING))
+            self.markerDefine(QsciScintilla.MarkerSymbol.Circle, _MARKER_ERROR)
+            self.setMarkerForegroundColor(QColor(C["fg_err"]), _MARKER_ERROR)
+            self.setMarkerBackgroundColor(QColor(C["fg_err"]), _MARKER_ERROR)
+            self.markerDefine(QsciScintilla.MarkerSymbol.Circle, _MARKER_WARNING)
+            self.setMarkerForegroundColor(QColor("#e5c07b"), _MARKER_WARNING)
+            self.setMarkerBackgroundColor(QColor("#e5c07b"), _MARKER_WARNING)
             self.setCaretLineVisible(True)
             self.setCaretLineBackgroundColor(QColor(C["bg_input"]))
             self.setCaretForegroundColor(QColor(C["fg"]))
@@ -1071,6 +1085,24 @@ if HAS_QSCINTILLA:
                         self.ai_action_requested.emit(template.format(code=sel))
                     break
 
+        def clear_diagnostics(self):
+            """Remove all error/warning markers from the gutter."""
+            self.markerDeleteAll(_MARKER_ERROR)
+            self.markerDeleteAll(_MARKER_WARNING)
+
+        def set_diagnostics(self, diags):
+            """Set gutter markers from a list of StructuredDiagnostic objects.
+            Lines are 1-indexed in diagnostics, 0-indexed in QScintilla."""
+            self.clear_diagnostics()
+            seen = set()
+            for d in diags:
+                line_0 = d.line - 1
+                if line_0 < 0 or line_0 in seen:
+                    continue
+                seen.add(line_0)
+                marker = _MARKER_ERROR if d.severity == "error" else _MARKER_WARNING
+                self.markerAdd(line_0, marker)
+
         def load_file(self, fp):
             try:
                 with open(fp, "r", encoding="utf-8", errors="replace") as f: self.setText(f.read())
@@ -1119,6 +1151,9 @@ else:
                     else:
                         self.ai_action_requested.emit(template.format(code=sel))
                     break
+
+        def clear_diagnostics(self): pass  # No gutter in QPlainTextEdit
+        def set_diagnostics(self, diags): pass
 
         def load_file(self, fp):
             try:
@@ -1254,6 +1289,51 @@ class TabbedEditor(QWidget):
             if fp.endswith("/" + name) or fp.endswith(os.sep + name):
                 return fp
         return None
+
+    def apply_diagnostics(self, diagnostics, project_path=""):
+        """Apply gutter markers to open editors based on StructuredDiagnostic list.
+        Groups diagnostics by file path, resolves to open editors."""
+        # Group diagnostics by absolute file path
+        by_file = {}
+        for d in diagnostics:
+            if d.file == "<linker>" or d.line == 0:
+                continue
+            if os.path.isabs(d.file):
+                abs_path = d.file
+            elif project_path:
+                abs_path = os.path.join(project_path, d.file)
+            else:
+                abs_path = os.path.abspath(d.file)
+            abs_path = os.path.normpath(abs_path)
+            by_file.setdefault(abs_path, []).append(d)
+        # Apply to open editors
+        for fp, ed in self._editors.items():
+            norm_fp = os.path.normpath(fp)
+            if norm_fp in by_file:
+                ed.set_diagnostics(by_file[norm_fp])
+
+    def clear_diagnostics(self):
+        """Clear all diagnostic markers from all open editors."""
+        for ed in self._editors.values():
+            ed.clear_diagnostics()
+
+    def goto_line(self, filepath, line):
+        """Open file (if not already) and scroll to line (1-indexed)."""
+        filepath = os.path.abspath(filepath)
+        if filepath not in self._editors:
+            if not self.open_file(filepath):
+                return
+        self.tabs.setCurrentWidget(self._editors[filepath])
+        ed = self._editors[filepath]
+        if HAS_QSCINTILLA:
+            ed.setCursorPosition(max(0, line - 1), 0)
+            ed.ensureLineVisible(max(0, line - 1))
+        else:
+            cursor = ed.textCursor()
+            block = ed.document().findBlockByLineNumber(max(0, line - 1))
+            cursor.setPosition(block.position())
+            ed.setTextCursor(cursor)
+            ed.ensureCursorVisible()
 
     def _on_changed(self, idx):
         e = self.tabs.widget(idx)
@@ -3143,10 +3223,15 @@ class ChatPanel(QWidget):
 # =============================================================================
 
 class CompilerOutput(QPlainTextEdit):
+    jump_to_line = pyqtSignal(str, int)  # (filepath, line_number)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
         self.setPlaceholderText("Compiler output will appear here...")
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard)
 
     def append_output(self, text, color=None):
         cur = self.textCursor()
@@ -3157,6 +3242,17 @@ class CompilerOutput(QPlainTextEdit):
         self.setTextCursor(cur); self.ensureCursorVisible()
 
     def clear_output(self): self.clear()
+
+    def mouseDoubleClickEvent(self, event):
+        """Double-click a compiler error line to jump to file:line."""
+        cursor = self.cursorForPosition(event.pos())
+        cursor.select(cursor.SelectionType.LineUnderCursor)
+        line_text = cursor.selectedText().strip()
+        m = _GCC_DIAG_RE.match(line_text)
+        if m:
+            self.jump_to_line.emit(m.group(1), int(m.group(2)))
+        else:
+            super().mouseDoubleClickEvent(event)
 
 
 # =============================================================================
@@ -4695,6 +4791,7 @@ class MainWindow(QMainWindow):
         self.bottom_tabs.setObjectName("bottomTabs")
         self.bottom_tabs.tabBar().setExpanding(False)
         self.compiler_output = CompilerOutput()
+        self.compiler_output.jump_to_line.connect(self._jump_to_error)
         self.bottom_tabs.addTab(self.compiler_output, "Output")
         self.serial_monitor = SerialMonitor()
         self.bottom_tabs.addTab(self.serial_monitor, "Serial Monitor")
@@ -5119,6 +5216,7 @@ class MainWindow(QMainWindow):
     def _run_cli(self, args):
         self._compiler_errors = ""
         self._compiler_diagnostics = []
+        self.editor.clear_diagnostics()
         def go():
             try:
                 r = subprocess.run(["arduino-cli"]+args, capture_output=True, text=True, timeout=120)
@@ -5138,6 +5236,7 @@ class MainWindow(QMainWindow):
                     QTimer.singleShot(0, lambda: self.chat_panel.set_error_context(
                         self._compiler_errors, self._compiler_diagnostics))
                     QTimer.singleShot(0, self._show_fix_errors_btn)
+                    QTimer.singleShot(0, self._apply_compile_diagnostics)
             except FileNotFoundError:
                 QTimer.singleShot(0, lambda: self.compiler_output.append_output("arduino-cli not found.", C["fg_err"]))
             except subprocess.TimeoutExpired:
@@ -5238,6 +5337,19 @@ class MainWindow(QMainWindow):
         n = len(self._compiler_diagnostics)
         hint = f"\nType /fix in AI Chat to auto-fix ({n} diagnostic{'s' if n != 1 else ''})"
         self.compiler_output.append_output(hint, C["teal"])
+
+    def _apply_compile_diagnostics(self):
+        """Apply gutter markers to editors based on compiler diagnostics."""
+        if self._compiler_diagnostics:
+            self.editor.apply_diagnostics(
+                self._compiler_diagnostics, self.project_path or "")
+
+    def _jump_to_error(self, filepath, line):
+        """Jump to a file:line from compiler output double-click."""
+        if not os.path.isabs(filepath) and self.project_path:
+            filepath = os.path.join(self.project_path, filepath)
+        self._switch_view(0)
+        self.editor.goto_line(filepath, line)
 
     def closeEvent(self, event):
         # Save application state before closing
