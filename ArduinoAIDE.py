@@ -1834,8 +1834,8 @@ class ChatPanel(QWidget):
         chat_container.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._chat_layout = QVBoxLayout(chat_container)
-        self._chat_layout.setContentsMargins(8, 16, 8, 16)
-        self._chat_layout.setSpacing(20)
+        self._chat_layout.setContentsMargins(12, 16, 12, 16)
+        self._chat_layout.setSpacing(24)
         self._chat_layout.addStretch()
         outer_layout.addWidget(chat_container)
         outer_layout.addStretch()
@@ -3217,6 +3217,10 @@ class ChatPanel(QWidget):
         if content is None:
             edit.blocked = True
             edit.warnings.append(f"file not found: {edit.filename}")
+            return
+        if not edit.old_text:
+            edit.blocked = True
+            edit.warnings.append("empty anchor text \u2014 cannot apply search/replace")
             return
         # 1. Try exact match
         count = content.count(edit.old_text)
