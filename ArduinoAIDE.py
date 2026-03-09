@@ -1877,6 +1877,27 @@ class ChatPanel(QWidget):
         self.recompile_bar.hide()
         layout.addWidget(self.recompile_bar)
 
+        # Fix continuation bar — shown when compile-after-AI-edits still fails
+        self.fix_continuation_bar = QWidget()
+        self.fix_continuation_bar.setStyleSheet(
+            f"background:{C['bg_dark']};border-top:2px solid {C['fg_warn']};")
+        fc_layout = QHBoxLayout(self.fix_continuation_bar)
+        fc_layout.setContentsMargins(16, 8, 16, 8)
+        self._fix_continuation_label = QLabel("Errors remain after applying changes.")
+        self._fix_continuation_label.setStyleSheet(f"color:{C['fg_warn']};{FONT_BODY}")
+        fc_layout.addWidget(self._fix_continuation_label)
+        fc_layout.addStretch()
+        fix_continue_btn = QPushButton("Fix Remaining Errors")
+        fix_continue_btn.setStyleSheet(BTN_PRIMARY)
+        fix_continue_btn.clicked.connect(self._on_fix_continuation_clicked)
+        fc_layout.addWidget(fix_continue_btn)
+        fc_dismiss = QPushButton("Dismiss")
+        fc_dismiss.setStyleSheet(BTN_SECONDARY)
+        fc_dismiss.clicked.connect(self.fix_continuation_bar.hide)
+        fc_layout.addWidget(fc_dismiss)
+        self.fix_continuation_bar.hide()
+        layout.addWidget(self.fix_continuation_bar)
+
         # Input area
         inp = QWidget()
         inp.setStyleSheet(f"background:{C['bg']};border-top:1px solid {C['border']};")
@@ -1968,6 +1989,13 @@ class ChatPanel(QWidget):
         # Reset working set and edit tracking for new project
         self._working_set.clear()
         self._ai_edited_files.clear()
+        # Discard any pending edits from the previous project
+        self._pending_edits = []
+        self._file_acceptance = {}
+        self._clear_apply_file_rows()
+        self.apply_bar.hide()
+        self.recompile_bar.hide()
+        self.fix_continuation_bar.hide()
         # Update system prompt (picks up .aide_prompt if present)
         if self._conversation and self._conversation[0]["role"] == "system":
             self._conversation[0]["content"] = self._build_system_prompt()
@@ -1975,6 +2003,9 @@ class ChatPanel(QWidget):
     def set_error_context(self, e, diagnostics=None):
         self._error_context = e
         self._error_diagnostics = diagnostics or []
+        # If the apply bar is open, refresh its intent badge with updated diagnostics
+        if self._pending_edits:
+            self._refresh_apply_summary()
 
     def _build_diagnostic_context(self):
         """Build structured diagnostic context for the AI prompt.
@@ -2561,6 +2592,18 @@ class ChatPanel(QWidget):
         for cmd, desc in self.SLASH_COMMANDS.items():
             lines.append(f"  /{cmd}  —  {desc}")
         self._add_info_msg("\n".join(lines), C['fg'])
+
+    def show_fix_continuation(self, n_diags):
+        """Show the fix continuation bar after compile-after-AI-edits failure."""
+        s = "s" if n_diags != 1 else ""
+        self._fix_continuation_label.setText(
+            f"Errors remain after applying changes ({n_diags} diagnostic{s}). Continue fixing?")
+        self.fix_continuation_bar.show()
+
+    def _on_fix_continuation_clicked(self):
+        """User confirmed continuing the fix cycle."""
+        self.fix_continuation_bar.hide()
+        self._cmd_fix()
 
     def _cmd_fix(self):
         """Send a compile-fix request using structured diagnostics."""
@@ -3421,6 +3464,7 @@ class ChatPanel(QWidget):
         self._current_ai_widget = None
         self._conversation = [{"role": "system", "content": self._build_system_prompt()}]
         self.apply_bar.hide()
+        self.fix_continuation_bar.hide()
         self._pending_edits = []
         self._file_acceptance = {}
         self._ai_edited_files.clear()
@@ -5133,6 +5177,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(700, 450)
         self.project_path = project_path
         self._compiler_errors = ""
+        self._ai_fix_pending_compile = False   # set True when AI edits are applied
+        self._compile_follows_ai_edits = False  # captured at compile start
 
         self._setup_ui()
         self._setup_toolbar()
@@ -5605,6 +5651,7 @@ class MainWindow(QMainWindow):
         if self.project_path:
             self.file_manager.file_browser._refresh()
         self.chat_panel._update_context_bar()
+        self._ai_fix_pending_compile = True
 
     def _on_model_switch(self, model_name):
         """Handle /model command — update toolbar combo and status bar."""
@@ -5633,6 +5680,8 @@ class MainWindow(QMainWindow):
     def _compile(self):
         if not self.project_path:
             QMessageBox.warning(self, "No Project", "Open a project first."); return
+        self._compile_follows_ai_edits = self._ai_fix_pending_compile
+        self._ai_fix_pending_compile = False
         self._save_file(); self.compiler_output.clear_output()
         self._switch_view(0); self.bottom_tabs.setCurrentWidget(self.compiler_output)
         self.compiler_output.append_output("Compiling...", C["fg_link"])
@@ -5769,10 +5818,16 @@ class MainWindow(QMainWindow):
             self._switch_view(1); self.chat_panel.input_field.setFocus()
 
     def _show_fix_errors_btn(self):
-        """Show a hint in compiler output and auto-switch to chat for /fix."""
+        """Show fix hint in compiler output; show continuation bar if this follows AI edits."""
         n = len(self._compiler_diagnostics)
-        hint = f"\nType /fix in AI Chat to auto-fix ({n} diagnostic{'s' if n != 1 else ''})"
-        self.compiler_output.append_output(hint, C["teal"])
+        if self._compile_follows_ai_edits:
+            self._compile_follows_ai_edits = False
+            hint = f"\nErrors remain after applying AI changes ({n} diagnostic{'s' if n != 1 else ''})."
+            self.compiler_output.append_output(hint, C["fg_warn"])
+            self.chat_panel.show_fix_continuation(n)
+        else:
+            hint = f"\nType /fix in AI Chat to auto-fix ({n} diagnostic{'s' if n != 1 else ''})"
+            self.compiler_output.append_output(hint, C["teal"])
 
     def _apply_compile_diagnostics(self):
         """Apply gutter markers to editors based on compiler diagnostics."""
