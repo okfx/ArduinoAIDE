@@ -46,7 +46,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread,
-    QTimer, QSize, QPointF
+    QTimer, QSize, QPoint, QPointF
 )
 from PyQt6.QtGui import (
     QFont, QColor, QAction, QKeySequence, QTextCursor,
@@ -56,7 +56,7 @@ from PyQt6.QtGui import (
 )
 
 try:
-    from PyQt6.Qsci import QsciScintilla, QsciLexerCPP
+    from PyQt6.Qsci import QsciScintilla, QsciScintillaBase, QsciLexerCPP
     HAS_QSCINTILLA = True
 except ImportError:
     HAS_QSCINTILLA = False
@@ -229,10 +229,15 @@ class WorkingSet:
 @dataclass
 class ProposedEdit:
     """A single edit parsed from AI output."""
-    edit_type: str       # "edit" or "file"
+    edit_type: str       # "edit" or "file" (from parser)
     filename: str
     old_text: str        # None for "file" type
     new_text: str
+    operation: str = ""           # "create_file", "replace_file", "search_replace"
+    warnings: list = field(default_factory=list)  # validation warnings
+    blocked: bool = False         # if True, skip during apply
+    resolved_path: str = ""       # cached absolute path after resolution
+    matched_text: str = ""        # actual text matched in file (for normalized matches)
 
 @dataclass
 class StructuredDiagnostic:
@@ -261,6 +266,46 @@ _GCC_DIAG_RE = re.compile(
     r'^(.+?):(\d+):(?:(\d+):)?\s*(error|warning|note):\s*(.+)$')
 _LINKER_RE = re.compile(
     r"(undefined reference to|multiple definition of)\s+[`'](.+?)[`']")
+
+def _normalize_ws(text):
+    """Normalize whitespace for fuzzy anchor matching.
+    - Strips leading/trailing whitespace from each line
+    - Collapses runs of spaces/tabs within each line to a single space
+    - Preserves line boundaries (newlines)
+    Returns the normalized string."""
+    lines = text.splitlines()
+    out = []
+    for line in lines:
+        # Strip leading/trailing, collapse internal whitespace runs
+        out.append(re.sub(r'[ \t]+', ' ', line.strip()))
+    return '\n'.join(out)
+
+
+def _find_normalized_matches(content, anchor):
+    """Find regions in content that match anchor under whitespace normalization.
+    Returns list of (start, end) index pairs into the original content."""
+    norm_anchor = _normalize_ws(anchor)
+    if not norm_anchor:
+        return []
+    # Build a normalized version of content with index mapping
+    # For each line in content, record its start/end in original and its normalized form
+    content_lines = content.splitlines(True)  # keep line endings
+    matches = []
+    anchor_lines = norm_anchor.split('\n')
+    n_anchor = len(anchor_lines)
+    # Normalize each content line (strip + collapse whitespace)
+    norm_content_lines = [re.sub(r'[ \t]+', ' ', ln.rstrip('\n\r').strip())
+                          for ln in content_lines]
+    # Sliding window search
+    for i in range(len(norm_content_lines) - n_anchor + 1):
+        window = norm_content_lines[i:i + n_anchor]
+        if window == anchor_lines:
+            # Found a match — compute original byte range
+            start = sum(len(ln) for ln in content_lines[:i])
+            end = sum(len(ln) for ln in content_lines[:i + n_anchor])
+            matches.append((start, end))
+    return matches
+
 
 def _parse_compiler_diagnostics(stderr_text):
     """Parse gcc/arduino-cli stderr into StructuredDiagnostic objects.
@@ -1021,6 +1066,10 @@ if HAS_QSCINTILLA:
             self.setFoldMarginColors(QColor(C["bg"]), QColor(C["bg"]))
             self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             self.customContextMenuRequested.connect(self._show_context_menu)
+            # Diagnostic hover tooltips via Scintilla dwell
+            self._line_diagnostics = {}  # {0-indexed line: [StructuredDiagnostic, ...]}
+            self.SendScintilla(QsciScintillaBase.SCI_SETMOUSEDWELLTIME, 400)
+            self.SCN_DWELLSTART.connect(self._on_dwell)
             # Lexer
             lexer = QsciLexerCPP(self)
             lexer.setFont(font)
@@ -1086,22 +1135,38 @@ if HAS_QSCINTILLA:
                     break
 
         def clear_diagnostics(self):
-            """Remove all error/warning markers from the gutter."""
+            """Remove all error/warning markers and tooltip data."""
             self.markerDeleteAll(_MARKER_ERROR)
             self.markerDeleteAll(_MARKER_WARNING)
+            self._line_diagnostics.clear()
 
         def set_diagnostics(self, diags):
-            """Set gutter markers from a list of StructuredDiagnostic objects.
+            """Set gutter markers and tooltip data from StructuredDiagnostic list.
             Lines are 1-indexed in diagnostics, 0-indexed in QScintilla."""
             self.clear_diagnostics()
-            seen = set()
             for d in diags:
                 line_0 = d.line - 1
-                if line_0 < 0 or line_0 in seen:
+                if line_0 < 0:
                     continue
-                seen.add(line_0)
+                self._line_diagnostics.setdefault(line_0, []).append(d)
                 marker = _MARKER_ERROR if d.severity == "error" else _MARKER_WARNING
                 self.markerAdd(line_0, marker)
+
+        def _on_dwell(self, pos, x, y):
+            """Show tooltip with diagnostic messages when hovering over a marked line."""
+            if pos < 0 or not self._line_diagnostics:
+                return
+            line = self.SendScintilla(QsciScintillaBase.SCI_LINEFROMPOSITION, pos)
+            diags = self._line_diagnostics.get(line)
+            if not diags:
+                return
+            parts = []
+            for d in diags:
+                sev = d.severity.upper()
+                parts.append(f"[{sev}] {d.message}")
+            tip = "\n".join(parts)
+            from PyQt6.QtWidgets import QToolTip
+            QToolTip.showText(self.mapToGlobal(QPoint(x, y)), tip, self)
 
         def load_file(self, fp):
             try:
@@ -1657,6 +1722,7 @@ class ChatPanel(QWidget):
     generation_started = pyqtSignal()
     generation_finished = pyqtSignal()
     edits_applied = pyqtSignal()             # emitted after edits are successfully applied
+    recompile_requested = pyqtSignal()       # emitted when user clicks Recompile after apply
     model_switch_requested = pyqtSignal(str)  # model name — request toolbar combo update
 
     def __init__(self, parent=None):
@@ -1667,7 +1733,8 @@ class ChatPanel(QWidget):
         self._error_context = ""
         self._error_diagnostics = []     # list[StructuredDiagnostic]
         self._editor_ref = None          # will be set by MainWindow
-        self._pending_edits = []         # list of parsed edit operations
+        self._pending_edits = []         # list[ProposedEdit]
+        self._file_acceptance = {}       # {filename: True (accepted) | False (rejected)}
         self._working_set = WorkingSet()          # shadow context tracker (Step 2)
         self._ai_edited_files = set()             # rel_paths of files the AI has edited
         self._use_working_set_context = True      # WorkingSet is default; /debug-use-ws off for old path
@@ -1753,22 +1820,62 @@ class ChatPanel(QWidget):
         # Apply bar — shows after AI suggests edits
         self.apply_bar = QWidget()
         self.apply_bar.setStyleSheet(f"background:{C['bg']};border-top:1px solid {C['border']};")
-        ab_layout = QHBoxLayout(self.apply_bar)
-        ab_layout.setContentsMargins(16, 8, 16, 8)
+        ab_outer = QVBoxLayout(self.apply_bar)
+        ab_outer.setContentsMargins(16, 8, 16, 8)
+        ab_outer.setSpacing(4)
+        # Header row: summary + intent badge
+        ab_header = QHBoxLayout()
         self.apply_label = QLabel("")
         self.apply_label.setStyleSheet(f"color:{C['fg']};{FONT_BODY}")
-        ab_layout.addWidget(self.apply_label)
-        ab_layout.addStretch()
+        ab_header.addWidget(self.apply_label)
+        self._intent_badge = QLabel("BUILD FIX")
+        self._intent_badge.setStyleSheet(
+            f"background:{C['teal']};color:white;border-radius:3px;"
+            f"padding:1px 6px;{FONT_SMALL}")
+        self._intent_badge.hide()
+        ab_header.addWidget(self._intent_badge)
+        ab_header.addStretch()
+        ab_outer.addLayout(ab_header)
+        # File detail rows (populated dynamically)
+        self._apply_file_rows = QWidget()
+        self._apply_file_rows_layout = QVBoxLayout(self._apply_file_rows)
+        self._apply_file_rows_layout.setContentsMargins(24, 0, 0, 0)
+        self._apply_file_rows_layout.setSpacing(2)
+        ab_outer.addWidget(self._apply_file_rows)
+        # Button row
+        ab_btns = QHBoxLayout()
+        ab_btns.addStretch()
         self.apply_all_btn = QPushButton("Apply All Changes")
         self.apply_all_btn.setStyleSheet(BTN_PRIMARY)
         self.apply_all_btn.clicked.connect(self._apply_all_edits)
-        ab_layout.addWidget(self.apply_all_btn)
+        ab_btns.addWidget(self.apply_all_btn)
         self.dismiss_btn = QPushButton("Dismiss")
         self.dismiss_btn.setStyleSheet(BTN_SECONDARY)
         self.dismiss_btn.clicked.connect(self._dismiss_edits)
-        ab_layout.addWidget(self.dismiss_btn)
+        ab_btns.addWidget(self.dismiss_btn)
+        ab_outer.addLayout(ab_btns)
         self.apply_bar.hide()
         layout.addWidget(self.apply_bar)
+
+        # Recompile bar — shown after applying edits when diagnostics exist
+        self.recompile_bar = QWidget()
+        self.recompile_bar.setStyleSheet(f"background:{C['bg']};border-top:1px solid {C['border']};")
+        rc_layout = QHBoxLayout(self.recompile_bar)
+        rc_layout.setContentsMargins(16, 8, 16, 8)
+        self._recompile_label = QLabel("Edits applied. Recompile to check?")
+        self._recompile_label.setStyleSheet(f"color:{C['fg']};{FONT_BODY}")
+        rc_layout.addWidget(self._recompile_label)
+        rc_layout.addStretch()
+        recompile_btn = QPushButton("Recompile")
+        recompile_btn.setStyleSheet(BTN_PRIMARY)
+        recompile_btn.clicked.connect(self._on_recompile_clicked)
+        rc_layout.addWidget(recompile_btn)
+        rc_dismiss = QPushButton("Dismiss")
+        rc_dismiss.setStyleSheet(BTN_SECONDARY)
+        rc_dismiss.clicked.connect(lambda: self.recompile_bar.hide())
+        rc_layout.addWidget(rc_dismiss)
+        self.recompile_bar.hide()
+        layout.addWidget(self.recompile_bar)
 
         # Input area
         inp = QWidget()
@@ -2876,53 +2983,48 @@ class ChatPanel(QWidget):
     def _parse_edits(self, response, result=None):
         """Parse <<<EDIT and <<<FILE blocks from the AI response.
         Populates result.proposed_edits if an AIWorkResult is provided."""
-        edits = []
+        edits = []  # list[ProposedEdit]
 
         # Parse <<<EDIT filename\n<<<OLD\n...\n>>>NEW\n...\n>>>END
         edit_pat = re.compile(
             r'<<<EDIT\s+(\S+)\s*\n<<<OLD\n(.*?)\n>>>NEW\n(.*?)\n>>>END',
             re.DOTALL)
         for m in edit_pat.finditer(response):
-            edits.append(("edit", m.group(1), m.group(2), m.group(3)))
+            edits.append(ProposedEdit("edit", m.group(1), m.group(2), m.group(3)))
 
         # Parse <<<FILE filename\n...\n>>>FILE
         file_pat = re.compile(
             r'<<<FILE\s+(\S+)\s*\n(.*?)\n>>>FILE',
             re.DOTALL)
         for m in file_pat.finditer(response):
-            edits.append(("file", m.group(1), None, m.group(2)))
+            edits.append(ProposedEdit("file", m.group(1), None, m.group(2)))
 
-        # Populate typed result object
         if result is not None:
-            for edit_type, filename, old, new in edits:
-                result.proposed_edits.append(
-                    ProposedEdit(edit_type, filename, old, new))
+            result.proposed_edits.extend(edits)
 
         if edits:
             self._pending_edits = edits
+            self._classify_edits()
+            self._validate_edits()
             n = len(edits)
-            files_touched = set(e[1] for e in edits)
-            self.apply_label.setText(
-                f"{n} change{'s' if n > 1 else ''} in {', '.join(files_touched)}")
-            self.apply_bar.show()
+            self._populate_apply_bar(edits)
             self._add_info_msg(
                 f'Found {n} code edit{"s" if n > 1 else ""} — '
                 f'use the Apply bar below to apply.', C['fg_ok'])
         # Fallback: parse unified diff format (diff --git a/file b/file)
         # Some small models output this despite being told not to.
         if not edits:
-            edits = self._parse_unified_diffs(response)
-            if edits:
+            diff_tuples = self._parse_unified_diffs(response)
+            if diff_tuples:
+                edits = [ProposedEdit(et, fn, old, new)
+                         for et, fn, old, new in diff_tuples]
                 if result is not None:
-                    for edit_type, filename, old, new in edits:
-                        result.proposed_edits.append(
-                            ProposedEdit(edit_type, filename, old, new))
+                    result.proposed_edits.extend(edits)
                 self._pending_edits = edits
+                self._classify_edits()
+                self._validate_edits()
                 n = len(edits)
-                files_touched = set(e[1] for e in edits)
-                self.apply_label.setText(
-                    f"{n} change{'s' if n > 1 else ''} in {', '.join(files_touched)}")
-                self.apply_bar.show()
+                self._populate_apply_bar(edits)
                 self._add_info_msg(
                     f'Found {n} code edit{"s" if n > 1 else ""} (from diff) — '
                     f'use the Apply bar below to apply.', C['fg_ok'])
@@ -2959,6 +3061,111 @@ class ChatPanel(QWidget):
                               "\n".join(old_lines), "\n".join(new_lines)))
         return edits
 
+    # -- Edit classification and validation ----------------------------------
+
+    def _classify_edits(self):
+        """Assign semantic operation to each pending edit and resolve file paths."""
+        for edit in self._pending_edits:
+            edit.resolved_path = self._resolve_file_path(edit.filename)
+            if edit.edit_type == "edit":
+                edit.operation = "search_replace"
+            elif edit.edit_type == "file":
+                if os.path.isfile(edit.resolved_path):
+                    edit.operation = "replace_file"
+                else:
+                    edit.operation = "create_file"
+
+    def _validate_edits(self):
+        """Run pre-display validation on classified edits.
+        Sets warnings and blocked flags on each ProposedEdit."""
+        for edit in self._pending_edits:
+            edit.warnings = []
+            edit.blocked = False
+            if edit.operation == "search_replace":
+                self._validate_search_replace(edit)
+            elif edit.operation == "replace_file":
+                self._validate_replace_file(edit)
+            elif edit.operation == "create_file":
+                self._validate_create_file(edit)
+            self._validate_filename_ambiguity(edit)
+
+    def _validate_search_replace(self, edit):
+        """Validate a search_replace edit against current file content.
+        Tries exact match first, then normalized whitespace match."""
+        content = self._get_file_content_for_validation(edit)
+        if content is None:
+            edit.blocked = True
+            edit.warnings.append(f"file not found: {edit.filename}")
+            return
+        # 1. Try exact match
+        count = content.count(edit.old_text)
+        if count == 1:
+            return  # exact unique match — ideal
+        if count > 1:
+            edit.warnings.append(
+                f"anchor matches {count} locations, will replace first only")
+            return
+        # 2. Exact match failed (count == 0) — try normalized whitespace
+        norm_matches = _find_normalized_matches(content, edit.old_text)
+        if len(norm_matches) == 1:
+            start, end = norm_matches[0]
+            edit.matched_text = content[start:end]
+            edit.warnings.append("anchor matched using normalized whitespace")
+        elif len(norm_matches) > 1:
+            edit.warnings.append(
+                f"normalized anchor matches {len(norm_matches)} locations, "
+                f"will replace first only")
+            start, end = norm_matches[0]
+            edit.matched_text = content[start:end]
+        else:
+            edit.blocked = True
+            edit.warnings.append("anchor text not found in file")
+
+    def _validate_replace_file(self, edit):
+        """Validate a replace_file edit — warn on suspicious shrinkage."""
+        try:
+            existing_size = os.path.getsize(edit.resolved_path)
+        except OSError:
+            return
+        new_size = len(edit.new_text.encode('utf-8'))
+        if existing_size > 0 and new_size < existing_size * 0.5:
+            pct = int((1 - new_size / existing_size) * 100)
+            edit.warnings.append(
+                f"replaces file content, shrinks by {pct}%")
+
+    def _validate_create_file(self, edit):
+        """Validate a create_file edit — reclassify if file exists."""
+        if os.path.isfile(edit.resolved_path):
+            edit.operation = "replace_file"
+            edit.warnings.append("file already exists, will overwrite")
+
+    def _validate_filename_ambiguity(self, edit):
+        """Warn if the edit's filename matches multiple open files."""
+        if not self._editor_ref:
+            return
+        basename = os.path.basename(edit.filename)
+        matches = [fp for fp in self._editor_ref._editors
+                    if os.path.basename(fp) == basename]
+        if len(matches) > 1:
+            edit.warnings.append(
+                f"filename is ambiguous, matches {len(matches)} open files")
+
+    def _get_file_content_for_validation(self, edit):
+        """Get file content for validation: open editors first, then disk.
+        Returns content string or None if file not found."""
+        if self._editor_ref:
+            fp = self._editor_ref.find_file_by_name(edit.filename)
+            if fp:
+                files = self._editor_ref.get_all_files()
+                return files.get(fp, "")
+        if os.path.isfile(edit.resolved_path):
+            try:
+                with open(edit.resolved_path, 'r', encoding='utf-8') as f:
+                    return f.read()
+            except (OSError, UnicodeDecodeError):
+                return None
+        return None
+
     def _track_ai_edited_file(self, filename):
         """Record that the AI edited this file (for working set priority)."""
         proj = getattr(self, '_project_path', None) or ""
@@ -2972,83 +3179,238 @@ class ChatPanel(QWidget):
             pass  # abs_path not under proj
 
     def _apply_all_edits(self):
-        """Apply all parsed edits to the editor. Supports creating new files."""
+        """Apply all parsed edits to the editor. Skips blocked and rejected edits."""
         if not self._editor_ref or not self._pending_edits:
             return
         applied = 0
+        skipped = 0
+        rejected = 0
         errors = []
 
-        for edit_type, filename, old, new in self._pending_edits:
-            # Try to find file in open tabs
-            fp = self._editor_ref.find_file_by_name(filename)
+        for edit in self._pending_edits:
+            if self._file_acceptance.get(edit.filename) is False:
+                rejected += 1
+                continue
+            if edit.blocked:
+                skipped += 1
+                continue
 
-            if not fp and edit_type == "file":
-                # NEW FILE CREATION: file not open and it's a <<<FILE block
-                abs_path = self._resolve_file_path(filename)
+            abs_path = edit.resolved_path or self._resolve_file_path(edit.filename)
+            fp = self._editor_ref.find_file_by_name(edit.filename)
+
+            if not fp and edit.operation == "create_file":
                 parent_dir = os.path.dirname(abs_path)
                 try:
                     os.makedirs(parent_dir, exist_ok=True)
                     with open(abs_path, 'w', encoding='utf-8') as f:
-                        f.write(new)
-                    # Open the new file in the editor
+                        f.write(edit.new_text)
                     self._editor_ref.open_file(abs_path)
                     applied += 1
-                    self._track_ai_edited_file(filename)
+                    self._track_ai_edited_file(edit.filename)
                     continue
                 except OSError as e:
-                    errors.append(f"Could not create {filename}: {e}")
+                    errors.append(f"Could not create {edit.filename}: {e}")
                     continue
 
-            if not fp and edit_type == "edit":
-                # For EDIT blocks, try to find file on disk even if not open
-                abs_path = self._resolve_file_path(filename)
+            if not fp and edit.operation in ("search_replace", "replace_file"):
                 if os.path.isfile(abs_path):
                     self._editor_ref.open_file(abs_path)
                     fp = abs_path
                 else:
-                    errors.append(f"File not found: {filename}")
+                    errors.append(f"File not found: {edit.filename}")
                     continue
 
             if not fp:
-                errors.append(f"File not found: {filename}")
+                errors.append(f"File not found: {edit.filename}")
                 continue
 
-            if edit_type == "file":
-                # Full file replacement
-                if self._editor_ref.set_file_content(fp, new):
+            if edit.operation == "replace_file":
+                if self._editor_ref.set_file_content(fp, edit.new_text):
                     applied += 1
-                    self._track_ai_edited_file(filename)
+                    self._track_ai_edited_file(edit.filename)
                 else:
-                    errors.append(f"Could not write: {filename}")
-            elif edit_type == "edit":
-                # Search & replace
+                    errors.append(f"Could not write: {edit.filename}")
+            elif edit.operation == "search_replace":
                 files = self._editor_ref.get_all_files()
                 content = files.get(fp, "")
-                if old in content:
-                    new_content = content.replace(old, new, 1)
+                # Use matched_text from normalized matching if available
+                anchor = edit.matched_text or edit.old_text
+                if anchor in content:
+                    new_content = content.replace(anchor, edit.new_text, 1)
                     if self._editor_ref.set_file_content(fp, new_content):
                         applied += 1
-                        self._track_ai_edited_file(filename)
+                        self._track_ai_edited_file(edit.filename)
                     else:
-                        errors.append(f"Could not write: {filename}")
+                        errors.append(f"Could not write: {edit.filename}")
                 else:
-                    errors.append(f"Could not find matching code in {filename}")
+                    errors.append(f"Could not find matching code in {edit.filename}")
+            elif edit.operation == "create_file":
+                # create_file but file is already open — replace content
+                if self._editor_ref.set_file_content(fp, edit.new_text):
+                    applied += 1
+                    self._track_ai_edited_file(edit.filename)
+                else:
+                    errors.append(f"Could not write: {edit.filename}")
 
-        status = f"Applied {applied} change{'s' if applied != 1 else ''}."
+        parts = [f"Applied {applied} change{'s' if applied != 1 else ''}."]
+        if rejected:
+            parts.append(f"Rejected {rejected} file{'s' if rejected != 1 else ''}.")
+        if skipped:
+            parts.append(f"Skipped {skipped} blocked.")
         if errors:
-            status += " Errors: " + "; ".join(errors)
-        self._add_info_msg(status,
+            parts.append("Errors: " + "; ".join(errors))
+        self._add_info_msg(" ".join(parts),
                            C['fg_ok'] if not errors else C['fg_warn'])
         self.apply_bar.hide()
         self._pending_edits = []
+        self._file_acceptance = {}
+        self._clear_apply_file_rows()
 
         # Notify MainWindow to refresh file browser after creates/edits
         if applied > 0:
             self.edits_applied.emit()
+            # Show recompile bar if there are active diagnostics
+            if self._error_diagnostics:
+                self.recompile_bar.show()
+
+    def _on_recompile_clicked(self):
+        """Handle Recompile button click."""
+        self.recompile_bar.hide()
+        self.recompile_requested.emit()
+
+    def _clear_apply_file_rows(self):
+        """Remove dynamic per-file labels from the apply bar."""
+        while self._apply_file_rows_layout.count():
+            item = self._apply_file_rows_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _populate_apply_bar(self, edits):
+        """Group edits by file, reset acceptance state, and populate the apply bar."""
+        self._file_acceptance = {}  # reset on each new set of edits
+        self._refresh_apply_summary()
+        self._refresh_file_rows()
+        self.apply_bar.show()
+
+    def _refresh_apply_summary(self):
+        """Update the header summary label."""
+        edits = self._pending_edits
+        n_total = len(edits)
+        n_blocked = sum(1 for e in edits if e.blocked)
+        n_rejected = sum(1 for fn in self._file_acceptance
+                         if self._file_acceptance[fn] is False)
+        from collections import OrderedDict
+        nf = len(OrderedDict((e.filename, None) for e in edits))
+        summary = f"{n_total} edit{'s' if n_total != 1 else ''} in {nf} file{'s' if nf != 1 else ''}"
+        extras = []
+        if n_blocked:
+            extras.append(f"{n_blocked} blocked")
+        if n_rejected:
+            extras.append(f"{n_rejected} file{'s' if n_rejected != 1 else ''} rejected")
+        if extras:
+            summary += f" ({', '.join(extras)})"
+        self.apply_label.setText(summary)
+        if self._error_diagnostics:
+            self._intent_badge.show()
+        else:
+            self._intent_badge.hide()
+
+    def _refresh_file_rows(self):
+        """Rebuild per-file rows with current acceptance state."""
+        self._clear_apply_file_rows()
+        from collections import OrderedDict
+        by_file = OrderedDict()
+        for edit in self._pending_edits:
+            by_file.setdefault(edit.filename, []).append(edit)
+
+        _BTN_SMALL = (f"background:{C['bg_input']};color:{C['fg']};"
+                      f"border:1px solid {C['border_light']};border-radius:3px;"
+                      f"padding:1px 8px;{FONT_SMALL}")
+        _BTN_ACCEPT_ON = (f"background:{C['teal']};color:white;border:none;"
+                          f"border-radius:3px;padding:1px 8px;{FONT_SMALL}")
+        _BTN_REJECT_ON = (f"background:{C['fg_err']};color:white;border:none;"
+                          f"border-radius:3px;padding:1px 8px;{FONT_SMALL}")
+
+        for filename, file_edits in by_file.items():
+            state = self._file_acceptance.get(filename)  # True/False/None
+            all_blocked = all(e.blocked for e in file_edits)
+            count = len(file_edits)
+            has_new = any(e.operation == "create_file" for e in file_edits)
+            has_replace = any(e.operation == "replace_file" for e in file_edits)
+
+            # File row: label + Accept + Reject buttons
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(4)
+
+            label_text = f"{filename} \u2014 {count} edit{'s' if count != 1 else ''}"
+            if has_new:
+                label_text += " (new file)"
+            elif has_replace:
+                label_text += " (replace)"
+            if state is True:
+                label_text = "\u2713 " + label_text
+                label_color = C['fg_ok']
+            elif state is False:
+                label_text = "\u2717 " + label_text
+                label_color = C['fg_dim']
+            else:
+                label_color = C['fg_dim']
+
+            lbl = QLabel(label_text)
+            lbl.setStyleSheet(f"color:{label_color};{FONT_SMALL}")
+            row_layout.addWidget(lbl)
+            row_layout.addStretch()
+
+            # Accept button
+            accept_btn = QPushButton("\u2713" if state is True else "Accept")
+            accept_btn.setStyleSheet(_BTN_ACCEPT_ON if state is True else _BTN_SMALL)
+            accept_btn.setEnabled(not all_blocked)
+            accept_btn.clicked.connect(
+                lambda checked, fn=filename: self._on_file_accept(fn))
+            row_layout.addWidget(accept_btn)
+
+            # Reject button
+            reject_btn = QPushButton("\u2717 Rejected" if state is False else "Reject")
+            reject_btn.setStyleSheet(_BTN_REJECT_ON if state is False else _BTN_SMALL)
+            reject_btn.clicked.connect(
+                lambda checked, fn=filename: self._on_file_reject(fn))
+            row_layout.addWidget(reject_btn)
+
+            self._apply_file_rows_layout.addWidget(row_widget)
+
+            # Per-edit warnings (dimmed if file is rejected)
+            if state is not False:
+                for edit in file_edits:
+                    for warning in edit.warnings:
+                        prefix = "\u26d4" if edit.blocked else "\u26a0"
+                        color = C['fg_err'] if edit.blocked else C['fg_warn']
+                        warn_label = QLabel(f"  {prefix} {warning}")
+                        warn_label.setStyleSheet(f"color:{color};{FONT_SMALL}")
+                        self._apply_file_rows_layout.addWidget(warn_label)
+
+    def _on_file_accept(self, filename):
+        """Toggle acceptance for a file group."""
+        current = self._file_acceptance.get(filename)
+        # Clicking Accept again → back to undecided
+        self._file_acceptance[filename] = None if current is True else True
+        self._refresh_apply_summary()
+        self._refresh_file_rows()
+
+    def _on_file_reject(self, filename):
+        """Toggle rejection for a file group."""
+        current = self._file_acceptance.get(filename)
+        # Clicking Reject again → back to undecided
+        self._file_acceptance[filename] = None if current is False else False
+        self._refresh_apply_summary()
+        self._refresh_file_rows()
 
     def _dismiss_edits(self):
         self.apply_bar.hide()
         self._pending_edits = []
+        self._file_acceptance = {}
+        self._clear_apply_file_rows()
 
     def clear_chat(self):
         # Remove all message widgets from the chat layout (keep the stretch)
@@ -3060,6 +3422,7 @@ class ChatPanel(QWidget):
         self._conversation = [{"role": "system", "content": self._build_system_prompt()}]
         self.apply_bar.hide()
         self._pending_edits = []
+        self._file_acceptance = {}
         self._ai_edited_files.clear()
         self._working_set.clear()
         self._update_context_bar()
@@ -3610,6 +3973,11 @@ class ModelsTab(QWidget):
         self.unload_btn.setToolTip("Unload model from memory to free resources")
         self.unload_btn.clicked.connect(self._unload_selected)
         model_btns.addWidget(self.unload_btn)
+        rename_btn = QPushButton("Rename…")
+        rename_btn.setStyleSheet(BTN_SECONDARY)
+        rename_btn.setToolTip("Copy model to a new name, then delete the original")
+        rename_btn.clicked.connect(self._rename)
+        model_btns.addWidget(rename_btn)
         db = QPushButton("Delete")
         db.setStyleSheet(BTN_DANGER); db.clicked.connect(self._delete)
         model_btns.addWidget(db)
@@ -3621,9 +3989,17 @@ class ModelsTab(QWidget):
         left.addWidget(self.model_status)
 
         # -- Pull Model section (in left column, below installed models) --
+        pull_hdr = QHBoxLayout()
         pull_label = QLabel("Pull Model")
         pull_label.setStyleSheet(f"color:{C['fg_head']};{FONT_SECTION} padding-top: 8px;")
-        left.addWidget(pull_label)
+        pull_hdr.addWidget(pull_label)
+        pull_hdr.addStretch()
+        reveal_btn = QPushButton("Reveal in Finder")
+        reveal_btn.setStyleSheet(BTN_SECONDARY)
+        reveal_btn.setToolTip("Open the Ollama models folder in Finder")
+        reveal_btn.clicked.connect(self._reveal_models_folder)
+        pull_hdr.addWidget(reveal_btn)
+        left.addLayout(pull_hdr)
 
         self.pull_filter = QLineEdit()
         self.pull_filter.setPlaceholderText("Filter models...")
@@ -3664,6 +4040,16 @@ class ModelsTab(QWidget):
         self.pull_status = QLabel("")
         self.pull_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
         left.addWidget(self.pull_status)
+
+        self.pull_progress = QProgressBar()
+        self.pull_progress.setRange(0, 100)
+        self.pull_progress.setTextVisible(True)
+        self.pull_progress.setStyleSheet(
+            f"QProgressBar{{background:{C['bg_input']};border:1px solid {C['border_light']};"
+            f"border-radius:3px;height:12px;{FONT_SMALL}}}"
+            f"QProgressBar::chunk{{background:{C['teal']};border-radius:2px;}}")
+        self.pull_progress.hide()
+        left.addWidget(self.pull_progress)
 
         lw = QWidget(); lw.setLayout(left); lw.setMinimumWidth(280)
 
@@ -3932,6 +4318,44 @@ class ModelsTab(QWidget):
             except Exception as e:
                 self.status.setText(str(e)); self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
 
+    def _rename(self):
+        """Rename selected model via Ollama copy + delete."""
+        from PyQt6.QtWidgets import QInputDialog
+        idxs = self.model_list.selectedIndexes()
+        if not idxs:
+            return
+        old_name = self._lm.item(idxs[0].row(), 0).text()
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Model", f"New name for '{old_name}':", text=old_name)
+        if not ok or not new_name.strip() or new_name.strip() == old_name:
+            return
+        new_name = new_name.strip()
+        try:
+            r = requests.post(f"{self.BASE}/api/copy",
+                              json={"source": old_name, "destination": new_name},
+                              timeout=30)
+            if r.status_code == 200:
+                requests.delete(f"{self.BASE}/api/delete",
+                                json={"name": old_name}, timeout=30)
+                self.status.setText(f"Renamed to '{new_name}'.")
+                self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+                self.refresh_models()
+                self.model_changed.emit()
+            else:
+                self.status.setText(f"Rename failed: {r.text}")
+                self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+        except Exception as e:
+            self.status.setText(str(e))
+            self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+
+    def _reveal_models_folder(self):
+        """Open the Ollama models folder in Finder."""
+        import subprocess
+        folder = os.path.expanduser("~/.ollama/models")
+        if not os.path.isdir(folder):
+            folder = os.path.expanduser("~/.ollama")
+        subprocess.Popen(["open", folder])
+
     # ---- Load / Unload Model methods ----
 
     def _load_selected(self):
@@ -4058,6 +4482,8 @@ class ModelsTab(QWidget):
     def _pull_model(self, name):
         self.pull_status.setText(f"Pulling '{name}'...")
         self.pull_status.setStyleSheet(f"color:{C['teal']};{FONT_SMALL}")
+        self.pull_progress.setValue(0)
+        self.pull_progress.show()
 
         def go():
             try:
@@ -4076,9 +4502,10 @@ class ModelsTab(QWidget):
                                 pct = int(completed / total * 100)
                                 msg = f"{status} — {pct}%"
                             else:
+                                pct = -1  # indeterminate
                                 msg = status
                             last_status = status
-                            QTimer.singleShot(0, lambda m=msg: self._on_pull_progress(m))
+                            QTimer.singleShot(0, lambda m=msg, p=pct: self._on_pull_progress(m, p))
                         except json.JSONDecodeError:
                             continue
                 ok = "success" in last_status.lower()
@@ -4087,10 +4514,17 @@ class ModelsTab(QWidget):
                 QTimer.singleShot(0, lambda: self._on_pull_done(str(e), False))
         threading.Thread(target=go, daemon=True).start()
 
-    def _on_pull_progress(self, msg):
+    def _on_pull_progress(self, msg, pct=-1):
         self.pull_status.setText(msg)
+        if pct >= 0:
+            self.pull_progress.setRange(0, 100)
+            self.pull_progress.setValue(pct)
+        else:
+            # Indeterminate (e.g. "pulling manifest", "verifying sha256")
+            self.pull_progress.setRange(0, 0)
 
     def _on_pull_done(self, name, success):
+        self.pull_progress.hide()
         if success:
             self.pull_status.setText(f"'{name}' pulled successfully!")
             self.pull_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
@@ -4808,6 +5242,7 @@ class MainWindow(QMainWindow):
         self.chat_panel.generation_started.connect(lambda: self.ai_spinner.start())
         self.chat_panel.generation_finished.connect(lambda: self.ai_spinner.stop())
         self.chat_panel.edits_applied.connect(self._on_edits_applied)
+        self.chat_panel.recompile_requested.connect(self._compile)
         self.chat_panel.model_switch_requested.connect(self._on_model_switch)
         self.view_stack.addWidget(self.chat_panel)
 
@@ -5126,6 +5561,7 @@ class MainWindow(QMainWindow):
         am = mb.addMenu("AI")
         am.addAction(self._make_action("Open AI Chat", lambda: self._switch_view(1), "Ctrl+Shift+A"))
         am.addAction(self._make_action("Send Errors to AI", self._send_errors_to_ai, "Ctrl+Shift+E"))
+        am.addAction(self._make_action("Fix Compile Errors", self.chat_panel._cmd_fix, "Ctrl+Shift+F"))
         am.addAction(self._make_action("Clear Chat", self.chat_panel.clear_chat))
 
         vm = mb.addMenu("View")
