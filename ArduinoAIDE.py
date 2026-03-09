@@ -221,6 +221,31 @@ class WorkingSet:
         return count
 
 
+# =============================================================================
+# AI turn result — typed container for one model response
+# =============================================================================
+
+@dataclass
+class ProposedEdit:
+    """A single edit parsed from AI output."""
+    edit_type: str       # "edit" or "file"
+    filename: str
+    old_text: str        # None for "file" type
+    new_text: str
+
+@dataclass
+class AIWorkResult:
+    """Structured result of one AI turn. Populated by response parsing;
+    consumed by apply/review logic. Future features (compile diagnostics,
+    agent commands, rationale) attach here instead of ad-hoc side channels."""
+    assistant_text: str = ""
+    proposed_edits: list = field(default_factory=list)   # list[ProposedEdit]
+    requested_reads: list = field(default_factory=list)  # list[str] — filenames (future)
+    request_compile: bool = False                        # (future)
+    warnings: list = field(default_factory=list)         # list[str]
+    metadata: dict = field(default_factory=dict)
+
+
 def _make_panel_header(title_text=""):
     """Create a standardized panel header bar. Returns (widget, title_label, layout).
     Callers can add buttons to the layout on the right side."""
@@ -1512,6 +1537,7 @@ class ChatPanel(QWidget):
         self._ai_edited_files = set()             # rel_paths of files the AI has edited
         self._use_working_set_context = True      # WorkingSet is default; /debug-use-ws off for old path
         self._last_prompt_stats = None            # dict: stats from the last actual prompt sent
+        self._last_work_result = None             # AIWorkResult from most recent AI turn
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2351,7 +2377,9 @@ class ChatPanel(QWidget):
         if self._current_response:
             self._conversation.append({"role": "assistant", "content": self._current_response})
             self._render_formatted_response()
-            self._parse_edits(self._current_response)
+            result = AIWorkResult(assistant_text=self._current_response)
+            self._parse_edits(self._current_response, result)
+            self._last_work_result = result
         self._current_ai_widget = None
         self.input_field.setEnabled(True)
         self.send_btn.setEnabled(True)
@@ -2398,8 +2426,9 @@ class ChatPanel(QWidget):
         self.worker.error_occurred.connect(self._on_error)
         self.thread.started.connect(self.worker.run)
 
-    def _parse_edits(self, response):
-        """Parse <<<EDIT and <<<FILE blocks from the AI response."""
+    def _parse_edits(self, response, result=None):
+        """Parse <<<EDIT and <<<FILE blocks from the AI response.
+        Populates result.proposed_edits if an AIWorkResult is provided."""
         edits = []
 
         # Parse <<<EDIT filename\n<<<OLD\n...\n>>>NEW\n...\n>>>END
@@ -2415,6 +2444,12 @@ class ChatPanel(QWidget):
             re.DOTALL)
         for m in file_pat.finditer(response):
             edits.append(("file", m.group(1), None, m.group(2)))
+
+        # Populate typed result object
+        if result is not None:
+            for edit_type, filename, old, new in edits:
+                result.proposed_edits.append(
+                    ProposedEdit(edit_type, filename, old, new))
 
         if edits:
             self._pending_edits = edits
