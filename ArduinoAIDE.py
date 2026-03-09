@@ -2366,7 +2366,12 @@ class ChatPanel(QWidget):
         if self.send_errors_btn.isChecked() and self._error_context:
             msg += f"\n[COMPILER ERRORS:]\n```\n{self._error_context}\n```\n\n"
             self.send_errors_btn.setChecked(False)
-        msg += f"\n[USER REQUEST:]\n{text}"
+        msg += (
+            "\n[REMINDER: You are inside an IDE. You CAN and MUST edit files directly. "
+            "Use <<<EDIT path\\n<<<OLD\\n...\\n>>>NEW\\n...\\n>>>END to modify files. "
+            "NEVER say you cannot edit files. ALWAYS output code edits when asked.]\n"
+            f"\n[USER REQUEST:]\n{text}"
+        )
 
         # Show user message bubble (right-aligned)
         show = display_text or text
