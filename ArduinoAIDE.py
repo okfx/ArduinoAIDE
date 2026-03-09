@@ -1890,17 +1890,26 @@ class ChatPanel(QWidget):
         """)
         self._chat_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # Chat container fills the full scroll area width
-        chat_container = QWidget()
-        chat_container.setStyleSheet(f"background:{C['bg_dark']};")
-        chat_container.setSizePolicy(
+        # Outer container fills scroll area width; inner column centered at 800px
+        outer_container = QWidget()
+        outer_container.setStyleSheet(f"background:{C['bg_dark']};")
+        outer_lay = QHBoxLayout(outer_container)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(0)
+        outer_lay.addStretch()
+        chat_column = QWidget()
+        chat_column.setMaximumWidth(800)
+        chat_column.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self._chat_layout = QVBoxLayout(chat_container)
-        self._chat_layout.setContentsMargins(16, 16, 16, 16)
-        self._chat_layout.setSpacing(24)
+        self._chat_layout = QVBoxLayout(chat_column)
+        self._chat_layout.setContentsMargins(20, 16, 20, 16)
+        self._chat_layout.setSpacing(20)
         self._chat_layout.addStretch()
-        self._chat_scroll.setWidget(chat_container)
+        outer_lay.addWidget(chat_column)
+        outer_lay.addStretch()
+        self._chat_scroll.setWidget(outer_container)
         self._current_ai_widget = None
+        self._current_ai_wrapper = None
         layout.addWidget(self._chat_scroll)
 
         # Apply bar — shows after AI suggests edits
@@ -3169,7 +3178,11 @@ class ChatPanel(QWidget):
             f"color:{C['fg_dim']};{FONT_SMALL}background:transparent;border:none;")
         stats_hl.addWidget(stats_lbl)
         stats_hl.addStretch()
-        self._chat_layout.insertWidget(self._chat_layout.count() - 1, stats_wrapper)
+        # Attach stats to AI message wrapper (not as separate chat item)
+        if self._current_ai_wrapper:
+            self._current_ai_wrapper.layout().addWidget(stats_wrapper)
+        else:
+            self._chat_layout.insertWidget(self._chat_layout.count() - 1, stats_wrapper)
         self._stats_widget = stats_wrapper
         self._stats_label = stats_lbl
         self._stats_spinner = spinner
@@ -3219,13 +3232,13 @@ class ChatPanel(QWidget):
     _CODE_BLOCK_STYLE = (
         f'background:{C["bg_input"]};'
         f'border:1px solid {C["border_light"]};'
-        f'padding:10px;margin:6px 0;'
+        f'padding:10px;margin:12px 0;'
         f'font-family:Menlo,Monaco,Courier New,monospace;font-size:13px;')
     _EDIT_BLOCK_STYLE = (
         f'background:{C["bg_input"]};'
         f'border:1px solid {C["border_light"]};'
         f'border-left:3px solid {C["teal"]};'
-        f'padding:10px;margin:6px 0;'
+        f'padding:10px;margin:12px 0;'
         f'font-family:Menlo,Monaco,Courier New,monospace;font-size:13px;')
     _EDIT_HEADER_STYLE = (
         f'color:{C["teal"]};font-size:12px;font-weight:bold;margin-bottom:4px;')
@@ -3325,6 +3338,7 @@ class ChatPanel(QWidget):
         # Finalize stats — stop spinner, show final stats
         self._finalize_stats()
         self._current_ai_widget = None
+        self._current_ai_wrapper = None
         self.input_field.setEnabled(True)
         self.send_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
@@ -3374,6 +3388,7 @@ class ChatPanel(QWidget):
         self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
         self._scroll_to_bottom()
         self._current_ai_widget = None
+        self._current_ai_wrapper = None
         self.input_field.setEnabled(True)
         self.send_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
@@ -4147,6 +4162,7 @@ class ChatPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._current_ai_widget = None
+        self._current_ai_wrapper = None
         self._conversation = [{"role": "system", "content": self._build_system_prompt()}]
         self.apply_bar.hide()
         self.fix_continuation_bar.hide()
@@ -4211,25 +4227,23 @@ class ChatPanel(QWidget):
         speaker.setAlignment(Qt.AlignmentFlag.AlignRight)
         speaker.setStyleSheet(
             f"color:{C['fg_link']};{FONT_CHAT_BOLD}"
-            f"padding-right:8px;background:transparent;border:none;")
+            f"padding-right:6px;background:transparent;border:none;")
         vl.addWidget(speaker)
         # Bubble row
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 12, 0)
         row.addStretch()
         bubble = QFrame()
-        bubble.setMinimumWidth(200)
-        bubble.setMaximumWidth(600)
+        bubble.setMaximumWidth(500)
         bubble.setStyleSheet(
             f"QFrame {{ background-color:{C['bg_input']}; border-radius:14px; }}")
         bl = QVBoxLayout(bubble)
-        bl.setContentsMargins(16, 12, 16, 12)
+        bl.setContentsMargins(16, 10, 16, 10)
         bl.setSpacing(8)
         # Text label
         text_label = QLabel(text)
         text_label.setWordWrap(True)
         text_label.setTextFormat(Qt.TextFormat.PlainText)
-        text_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         text_label.setStyleSheet(
             f"color:{C['fg_head']};{FONT_CHAT}background:transparent;border:none;")
         text_label.setTextInteractionFlags(
@@ -4253,6 +4267,7 @@ class ChatPanel(QWidget):
     def _add_ai_msg(self):
         """Add a left-aligned AI message area with model name label."""
         wrapper = QWidget()
+        wrapper.setMaximumWidth(700)
         wrapper.setStyleSheet("background: transparent;")
         vl = QVBoxLayout(wrapper)
         vl.setContentsMargins(0, 0, 0, 0)
@@ -4280,6 +4295,7 @@ class ChatPanel(QWidget):
         vl.addWidget(ai_text)
         self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
         self._current_ai_widget = ai_text
+        self._current_ai_wrapper = wrapper
         self._scroll_to_bottom()
 
     def _scroll_to_bottom(self):
