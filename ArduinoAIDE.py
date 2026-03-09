@@ -46,7 +46,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread,
-    QTimer, QSize, QPointF
+    QTimer, QSize, QPoint, QPointF
 )
 from PyQt6.QtGui import (
     QFont, QColor, QAction, QKeySequence, QTextCursor,
@@ -56,7 +56,7 @@ from PyQt6.QtGui import (
 )
 
 try:
-    from PyQt6.Qsci import QsciScintilla, QsciLexerCPP
+    from PyQt6.Qsci import QsciScintilla, QsciScintillaBase, QsciLexerCPP
     HAS_QSCINTILLA = True
 except ImportError:
     HAS_QSCINTILLA = False
@@ -1021,6 +1021,10 @@ if HAS_QSCINTILLA:
             self.setFoldMarginColors(QColor(C["bg"]), QColor(C["bg"]))
             self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             self.customContextMenuRequested.connect(self._show_context_menu)
+            # Diagnostic hover tooltips via Scintilla dwell
+            self._line_diagnostics = {}  # {0-indexed line: [StructuredDiagnostic, ...]}
+            self.SendScintilla(QsciScintillaBase.SCI_SETMOUSEDWELLTIME, 400)
+            self.SCN_DWELLSTART.connect(self._on_dwell)
             # Lexer
             lexer = QsciLexerCPP(self)
             lexer.setFont(font)
@@ -1086,22 +1090,38 @@ if HAS_QSCINTILLA:
                     break
 
         def clear_diagnostics(self):
-            """Remove all error/warning markers from the gutter."""
+            """Remove all error/warning markers and tooltip data."""
             self.markerDeleteAll(_MARKER_ERROR)
             self.markerDeleteAll(_MARKER_WARNING)
+            self._line_diagnostics.clear()
 
         def set_diagnostics(self, diags):
-            """Set gutter markers from a list of StructuredDiagnostic objects.
+            """Set gutter markers and tooltip data from StructuredDiagnostic list.
             Lines are 1-indexed in diagnostics, 0-indexed in QScintilla."""
             self.clear_diagnostics()
-            seen = set()
             for d in diags:
                 line_0 = d.line - 1
-                if line_0 < 0 or line_0 in seen:
+                if line_0 < 0:
                     continue
-                seen.add(line_0)
+                self._line_diagnostics.setdefault(line_0, []).append(d)
                 marker = _MARKER_ERROR if d.severity == "error" else _MARKER_WARNING
                 self.markerAdd(line_0, marker)
+
+        def _on_dwell(self, pos, x, y):
+            """Show tooltip with diagnostic messages when hovering over a marked line."""
+            if pos < 0 or not self._line_diagnostics:
+                return
+            line = self.SendScintilla(QsciScintillaBase.SCI_LINEFROMPOSITION, pos)
+            diags = self._line_diagnostics.get(line)
+            if not diags:
+                return
+            parts = []
+            for d in diags:
+                sev = d.severity.upper()
+                parts.append(f"[{sev}] {d.message}")
+            tip = "\n".join(parts)
+            from PyQt6.QtWidgets import QToolTip
+            QToolTip.showText(self.mapToGlobal(QPoint(x, y)), tip, self)
 
         def load_file(self, fp):
             try:
