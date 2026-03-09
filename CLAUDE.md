@@ -52,9 +52,29 @@ All classes live in `ArduinoAIDE.py`:
 ## QTextEdit HTML Limitations
 QTextEdit's rich text engine supports a subset of CSS 2.1. It does NOT support `border-radius`, `flexbox`, `grid`, or most modern CSS. For styled containers, use QFrame/QWidget with Qt stylesheets instead of HTML/CSS in QTextEdit. This is why the chat was rewritten to use widget-based bubbles.
 
+## Design System (MANDATORY)
+
+**Before making ANY visual/layout changes, read these files in order:**
+
+1. **`docs/DESIGN_SYSTEM.md`** — Strict design tokens (colors, fonts, spacing, radius, button styles). Every stylesheet value MUST come from these tokens.
+2. **`docs/UI_SPEC.md`** — Layout blueprints and component specs for each view.
+3. **`docs/CHAT_SPEC.md`** — Detailed chat view implementation spec.
+
+**Rules:** Never hardcode a hex color — use `C['key']`. Never inline a font-size — use `FONT_BODY` etc.
+
+## App Behavior & Agentic Features (MANDATORY)
+
+**Before adding or modifying any feature logic, read:**
+
+- **`docs/APP_BEHAVIOR.md`** — What the app does: view navigation, compile/upload flow, AI chat message flow, edit parsing/application, file browser, git, serial monitor, keyboard shortcuts, signal chains, data persistence.
+- **`docs/AGENTIC_FEATURES.md`** — Claude Code-inspired features: status table showing what's DONE vs NOT STARTED. Covers WorkingSet context system, slash commands, visual diffs, AI-git integration, code block rendering, AI-triggered compile, and more. **Check the status table before implementing — many Phase 1 features are already done.** New features MUST integrate with the WorkingSet context architecture.
+
 ## Recent Work / Known State
-- Visual overhaul: icon-only toolbar buttons, widget-based chat bubbles, status bar, SKETCHBOOK file browser
-- Chat display uses QScrollArea+widgets: user msgs are right-aligned dark bubbles, AI msgs are plain left-aligned QTextEdit
+- **WorkingSet context system** — priority-based (0=active, 1=AI-edited, 2=open, 3=project), 12K token budget, replaces old full-project dump. Safety checks warn if critical files excluded.
+- **Slash commands** — `/clear`, `/model`, `/compact`, `/context`, `/help`, `/debug-ws`, `/debug-use-ws`
+- **Code block rendering** — `_render_formatted_response()` post-renders fenced code blocks and EDIT/FILE blocks with styled HTML
+- **AIWorkResult** — typed container for AI responses (`ProposedEdit`, `AIWorkResult` dataclasses)
+- **Git context** — `_build_git_context()` injects branch, commits, diff stat into every AI prompt
+- Visual overhaul: icon-only toolbar buttons, widget-based chat bubbles, status bar, file browser
 - Board combo shows friendly names (e.g. "Teensy 4.0") but stores FQBN as item data — use `_current_fqbn()` to get the actual FQBN
-- Settings gear icon is custom-painted `SettingsSidebarButton`, positioned at bottom of sidebar
 - Sidebar order: Code, AI Chat, Files, Git, (stretch), Settings at bottom
