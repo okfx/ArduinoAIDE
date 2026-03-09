@@ -1774,20 +1774,40 @@ class ChatPanel(QWidget):
         # Apply bar — shows after AI suggests edits
         self.apply_bar = QWidget()
         self.apply_bar.setStyleSheet(f"background:{C['bg']};border-top:1px solid {C['border']};")
-        ab_layout = QHBoxLayout(self.apply_bar)
-        ab_layout.setContentsMargins(16, 8, 16, 8)
+        ab_outer = QVBoxLayout(self.apply_bar)
+        ab_outer.setContentsMargins(16, 8, 16, 8)
+        ab_outer.setSpacing(4)
+        # Header row: summary + intent badge
+        ab_header = QHBoxLayout()
         self.apply_label = QLabel("")
         self.apply_label.setStyleSheet(f"color:{C['fg']};{FONT_BODY}")
-        ab_layout.addWidget(self.apply_label)
-        ab_layout.addStretch()
+        ab_header.addWidget(self.apply_label)
+        self._intent_badge = QLabel("BUILD FIX")
+        self._intent_badge.setStyleSheet(
+            f"background:{C['teal']};color:white;border-radius:3px;"
+            f"padding:1px 6px;{FONT_SMALL}")
+        self._intent_badge.hide()
+        ab_header.addWidget(self._intent_badge)
+        ab_header.addStretch()
+        ab_outer.addLayout(ab_header)
+        # File detail rows (populated dynamically)
+        self._apply_file_rows = QWidget()
+        self._apply_file_rows_layout = QVBoxLayout(self._apply_file_rows)
+        self._apply_file_rows_layout.setContentsMargins(24, 0, 0, 0)
+        self._apply_file_rows_layout.setSpacing(2)
+        ab_outer.addWidget(self._apply_file_rows)
+        # Button row
+        ab_btns = QHBoxLayout()
+        ab_btns.addStretch()
         self.apply_all_btn = QPushButton("Apply All Changes")
         self.apply_all_btn.setStyleSheet(BTN_PRIMARY)
         self.apply_all_btn.clicked.connect(self._apply_all_edits)
-        ab_layout.addWidget(self.apply_all_btn)
+        ab_btns.addWidget(self.apply_all_btn)
         self.dismiss_btn = QPushButton("Dismiss")
         self.dismiss_btn.setStyleSheet(BTN_SECONDARY)
         self.dismiss_btn.clicked.connect(self._dismiss_edits)
-        ab_layout.addWidget(self.dismiss_btn)
+        ab_btns.addWidget(self.dismiss_btn)
+        ab_outer.addLayout(ab_btns)
         self.apply_bar.hide()
         layout.addWidget(self.apply_bar)
 
@@ -2942,10 +2962,7 @@ class ChatPanel(QWidget):
         if edits:
             self._pending_edits = edits
             n = len(edits)
-            files_touched = set(e[1] for e in edits)
-            self.apply_label.setText(
-                f"{n} change{'s' if n > 1 else ''} in {', '.join(files_touched)}")
-            self.apply_bar.show()
+            self._populate_apply_bar(edits)
             self._add_info_msg(
                 f'Found {n} code edit{"s" if n > 1 else ""} — '
                 f'use the Apply bar below to apply.', C['fg_ok'])
@@ -2960,10 +2977,7 @@ class ChatPanel(QWidget):
                             ProposedEdit(edit_type, filename, old, new))
                 self._pending_edits = edits
                 n = len(edits)
-                files_touched = set(e[1] for e in edits)
-                self.apply_label.setText(
-                    f"{n} change{'s' if n > 1 else ''} in {', '.join(files_touched)}")
-                self.apply_bar.show()
+                self._populate_apply_bar(edits)
                 self._add_info_msg(
                     f'Found {n} code edit{"s" if n > 1 else ""} (from diff) — '
                     f'use the Apply bar below to apply.', C['fg_ok'])
@@ -3082,6 +3096,7 @@ class ChatPanel(QWidget):
                            C['fg_ok'] if not errors else C['fg_warn'])
         self.apply_bar.hide()
         self._pending_edits = []
+        self._clear_apply_file_rows()
 
         # Notify MainWindow to refresh file browser after creates/edits
         if applied > 0:
@@ -3095,9 +3110,43 @@ class ChatPanel(QWidget):
         self.recompile_bar.hide()
         self.recompile_requested.emit()
 
+    def _clear_apply_file_rows(self):
+        """Remove dynamic per-file labels from the apply bar."""
+        while self._apply_file_rows_layout.count():
+            item = self._apply_file_rows_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _populate_apply_bar(self, edits):
+        """Group edits by file and populate the apply bar review panel."""
+        self._clear_apply_file_rows()
+        from collections import OrderedDict
+        by_file = OrderedDict()
+        for edit_type, filename, old, new in edits:
+            by_file.setdefault(filename, []).append(edit_type)
+        n = len(edits)
+        nf = len(by_file)
+        self.apply_label.setText(
+            f"{n} edit{'s' if n != 1 else ''} in {nf} file{'s' if nf != 1 else ''}")
+        if self._error_diagnostics:
+            self._intent_badge.show()
+        else:
+            self._intent_badge.hide()
+        for filename, types in by_file.items():
+            count = len(types)
+            has_new = "file" in types
+            label_text = f"{filename} \u2014 {count} edit{'s' if count != 1 else ''}"
+            if has_new:
+                label_text += " (new file)"
+            row = QLabel(label_text)
+            row.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+            self._apply_file_rows_layout.addWidget(row)
+        self.apply_bar.show()
+
     def _dismiss_edits(self):
         self.apply_bar.hide()
         self._pending_edits = []
+        self._clear_apply_file_rows()
 
     def clear_chat(self):
         # Remove all message widgets from the chat layout (keep the stretch)
