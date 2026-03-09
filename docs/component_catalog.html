@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ArduinoAIDE — Component Catalog</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #111; font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif; color: #d4d4d4; padding: 40px; }
+  h1 { color: #00979d; font-size: 24px; margin-bottom: 8px; }
+  .subtitle { color: #888; font-size: 14px; margin-bottom: 40px; }
+  h2 { color: #e0e0e0; font-size: 16px; margin: 32px 0 16px; border-bottom: 1px solid #2a2a2a; padding-bottom: 8px; }
+  h3 { color: #888; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin: 20px 0 10px; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 32px; }
+  .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 20px; }
+  .card-label { font-size: 11px; color: #00979d; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+  .spec { font-size: 11px; color: #666; margin-top: 8px; font-family: Menlo, monospace; }
+
+  /* ===== Color Swatches ===== */
+  .swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+  .swatch {
+    width: 80px; text-align: center;
+  }
+  .swatch-color {
+    width: 80px; height: 48px; border-radius: 6px; border: 1px solid #333;
+    margin-bottom: 4px;
+  }
+  .swatch-name { font-size: 10px; color: #888; }
+  .swatch-hex { font-size: 10px; color: #555; font-family: Menlo, monospace; }
+
+  /* ===== Typography ===== */
+  .type-sample { margin: 8px 0; padding: 8px 12px; background: #1e1e1e; border-radius: 4px; }
+  .type-label { font-size: 10px; color: #00979d; font-family: Menlo, monospace; margin-bottom: 4px; }
+
+  /* ===== Buttons ===== */
+  .btn-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 6px 14px; border-radius: 4px;
+    font-size: 13px; cursor: pointer; border: none;
+  }
+  .btn-primary { background: #00979d; color: white; font-weight: bold; }
+  .btn-secondary { background: #2a2a2a; color: #d4d4d4; border: 1px solid #333; }
+  .btn-danger { background: #c62828; color: white; font-weight: bold; }
+  .btn-ghost { background: transparent; color: #00979d; font-size: 11px; text-decoration: underline; border: none; padding: 2px 4px; }
+  .btn-toolbar { background: #00979d; color: white; font-weight: bold; padding: 6px 14px; font-size: 13px; }
+
+  /* ===== Spacing ===== */
+  .spacing-row { display: flex; align-items: center; gap: 12px; margin: 4px 0; }
+  .spacing-bar { height: 16px; background: #00979d; border-radius: 2px; opacity: 0.5; }
+  .spacing-label { font-size: 11px; color: #888; font-family: Menlo, monospace; min-width: 40px; }
+  .spacing-use { font-size: 11px; color: #555; }
+
+  /* ===== Radius ===== */
+  .radius-row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .radius-sample {
+    width: 64px; height: 48px; background: #2a2a2a; border: 1px solid #333;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; color: #888; font-family: Menlo, monospace;
+  }
+
+  /* ===== Components ===== */
+  .component-demo { background: #1e1e1e; border-radius: 8px; padding: 16px; margin: 8px 0; }
+
+  /* Sidebar buttons */
+  .sidebar-demo { display: flex; background: #181818; padding: 6px; border-radius: 6px; gap: 2px; width: 48px; flex-direction: column; align-items: center; }
+  .sb-btn-demo {
+    width: 40px; height: 40px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; cursor: pointer; border: none; background: transparent; color: #666;
+    position: relative;
+  }
+  .sb-btn-demo.active { background: #252525; color: #fff; }
+  .sb-btn-demo.active::before {
+    content: ''; position: absolute; left: -2px; top: 8px; bottom: 8px;
+    width: 3px; background: #00979d; border-radius: 2px;
+  }
+
+  /* Tab demo */
+  .tab-demo { display: flex; background: #1a1a1a; height: 36px; border-bottom: 1px solid #2a2a2a; border-radius: 6px 6px 0 0; overflow: hidden; }
+  .tab-item { padding: 0 14px; font-size: 12px; color: #888; display: flex; align-items: center; gap: 6px; border-bottom: 2px solid transparent; }
+  .tab-item.active { color: #e0e0e0; background: #1e1e1e; border-bottom-color: #00979d; }
+  .tab-close { font-size: 13px; color: #555; }
+
+  /* Chat demos */
+  .chat-demo { background: #1a1a1a; border-radius: 8px; padding: 16px 20px; }
+  .chat-user { display: flex; flex-direction: column; align-items: flex-end; margin-bottom: 16px; }
+  .chat-user .name { font-size: 14px; color: #7aafff; font-weight: 600; margin-bottom: 4px; padding-right: 6px; }
+  .chat-user .bubble { background: #2a2a2a; border-radius: 14px; padding: 10px 16px; max-width: 70%; font-size: 14px; color: #e0e0e0; }
+  .chat-ai { margin-bottom: 16px; max-width: 700px; }
+  .chat-ai .name { font-size: 14px; color: #00979d; font-weight: 600; margin-bottom: 4px; padding-left: 2px; }
+  .chat-ai .text { font-size: 14px; color: #d4d4d4; padding-left: 2px; line-height: 1.6; }
+  .chat-ai code { background: #2a2a2a; color: #e06c75; padding: 1px 5px; border-radius: 4px; font-family: 'SF Mono', Menlo, monospace; font-size: 13px; }
+  .chat-ai .code-block { background: #2a2a2a; border: 1px solid #333; padding: 10px; margin: 6px 0; font-family: Menlo, Monaco, 'Courier New', monospace; font-size: 13px; white-space: pre-wrap; color: #d4d4d4; }
+  .chat-ai .code-block .lang { color: #888; font-size: 11px; margin-bottom: 4px; }
+  .chat-ai .edit-block { background: #2a2a2a; border: 1px solid #333; border-left: 3px solid #00979d; padding: 10px; margin: 6px 0; font-family: Menlo, Monaco, 'Courier New', monospace; font-size: 13px; white-space: pre-wrap; color: #d4d4d4; }
+  .chat-ai .edit-block .edit-header { color: #00979d; font-size: 12px; font-weight: bold; margin-bottom: 4px; }
+  .chat-ai .edit-block .old-marker { color: #888; font-size: 11px; margin: 4px 0 2px 0; }
+  .chat-ai .edit-block .new-marker { color: #00979d; font-size: 11px; margin: 4px 0 2px 0; }
+  .chat-err .name { font-size: 14px; color: #f44747; font-weight: 600; margin-bottom: 4px; padding-left: 2px; }
+  .chat-err .text { font-size: 14px; color: #f08080; padding-left: 2px; }
+
+  /* Input demo */
+  .input-demo { background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 10px; padding: 9px 14px; color: #888; font-size: 14px; font-family: -apple-system, Helvetica, Arial, sans-serif; width: 100%; outline: none; }
+
+  /* Combo demo */
+  .combo-demo { background: #2a2a2a; border: 1px solid #333; border-radius: 4px; color: #ccc; padding: 4px 8px; font-size: 13px; }
+
+  /* Status bar demo */
+  .status-demo { background: #181818; border-top: 1px solid #2a2a2a; padding: 0 12px; height: 26px; display: flex; align-items: center; font-size: 11px; color: #888; gap: 16px; border-radius: 0 0 6px 6px; }
+  .status-demo .teal { color: #00979d; }
+  .status-demo .spacer { flex: 1; }
+
+  /* Diff block demo */
+  .diff-demo { background: #1e1e1e; border: 1px solid #333; border-radius: 8px; overflow: hidden; font-family: 'SF Mono', Menlo, monospace; font-size: 13px; margin: 8px 0; }
+  .diff-hdr { background: #252525; padding: 6px 12px; font-size: 12px; color: #888; border-bottom: 1px solid #333; }
+  .diff-ln { padding: 1px 12px; white-space: pre; line-height: 1.5; }
+  .diff-del { background: rgba(244,71,71,0.12); color: #f08080; }
+  .diff-add { background: rgba(78,205,196,0.12); color: #7ee0d8; }
+  .diff-ctx { color: #888; }
+
+  .full-width { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+
+<h1>ArduinoAIDE Component Catalog</h1>
+<p class="subtitle">Visual reference for every UI component. All values match DESIGN_SYSTEM.md exactly.</p>
+
+<!-- ===== COLORS ===== -->
+<h2>Color Palette</h2>
+
+<h3>Backgrounds</h3>
+<div class="swatches">
+  <div class="swatch"><div class="swatch-color" style="background:#181818"></div><div class="swatch-name">bg_sidebar</div><div class="swatch-hex">#181818</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#1a1a1a"></div><div class="swatch-name">bg_dark</div><div class="swatch-hex">#1a1a1a</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#1e1e1e"></div><div class="swatch-name">bg</div><div class="swatch-hex">#1e1e1e</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#252525"></div><div class="swatch-name">bg_hover</div><div class="swatch-hex">#252525</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#2a2a2a"></div><div class="swatch-name">bg_input</div><div class="swatch-hex">#2a2a2a</div></div>
+</div>
+
+<h3>Borders</h3>
+<div class="swatches">
+  <div class="swatch"><div class="swatch-color" style="background:#2a2a2a"></div><div class="swatch-name">border</div><div class="swatch-hex">#2a2a2a</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#333333"></div><div class="swatch-name">border_light</div><div class="swatch-hex">#333333</div></div>
+</div>
+
+<h3>Text</h3>
+<div class="swatches">
+  <div class="swatch"><div class="swatch-color" style="background:#555555"></div><div class="swatch-name">fg_muted</div><div class="swatch-hex">#555555</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#888888"></div><div class="swatch-name">fg_dim</div><div class="swatch-hex">#888888</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#d4d4d4"></div><div class="swatch-name">fg</div><div class="swatch-hex">#d4d4d4</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#e0e0e0"></div><div class="swatch-name">fg_head</div><div class="swatch-hex">#e0e0e0</div></div>
+</div>
+
+<h3>Semantic</h3>
+<div class="swatches">
+  <div class="swatch"><div class="swatch-color" style="background:#00979d"></div><div class="swatch-name">teal</div><div class="swatch-hex">#00979d</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#00b5bc"></div><div class="swatch-name">teal_hover</div><div class="swatch-hex">#00b5bc</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#4ecdc4"></div><div class="swatch-name">teal_light</div><div class="swatch-hex">#4ecdc4</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#7aafff"></div><div class="swatch-name">fg_link</div><div class="swatch-hex">#7aafff</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#4ec9b0"></div><div class="swatch-name">fg_ok</div><div class="swatch-hex">#4ec9b0</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#e8b54d"></div><div class="swatch-name">fg_warn</div><div class="swatch-hex">#e8b54d</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#f44747"></div><div class="swatch-name">fg_err</div><div class="swatch-hex">#f44747</div></div>
+  <div class="swatch"><div class="swatch-color" style="background:#c62828"></div><div class="swatch-name">danger</div><div class="swatch-hex">#c62828</div></div>
+</div>
+
+<!-- ===== TYPOGRAPHY ===== -->
+<h2>Typography</h2>
+<div class="grid">
+  <div class="card">
+    <div class="card-label">Font Scale</div>
+    <div class="type-sample"><div class="type-label">FONT_TITLE — 14px bold</div><span style="font-size:14px;font-weight:bold;">Panel Title Text</span></div>
+    <div class="type-sample"><div class="type-label">FONT_SECTION — 13px bold</div><span style="font-size:13px;font-weight:bold;">Section Header</span></div>
+    <div class="type-sample"><div class="type-label">FONT_BODY — 13px</div><span style="font-size:13px;">Standard body text and labels</span></div>
+    <div class="type-sample"><div class="type-label">FONT_SMALL — 11px</div><span style="font-size:11px;color:#888;">Hints, descriptions, secondary info</span></div>
+  </div>
+  <div class="card">
+    <div class="card-label">Special Fonts</div>
+    <div class="type-sample"><div class="type-label">FONT_CODE — 13px monospace</div><span style="font-family:'SF Mono',Menlo,monospace;font-size:13px;">void setup() { Serial.begin(115200); }</span></div>
+    <div class="type-sample"><div class="type-label">FONT_CHAT — 14px system</div><span style="font-family:-apple-system,Helvetica,sans-serif;font-size:14px;">Chat message content text</span></div>
+    <div class="type-sample"><div class="type-label">FONT_CHAT_BOLD — 14px bold</div><span style="font-family:-apple-system,Helvetica,sans-serif;font-size:14px;font-weight:bold;color:#00979d;">qwen3:14b</span></div>
+  </div>
+</div>
+
+<!-- ===== SPACING ===== -->
+<h2>Spacing Scale</h2>
+<div class="card" style="max-width:600px;">
+  <div class="spacing-row"><div class="spacing-label">2px</div><div class="spacing-bar" style="width:2px;"></div><div class="spacing-use">micro gap</div></div>
+  <div class="spacing-row"><div class="spacing-label">4px</div><div class="spacing-bar" style="width:4px;"></div><div class="spacing-use">tight spacing</div></div>
+  <div class="spacing-row"><div class="spacing-label">6px</div><div class="spacing-bar" style="width:6px;"></div><div class="spacing-use">compact</div></div>
+  <div class="spacing-row"><div class="spacing-label">8px</div><div class="spacing-bar" style="width:8px;"></div><div class="spacing-use">standard gap</div></div>
+  <div class="spacing-row"><div class="spacing-label">10px</div><div class="spacing-bar" style="width:10px;"></div><div class="spacing-use">comfortable</div></div>
+  <div class="spacing-row"><div class="spacing-label">12px</div><div class="spacing-bar" style="width:12px;"></div><div class="spacing-use">spacious</div></div>
+  <div class="spacing-row"><div class="spacing-label">14px</div><div class="spacing-bar" style="width:14px;"></div><div class="spacing-use">large</div></div>
+  <div class="spacing-row"><div class="spacing-label">16px</div><div class="spacing-bar" style="width:16px;"></div><div class="spacing-use">extra</div></div>
+  <div class="spacing-row"><div class="spacing-label">20px</div><div class="spacing-bar" style="width:20px;"></div><div class="spacing-use">section</div></div>
+</div>
+
+<!-- ===== BORDER RADIUS ===== -->
+<h2>Border Radius</h2>
+<div class="radius-row">
+  <div><div class="radius-sample" style="border-radius:0px;">0px</div><div class="spec">sharp</div></div>
+  <div><div class="radius-sample" style="border-radius:4px;">4px</div><div class="spec">buttons</div></div>
+  <div><div class="radius-sample" style="border-radius:6px;">6px</div><div class="spec">sidebar</div></div>
+  <div><div class="radius-sample" style="border-radius:8px;">8px</div><div class="spec">panels</div></div>
+  <div><div class="radius-sample" style="border-radius:10px;">10px</div><div class="spec">inputs</div></div>
+  <div><div class="radius-sample" style="border-radius:14px;">14px</div><div class="spec">bubbles</div></div>
+</div>
+
+<!-- ===== BUTTONS ===== -->
+<h2>Buttons</h2>
+<div class="card">
+  <div class="card-label">Button Styles</div>
+  <div class="btn-row">
+    <button class="btn btn-primary">BTN_PRIMARY</button>
+    <button class="btn btn-secondary">BTN_SECONDARY</button>
+    <button class="btn btn-danger">BTN_DANGER</button>
+    <button class="btn btn-toolbar">BTN_TOOLBAR</button>
+    <button class="btn btn-ghost">BTN_GHOST</button>
+  </div>
+  <div class="spec" style="margin-top:12px;">
+    PRIMARY: Verify, Upload, Create, Apply, Send<br>
+    SECONDARY: Refresh, Dismiss, Stop, Preview<br>
+    DANGER: Delete (destructive only)<br>
+    TOOLBAR: Compile/Upload in toolbar<br>
+    GHOST: text-only links (Show Files, toggle)
+  </div>
+</div>
+
+<!-- ===== COMPONENTS ===== -->
+<h2>Components</h2>
+
+<div class="grid">
+  <!-- Sidebar -->
+  <div class="card">
+    <div class="card-label">Sidebar Buttons</div>
+    <div class="sidebar-demo">
+      <button class="sb-btn-demo active">&lt;/&gt;</button>
+      <button class="sb-btn-demo">💬</button>
+      <button class="sb-btn-demo">📁</button>
+    </div>
+    <div class="spec">40×40px, radius 6px<br>Active: bg_hover + 3px teal left bar</div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="card">
+    <div class="card-label">Tab Bar</div>
+    <div class="tab-demo">
+      <div class="tab-item">README.md <span class="tab-close">×</span></div>
+      <div class="tab-item active">DrumSynth.ino <span class="tab-close">×</span></div>
+      <div class="tab-item">audio.h <span class="tab-close">×</span></div>
+    </div>
+    <div class="spec">36px height, 13px text<br>Active: bg + 2px teal bottom border</div>
+  </div>
+
+  <!-- Chat messages -->
+  <div class="card full-width">
+    <div class="card-label">Chat Messages</div>
+    <div class="chat-demo">
+      <div class="chat-user">
+        <div class="name">You</div>
+        <div class="bubble">The oscilloscope is flickering at high BPM</div>
+      </div>
+      <div class="chat-ai">
+        <div class="name">qwen3:14b</div>
+        <div class="text">I can see the issue in <code>oscilloscope.h</code>. The <code>drawWaveform()</code> function needs frame rate limiting.</div>
+        <div class="code-block"><div class="lang">cpp</div>void drawWaveform() {
+  static unsigned long lastFrame = 0;
+  if (millis() - lastFrame &lt; 16) return;
+  lastFrame = millis();
+}</div>
+        <div class="edit-block"><div class="edit-header">EDIT: oscilloscope.h</div><div class="old-marker">── OLD ──</div>void drawWaveform() {
+  clearScreen();
+<div class="new-marker">── NEW ──</div>void drawWaveform() {
+  static unsigned long lastFrame = 0;
+  if (millis() - lastFrame &lt; 16) return;
+  lastFrame = millis();
+  clearScreen();</div>
+      </div>
+      <div class="chat-err">
+        <div class="name">Error</div>
+        <div class="text">Cannot connect to Ollama. Is 'ollama serve' running?</div>
+      </div>
+    </div>
+    <div class="spec">User: right-aligned, bg_input, radius 14px, max 500px | AI: left, no bubble, max 700px | Code: bordered, monospace | Edit: teal left border</div>
+  </div>
+
+  <!-- Input -->
+  <div class="card">
+    <div class="card-label">Chat Input</div>
+    <input class="input-demo" placeholder="Ask about your code..." readonly>
+    <div class="spec">bg_input, radius 10px, FONT_CHAT<br>Focus: border → teal</div>
+  </div>
+
+  <!-- Combo -->
+  <div class="card">
+    <div class="card-label">Toolbar Combo</div>
+    <select class="combo-demo"><option>Teensy 4.0</option></select>
+    &nbsp;&nbsp;
+    <select class="combo-demo" style="min-width:140px;"><option>qwen3:14b</option></select>
+    <div class="spec">bg_input, border_light, radius 4px<br>Board/Port: 100px min | Model: 140px min</div>
+  </div>
+
+  <!-- Status bar -->
+  <div class="card full-width">
+    <div class="card-label">Status Bar</div>
+    <div class="status-demo">
+      <span class="teal">●</span>
+      <span>Teensy 4.0 — usb:1100000</span>
+      <span class="spacer"></span>
+      <span>qwen3:14b</span>
+      <span>Ln 289, Col 42</span>
+    </div>
+    <div class="spec">26px height, bg_sidebar, FONT_SMALL, fg_dim</div>
+  </div>
+
+  <!-- Diff block -->
+  <div class="card full-width">
+    <div class="card-label">Code Diff Block (in chat)</div>
+    <div class="diff-demo">
+      <div class="diff-hdr">oscilloscope.h</div>
+      <div class="diff-ln diff-ctx"> void updateOscilloscope(unsigned long nowMs) {</div>
+      <div class="diff-ln diff-del">-    drawWaveform();</div>
+      <div class="diff-ln diff-del">-    display.display();</div>
+      <div class="diff-ln diff-add">+    if (isSafeToPushOled(nowMs)) {</div>
+      <div class="diff-ln diff-add">+        drawWaveform();</div>
+      <div class="diff-ln diff-add">+        display.display();</div>
+      <div class="diff-ln diff-add">+    }</div>
+      <div class="diff-ln diff-ctx"> }</div>
+    </div>
+    <div class="spec">bg, border_light border, radius 8px | del: rgba(244,71,71,0.12) | add: rgba(78,205,196,0.12)</div>
+  </div>
+</div>
+
+</body>
+</html>

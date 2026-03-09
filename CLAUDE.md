@@ -6,18 +6,18 @@ A macOS desktop IDE for Teensy microcontroller development, styled after Arduino
 - **Python 3 + PyQt6 6.10.2 + QScintilla** — native macOS desktop app
 - **Ollama REST API** — local LLM chat (streaming via `/api/chat`), model management (`/api/tags`, `/api/show`, `/api/create`, `/api/delete`, `/api/pull`)
 - **arduino-cli** — compile/upload with FQBN `teensy:avr:teensy40`
-- **Single file**: `teensy_ide.py` (~3200 lines) — everything is in this one file
+- **Single file**: `ArduinoAIDE.py` (~3200 lines) — everything is in this one file
 - **Virtual env**: `~/teensy-ide-env` — activate before running
 
 ## Running
 ```bash
 source ~/teensy-ide-env/bin/activate
-python3 teensy_ide.py [project_path]
+python3 ArduinoAIDE.py [project_path]
 ```
 
 ## Architecture
 
-All classes live in `teensy_ide.py`:
+All classes live in `ArduinoAIDE.py`:
 
 | Class | Line | Purpose |
 |---|---|---|
