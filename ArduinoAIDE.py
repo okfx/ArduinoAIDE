@@ -1724,6 +1724,8 @@ class ChatPanel(QWidget):
     edits_applied = pyqtSignal()             # emitted after edits are successfully applied
     recompile_requested = pyqtSignal()       # emitted when user clicks Recompile after apply
     model_switch_requested = pyqtSignal(str)  # model name — request toolbar combo update
+    fix_triggered = pyqtSignal()             # emitted when /fix or continuation fix is invoked
+    chat_cleared = pyqtSignal()              # emitted when conversation is cleared
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2593,11 +2595,12 @@ class ChatPanel(QWidget):
             lines.append(f"  /{cmd}  —  {desc}")
         self._add_info_msg("\n".join(lines), C['fg'])
 
-    def show_fix_continuation(self, n_diags):
+    def show_fix_continuation(self, n_diags, attempt=0):
         """Show the fix continuation bar after compile-after-AI-edits failure."""
         s = "s" if n_diags != 1 else ""
+        attempt_prefix = f"Fix attempt {attempt} — " if attempt > 0 else ""
         self._fix_continuation_label.setText(
-            f"Errors remain after applying changes ({n_diags} diagnostic{s}). Continue fixing?")
+            f"{attempt_prefix}{n_diags} error{s} remain. Fix remaining errors?")
         self.fix_continuation_bar.show()
 
     def _on_fix_continuation_clicked(self):
@@ -2611,6 +2614,7 @@ class ChatPanel(QWidget):
             self._add_info_msg(
                 "No compile errors to fix. Compile first (Ctrl+R).", C['fg_warn'])
             return
+        self.fix_triggered.emit()
         n_diags = len(self._error_diagnostics)
         n_errors = sum(1 for d in self._error_diagnostics if d.severity == "error")
         if n_diags:
@@ -3527,6 +3531,7 @@ class ChatPanel(QWidget):
         self._ai_edited_files.clear()
         self._working_set.clear()
         self._update_context_bar()
+        self.chat_cleared.emit()
 
     def _update_context_display(self, proj_name, proj_path, names):
         """Update the context panel with project info and file list."""
@@ -5236,6 +5241,7 @@ class MainWindow(QMainWindow):
         self._compiler_errors = ""
         self._ai_fix_pending_compile = False   # set True when AI edits are applied
         self._compile_follows_ai_edits = False  # captured at compile start
+        self._fix_attempt_count = 0            # AI-assisted fix attempts in current session
 
         self._setup_ui()
         self._setup_toolbar()
@@ -5347,6 +5353,8 @@ class MainWindow(QMainWindow):
         self.chat_panel.edits_applied.connect(self._on_edits_applied)
         self.chat_panel.recompile_requested.connect(self._compile)
         self.chat_panel.model_switch_requested.connect(self._on_model_switch)
+        self.chat_panel.fix_triggered.connect(self._on_fix_triggered)
+        self.chat_panel.chat_cleared.connect(self._reset_fix_attempt_count)
         self.view_stack.addWidget(self.chat_panel)
 
         # View 2: File Manager (full panel)
@@ -5681,6 +5689,9 @@ class MainWindow(QMainWindow):
 
     def _open_project(self, path):
         self.project_path = path
+        self._ai_fix_pending_compile = False
+        self._compile_follows_ai_edits = False
+        self._fix_attempt_count = 0
         self.serial_monitor.refresh_ports()
         self.setWindowTitle(f"{WINDOW_TITLE} — {os.path.basename(path)}")
         self.editor.open_all_project_files(path)
@@ -5709,6 +5720,14 @@ class MainWindow(QMainWindow):
             self.file_manager.file_browser._refresh()
         self.chat_panel._update_context_bar()
         self._ai_fix_pending_compile = True
+
+    def _on_fix_triggered(self):
+        """Increment fix attempt counter when user invokes /fix or continuation fix."""
+        self._fix_attempt_count += 1
+
+    def _reset_fix_attempt_count(self):
+        """Reset fix attempt counter at the start of a new compile session."""
+        self._fix_attempt_count = 0
 
     def _on_model_switch(self, model_name):
         """Handle /model command — update toolbar combo and status bar."""
@@ -5773,6 +5792,7 @@ class MainWindow(QMainWindow):
                         QTimer.singleShot(0, lambda l=l,c=c: self.compiler_output.append_output(l,c))
                 if r.returncode == 0:
                     QTimer.singleShot(0, lambda: self.compiler_output.append_output("\nDone compiling.", C["fg_ok"]))
+                    QTimer.singleShot(0, self._reset_fix_attempt_count)
                 else:
                     QTimer.singleShot(0, lambda: self.compiler_output.append_output("\nCompilation failed.", C["fg_err"]))
                     QTimer.singleShot(0, lambda: self.chat_panel.set_error_context(
@@ -5881,7 +5901,7 @@ class MainWindow(QMainWindow):
             self._compile_follows_ai_edits = False
             hint = f"\nErrors remain after applying AI changes ({n} diagnostic{'s' if n != 1 else ''})."
             self.compiler_output.append_output(hint, C["fg_warn"])
-            self.chat_panel.show_fix_continuation(n)
+            self.chat_panel.show_fix_continuation(n, self._fix_attempt_count)
         else:
             hint = f"\nType /fix in AI Chat to auto-fix ({n} diagnostic{'s' if n != 1 else ''})"
             self.compiler_output.append_output(hint, C["teal"])
