@@ -14,12 +14,12 @@ CONTENTS="${APP_DIR}/Contents"
 MACOS="${CONTENTS}/MacOS"
 RESOURCES="${CONTENTS}/Resources"
 
-# Determine absolute path to this script's directory (where teensy_ide.py lives)
+# Determine absolute path to this script's directory (where ArduinoAIDE.py lives)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-IDE_SCRIPT="${SCRIPT_DIR}/teensy_ide.py"
+IDE_SCRIPT="${SCRIPT_DIR}/ArduinoAIDE.py"
 
 if [ ! -f "$IDE_SCRIPT" ]; then
-    echo "Error: teensy_ide.py not found in ${SCRIPT_DIR}"
+    echo "Error: ArduinoAIDE.py not found in ${SCRIPT_DIR}"
     exit 1
 fi
 
@@ -64,19 +64,19 @@ PLIST
 # NOTE: The IDE_SCRIPT path is baked in at build time
 cat > "${SCRIPT_DIR}/${MACOS}/${APP_NAME}" << LAUNCHER
 #!/bin/bash
-# ArduinoAIDE launcher — finds venv Python and runs teensy_ide.py
+# ArduinoAIDE launcher — finds venv Python and runs ArduinoAIDE.py
 
 # Log for debugging launch issues
 LOG="\$HOME/.teensy_ide_launch.log"
 exec > "\$LOG" 2>&1
 echo "ArduinoAIDE launch at \$(date)"
 
-# Find teensy_ide.py — check build-time path first, then fallback locations
+# Find ArduinoAIDE.py — check build-time path first, then fallback locations
 IDE_SCRIPT=""
 CANDIDATES=(
     "${IDE_SCRIPT}"
-    "\$HOME/Documents/ArduinoAIDE/teensy_ide.py"
-    "\$(dirname "\$0")/../../teensy_ide.py"
+    "\$HOME/Documents/ArduinoAIDE/ArduinoAIDE.py"
+    "\$(dirname "\$0")/../../ArduinoAIDE.py"
 )
 for candidate in "\${CANDIDATES[@]}"; do
     if [ -f "\$candidate" ]; then
@@ -86,11 +86,11 @@ for candidate in "\${CANDIDATES[@]}"; do
 done
 
 if [ -z "\$IDE_SCRIPT" ]; then
-    osascript -e 'display alert "ArduinoAIDE" message "Cannot find teensy_ide.py. Make sure the app is in the same directory as teensy_ide.py or in ~/Documents/ArduinoAIDE/." as critical'
+    osascript -e 'display alert "ArduinoAIDE" message "Cannot find ArduinoAIDE.py. Make sure the app is in the same directory as ArduinoAIDE.py or in ~/Documents/ArduinoAIDE/." as critical'
     exit 1
 fi
 
-# Find venv Python (same search order as _bootstrap_venv in teensy_ide.py)
+# Find venv Python (same search order as _bootstrap_venv in ArduinoAIDE.py)
 PYTHON=""
 IDE_DIR="\$(dirname "\$IDE_SCRIPT")"
 VENV_CANDIDATES=(

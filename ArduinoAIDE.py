@@ -4,7 +4,7 @@ Teensy Ollama IDE — Arduino IDE 2.x inspired desktop app
 with local LLM (Ollama) integration for Teensy development.
 
 Usage:
-    python3 teensy_ide.py [project_path]
+    python3 ArduinoAIDE.py [project_path]
 
 Requirements:
     pip3 install PyQt6 PyQt6-QScintilla requests

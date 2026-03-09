@@ -25,7 +25,7 @@ pip install PyQt6 PyQt6-QScintilla requests pyserial
 ## Usage
 
 ```bash
-python3 teensy_ide.py [project_path]
+python3 ArduinoAIDE.py [project_path]
 ```
 
 If no project path is given, use **File → Open Project** to select an Arduino project folder.
