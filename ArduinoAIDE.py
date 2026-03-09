@@ -235,6 +235,15 @@ class ProposedEdit:
     new_text: str
 
 @dataclass
+class StructuredDiagnostic:
+    """A single compiler diagnostic parsed from gcc/arduino-cli output."""
+    file: str
+    line: int
+    column: int
+    severity: str      # "error", "warning", "note"
+    message: str
+
+@dataclass
 class AIWorkResult:
     """Structured result of one AI turn. Populated by response parsing;
     consumed by apply/review logic. Future features (compile diagnostics,
@@ -243,8 +252,41 @@ class AIWorkResult:
     proposed_edits: list = field(default_factory=list)   # list[ProposedEdit]
     requested_reads: list = field(default_factory=list)  # list[str] — filenames (future)
     request_compile: bool = False                        # (future)
+    diagnostics: list = field(default_factory=list)      # list[StructuredDiagnostic]
     warnings: list = field(default_factory=list)         # list[str]
     metadata: dict = field(default_factory=dict)
+
+
+_GCC_DIAG_RE = re.compile(
+    r'^(.+?):(\d+):(?:(\d+):)?\s*(error|warning|note):\s*(.+)$')
+_LINKER_RE = re.compile(
+    r"(undefined reference to|multiple definition of)\s+[`'](.+?)[`']")
+
+def _parse_compiler_diagnostics(stderr_text):
+    """Parse gcc/arduino-cli stderr into StructuredDiagnostic objects.
+    Returns (list[StructuredDiagnostic], raw_text). Raw text is always preserved."""
+    diags = []
+    for line in stderr_text.splitlines():
+        m = _GCC_DIAG_RE.match(line.strip())
+        if m:
+            diags.append(StructuredDiagnostic(
+                file=m.group(1),
+                line=int(m.group(2)),
+                column=int(m.group(3)) if m.group(3) else 0,
+                severity=m.group(4),
+                message=m.group(5).strip(),
+            ))
+            continue
+        m = _LINKER_RE.search(line)
+        if m:
+            diags.append(StructuredDiagnostic(
+                file="<linker>",
+                line=0,
+                column=0,
+                severity="error",
+                message=line.strip(),
+            ))
+    return diags, stderr_text
 
 
 def _make_panel_header(title_text=""):
@@ -1543,6 +1585,7 @@ class ChatPanel(QWidget):
         self._conversation = [{"role": "system", "content": self._build_system_prompt()}]
         self._current_response = ""
         self._error_context = ""
+        self._error_diagnostics = []     # list[StructuredDiagnostic]
         self._editor_ref = None          # will be set by MainWindow
         self._pending_edits = []         # list of parsed edit operations
         self._working_set = WorkingSet()          # shadow context tracker (Step 2)
@@ -1742,8 +1785,9 @@ class ChatPanel(QWidget):
         if self._conversation and self._conversation[0]["role"] == "system":
             self._conversation[0]["content"] = self._build_system_prompt()
 
-    def set_error_context(self, e):
+    def set_error_context(self, e, diagnostics=None):
         self._error_context = e
+        self._error_diagnostics = diagnostics or []
 
     def _build_system_prompt(self):
         """Build system prompt, prepending project-level .aide_prompt if found."""
@@ -2565,6 +2609,7 @@ class ChatPanel(QWidget):
             self._conversation.append({"role": "assistant", "content": self._current_response})
             self._render_formatted_response()
             result = AIWorkResult(assistant_text=self._current_response)
+            result.diagnostics = list(self._error_diagnostics)
             self._parse_edits(self._current_response, result)
             self._last_work_result = result
         # Finalize stats — stop spinner, show final stats
@@ -4959,6 +5004,7 @@ class MainWindow(QMainWindow):
 
     def _run_cli(self, args):
         self._compiler_errors = ""
+        self._compiler_diagnostics = []
         def go():
             try:
                 r = subprocess.run(["arduino-cli"]+args, capture_output=True, text=True, timeout=120)
@@ -4967,6 +5013,7 @@ class MainWindow(QMainWindow):
                         QTimer.singleShot(0, lambda l=l: self.compiler_output.append_output(l))
                 if r.stderr:
                     self._compiler_errors = r.stderr
+                    self._compiler_diagnostics, _ = _parse_compiler_diagnostics(r.stderr)
                     for l in r.stderr.splitlines():
                         c = C["fg_err"] if "error" in l.lower() else C["fg_warn"] if "warning" in l.lower() else C["fg"]
                         QTimer.singleShot(0, lambda l=l,c=c: self.compiler_output.append_output(l,c))
@@ -4974,7 +5021,8 @@ class MainWindow(QMainWindow):
                     QTimer.singleShot(0, lambda: self.compiler_output.append_output("\nDone compiling.", C["fg_ok"]))
                 else:
                     QTimer.singleShot(0, lambda: self.compiler_output.append_output("\nCompilation failed.", C["fg_err"]))
-                    QTimer.singleShot(0, lambda: self.chat_panel.set_error_context(self._compiler_errors))
+                    QTimer.singleShot(0, lambda: self.chat_panel.set_error_context(
+                        self._compiler_errors, self._compiler_diagnostics))
             except FileNotFoundError:
                 QTimer.singleShot(0, lambda: self.compiler_output.append_output("arduino-cli not found.", C["fg_err"]))
             except subprocess.TimeoutExpired:
@@ -5065,7 +5113,8 @@ class MainWindow(QMainWindow):
 
     def _send_errors_to_ai(self):
         if self._compiler_errors:
-            self.chat_panel.set_error_context(self._compiler_errors)
+            self.chat_panel.set_error_context(
+                self._compiler_errors, getattr(self, '_compiler_diagnostics', []))
             self.chat_panel.send_errors_btn.setChecked(True)
             self._switch_view(1); self.chat_panel.input_field.setFocus()
 
