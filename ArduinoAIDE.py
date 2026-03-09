@@ -1610,7 +1610,7 @@ class ChatPanel(QWidget):
         chat_container.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._chat_layout = QVBoxLayout(chat_container)
-        self._chat_layout.setContentsMargins(10, 16, 10, 16)
+        self._chat_layout.setContentsMargins(8, 16, 8, 16)
         self._chat_layout.setSpacing(20)
         self._chat_layout.addStretch()
         outer_layout.addWidget(chat_container)
@@ -2842,6 +2842,7 @@ class ChatPanel(QWidget):
         text_label = QLabel(text)
         text_label.setWordWrap(True)
         text_label.setTextFormat(Qt.TextFormat.PlainText)
+        text_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         text_label.setStyleSheet(
             f"color:{C['fg_head']};{FONT_CHAT}background:transparent;border:none;")
         text_label.setTextInteractionFlags(
