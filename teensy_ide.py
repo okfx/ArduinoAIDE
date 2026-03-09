@@ -44,25 +44,26 @@ import requests
 # Colors — Arduino IDE 2.x palette
 # =============================================================================
 C = {
-    "bg":           "#2b2b2b",
+    "bg":           "#1e1e1e",
     "bg_editor":    "#1e1e1e",
-    "bg_sidebar":   "#252526",
+    "bg_sidebar":   "#181818",
     "bg_toolbar":   "#1e1e1e",
-    "bg_tabs":      "#2d2d2d",
+    "bg_tabs":      "#1a1a1a",
     "bg_tab_active":"#1e1e1e",
-    "bg_input":     "#2d2d2d",
-    "bg_output":    "#1e1e1e",
-    "teal":         "#00979d",
-    "teal_hover":   "#00b5bc",
+    "bg_input":     "#2a2a2a",
+    "bg_output":    "#1a1a1a",
+    "teal":         "#4ecdc4",
+    "teal_hover":   "#5fd9d0",
     "danger":       "#c62828",
     "fg":           "#d4d4d4",
-    "fg_dim":       "#858585",
-    "fg_head":      "#e0e0e0",
+    "fg_dim":       "#888888",
+    "fg_head":      "#cccccc",
     "fg_err":       "#f44747",
-    "fg_warn":      "#dcdcaa",
-    "fg_ok":        "#4ec9b0",
-    "fg_link":      "#569cd6",
-    "border":       "#3c3c3c",
+    "fg_warn":      "#e8b54d",
+    "fg_ok":        "#4ecdc4",
+    "fg_link":      "#7aafff",
+    "border":       "#2a2a2a",
+    "border_light": "#333333",
     "syn_kw":       "#569cd6",
     "syn_cmt":      "#6a9955",
     "syn_str":      "#ce9178",
@@ -190,31 +191,31 @@ QWidget {{ background-color: {C['bg']}; color: {C['fg']}; font-size: 13px; }}
 QToolBar {{
     background-color: {C['bg_toolbar']};
     border-bottom: 1px solid {C['border']};
-    padding: 6px 8px; spacing: 8px;
-    min-height: 42px;
+    padding: 6px 12px; spacing: 8px;
+    min-height: 44px;
 }}
-QToolBar QLabel {{ color: {C['fg_dim']}; font-size: 11px; margin: 0 2px; background: transparent; border: none; letter-spacing: 0.3px; }}
+QToolBar QLabel {{ color: #888888; font-size: 11px; margin: 0 2px; background: transparent; border: none; }}
 QToolBar QComboBox {{
     background-color: {C['bg_input']}; color: {C['fg']};
-    border: 1px solid {C['border']}; border-radius: 3px;
-    padding: 5px 8px; font-size: 12px; min-height: 22px;
+    border: 1px solid {C['border_light']}; border-radius: 5px;
+    padding: 4px 8px; font-size: 12px; min-height: 22px;
 }}
 QToolBar QComboBox QAbstractItemView {{
     background-color: {C['bg_input']}; color: {C['fg']};
     selection-background-color: {C['teal']};
 }}
 QToolBar::separator {{
-    width: 1px; margin: 4px 6px;
-    background-color: {C['border']};
+    width: 1px; height: 24px; margin: 0 4px;
+    background-color: {C['border_light']};
 }}
 
 QToolBar QPushButton {{
     background-color: transparent; color: #cccccc;
-    border: 1px solid #404040; border-radius: 4px;
-    padding: 5px 14px; font-size: 12px; font-weight: 500;
+    border: 1px solid {C['border_light']}; border-radius: 6px;
+    padding: 5px 12px; font-size: 12px;
 }}
-QToolBar QPushButton:hover {{ background-color: #383838; border-color: #00979d; color: white; }}
-QToolBar QPushButton:pressed {{ background-color: #00979d; }}
+QToolBar QPushButton:hover {{ background-color: {C['bg_input']}; border-color: #444444; }}
+QToolBar QPushButton:pressed {{ background-color: {C['teal']}; color: #111111; }}
 
 /* File tabs across top — wider, left-aligned text */
 QTabWidget#fileTabs::pane {{ border: none; }}
@@ -230,7 +231,7 @@ QTabBar#fileTabBar::tab:selected {{
     border-bottom: 2px solid {C['teal']};
 }}
 QTabBar#fileTabBar::tab:hover:!selected {{
-    background-color: #383838; color: {C['fg']};
+    background-color: #222222; color: {C['fg']};
 }}
 QTabBar#fileTabBar::close-button {{
     subcontrol-position: right;
@@ -250,7 +251,7 @@ QTabWidget#bottomTabs > QTabBar::tab:selected {{
     border-bottom: 2px solid {C['teal']};
 }}
 QTabWidget#bottomTabs > QTabBar::tab:hover:!selected {{
-    background-color: #383838;
+    background-color: #222222;
 }}
 
 QTreeView {{
@@ -258,7 +259,7 @@ QTreeView {{
     border: none; font-size: 12px;
 }}
 QTreeView::item:selected {{ background-color: {C['teal']}; color: white; }}
-QTreeView::item:hover:!selected {{ background-color: #383838; }}
+QTreeView::item:hover:!selected {{ background-color: #252525; }}
 QTreeView::branch {{ background-color: {C['bg_sidebar']}; }}
 
 QSplitter::handle {{ background-color: {C['border']}; }}
@@ -281,7 +282,7 @@ QPushButton {{
     border: 1px solid {C['border']}; border-radius: 3px;
     padding: 4px 10px; font-size: 12px;
 }}
-QPushButton:hover {{ background-color: #383838; border-color: {C['teal']}; }}
+QPushButton:hover {{ background-color: #252525; border-color: {C['teal']}; }}
 
 QGroupBox {{
     border: 1px solid {C['border']}; border-radius: 3px;
@@ -303,21 +304,21 @@ QScrollBar:vertical {{
     background: {C['bg_editor']}; width: 8px; border: none;
 }}
 QScrollBar::handle:vertical {{
-    background: #555; border-radius: 3px; min-height: 30px;
+    background: #444; border-radius: 3px; min-height: 30px;
 }}
-QScrollBar::handle:vertical:hover {{ background: #777; }}
+QScrollBar::handle:vertical:hover {{ background: #666; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar:horizontal {{
     background: {C['bg_editor']}; height: 8px; border: none;
 }}
 QScrollBar::handle:horizontal {{
-    background: #555; border-radius: 3px; min-width: 30px;
+    background: #444; border-radius: 3px; min-width: 30px;
 }}
 
 QMenu {{
-    background-color: #2d2d2d;
+    background-color: {C['bg_input']};
     color: #d4d4d4;
-    border: 1px solid #454545;
+    border: 1px solid {C['border_light']};
     border-radius: 6px;
     padding: 4px 0px;
     font-size: 13px;
@@ -337,7 +338,7 @@ QMenu::item:disabled {{
 }}
 QMenu::separator {{
     height: 1px;
-    background-color: #454545;
+    background-color: {C['border_light']};
     margin: 4px 12px;
 }}
 QMenu::right-arrow {{
@@ -357,7 +358,7 @@ QTabWidget#settingsTabs > QTabBar::tab:selected {{
     border-bottom: 2px solid {C['teal']};
 }}
 QTabWidget#settingsTabs > QTabBar::tab:hover:!selected {{
-    background-color: #383838;
+    background-color: #222222;
 }}
 
 QListWidget {{
@@ -367,7 +368,7 @@ QListWidget {{
 }}
 QListWidget::item {{ padding: 5px 8px; }}
 QListWidget::item:selected {{ background-color: {C['teal']}; color: white; }}
-QListWidget::item:hover:!selected {{ background-color: #383838; }}
+QListWidget::item:hover:!selected {{ background-color: #252525; }}
 """
 
 
@@ -381,19 +382,28 @@ class SidebarButton(QPushButton):
         super().__init__(icon_text, parent)
         self.setToolTip(tooltip)
         self.setCheckable(True)
-        self.setFixedSize(50, 50)
+        self.setFixedSize(40, 40)
         self.setStyleSheet(f"""
             QPushButton {{
-                background-color: transparent; color: {C['fg_dim']};
-                border: none; font-size: 21px; border-radius: 0;
-                border-left: 3px solid transparent;
+                background-color: transparent; color: #666666;
+                border: none; font-size: 16px; border-radius: 6px;
             }}
-            QPushButton:hover {{ color: {C['fg']}; background-color: #383838; }}
+            QPushButton:hover {{ color: #aaaaaa; background-color: #252525; }}
             QPushButton:checked {{
-                color: {C['fg']}; border-left: 3px solid {C['teal']};
-                background-color: #383838;
+                color: #ffffff; background-color: #252525;
             }}
         """)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        # Draw teal accent bar on left when checked
+        if self.isChecked():
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(C['teal']))
+            p.drawRoundedRect(0, 8, 3, self.height() - 16, 2, 2)
+            p.end()
 
 
 class GitSidebarButton(SidebarButton):
@@ -406,20 +416,19 @@ class GitSidebarButton(SidebarButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         col = QColor(C['fg']) if self.isChecked() or self.underMouse() else QColor(C['fg_dim'])
-        pen = QPen(col, 2.0)
-        p.setPen(pen)
+        p.setPen(QPen(col, 1.5))
         p.setBrush(Qt.BrushStyle.NoBrush)
         cx, cy = self.width() / 2, self.height() / 2
-        # Main vertical line (trunk)
-        p.drawLine(int(cx), int(cy - 12), int(cx), int(cy + 14))
+        # Main vertical line (trunk) — 16px icon
+        p.drawLine(int(cx), int(cy - 8), int(cx), int(cy + 8))
         # Branch line forking off to the right
-        p.drawLine(int(cx), int(cy - 2), int(cx + 9), int(cy - 10))
+        p.drawLine(int(cx), int(cy - 1), int(cx + 7), int(cy - 7))
         # Dots at the nodes (commits)
         p.setBrush(col)
-        r = 3
-        p.drawEllipse(int(cx - r), int(cy + 14 - r), r * 2, r * 2)     # bottom
-        p.drawEllipse(int(cx - r), int(cy - 12 - r), r * 2, r * 2)     # top
-        p.drawEllipse(int(cx + 9 - r), int(cy - 10 - r), r * 2, r * 2) # branch tip
+        r = 2
+        p.drawEllipse(int(cx - r), int(cy + 8 - r), r * 2, r * 2)     # bottom
+        p.drawEllipse(int(cx - r), int(cy - 8 - r), r * 2, r * 2)     # top
+        p.drawEllipse(int(cx + 7 - r), int(cy - 7 - r), r * 2, r * 2) # branch tip
         p.end()
 
 
@@ -433,16 +442,16 @@ class FileSidebarButton(SidebarButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         col = QColor(C['fg']) if self.isChecked() or self.underMouse() else QColor(C['fg_dim'])
-        p.setPen(QPen(col, 2.0))
+        p.setPen(QPen(col, 1.5))
         cx, cy = self.width() / 2, self.height() / 2
-        # Folder body
+        # Folder body (20×12)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        body_l, body_t = int(cx - 12), int(cy - 4)
-        p.drawRect(body_l, body_t, 24, 15)
+        body_l, body_t = int(cx - 10), int(cy - 3)
+        p.drawRect(body_l, body_t, 20, 12)
         # Folder tab on top-left
-        p.drawLine(body_l, body_t, body_l, int(cy - 9))
-        p.drawLine(body_l, int(cy - 9), int(cx - 3), int(cy - 9))
-        p.drawLine(int(cx - 3), int(cy - 9), int(cx - 1), body_t)
+        p.drawLine(body_l, body_t, body_l, int(cy - 7))
+        p.drawLine(body_l, int(cy - 7), int(cx - 3), int(cy - 7))
+        p.drawLine(int(cx - 3), int(cy - 7), int(cx - 1), body_t)
         p.end()
 
 
@@ -456,13 +465,13 @@ class SettingsSidebarButton(SidebarButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         col = QColor(C['fg']) if self.isChecked() or self.underMouse() else QColor(C['fg_dim'])
-        p.setPen(QPen(col, 2.0))
+        p.setPen(QPen(col, 1.5))
         p.setBrush(Qt.BrushStyle.NoBrush)
         cx, cy = self.width() / 2, self.height() / 2
         p.translate(cx, cy)
-        # Gear: 8 teeth
+        # Gear: 8 teeth (16×16 icon area)
         teeth = 8
-        outer_r, inner_r = 11, 7
+        outer_r, inner_r = 8, 5
         tooth_half = math.pi / teeth * 0.45
         path = QPainterPath()
         points = []
@@ -731,7 +740,7 @@ if HAS_QSCINTILLA:
             self.setAutoIndent(True)
             self.setIndentationGuides(True)
             self.setIndentationGuidesBackgroundColor(QColor("#2a2a2a"))
-            self.setIndentationGuidesForegroundColor(QColor("#404040"))
+            self.setIndentationGuidesForegroundColor(QColor(C['border_light']))
             self.setTabWidth(2)
             self.setIndentationsUseTabs(False)
             self.setEdgeMode(QsciScintilla.EdgeMode.EdgeNone)
@@ -1000,7 +1009,7 @@ class FileBrowser(QWidget):
             f"QTreeView {{ background:{C['bg_sidebar']};border:none;font-size:12px; }}"
             f"QTreeView::item {{ padding: 3px 4px; }}"
             f"QTreeView::item:selected {{ background:{C['teal']};color:white; }}"
-            f"QTreeView::item:hover:!selected {{ background:#383838; }}")
+            f"QTreeView::item:hover:!selected {{ background:#252525; }}")
         self.tree.doubleClicked.connect(self._on_double_click)
         layout.addWidget(self.tree)
 
@@ -1107,7 +1116,7 @@ class FileManagerView(QWidget):
             f"QTreeView {{ background:{C['bg_sidebar']};border:none;{FONT_BODY} }}"
             f"QTreeView::item {{ padding: 3px 4px; }}"
             f"QTreeView::item:selected {{ background:{C['teal']};color:white; }}"
-            f"QTreeView::item:hover:!selected {{ background:#383838; }}")
+            f"QTreeView::item:hover:!selected {{ background:#252525; }}")
         self._parent_model = QStandardItemModel()
         self.parent_tree.setModel(self._parent_model)
         self.parent_tree.doubleClicked.connect(self._on_parent_double_click)
@@ -1339,15 +1348,19 @@ class ChatPanel(QWidget):
         self._chat_scroll = QScrollArea()
         self._chat_scroll.setWidgetResizable(True)
         self._chat_scroll.setStyleSheet(
-            f"QScrollArea {{ background-color: #1a1a1a; border: none; }}"
-            f"QWidget#chatContainer {{ background-color: #1a1a1a; }}")
+            f"QScrollArea {{ background-color: {C['bg_tabs']}; border: none; }}"
+            f"QWidget#chatContainer {{ background-color: {C['bg_tabs']}; }}"
+            f"QScrollBar:vertical {{ background: {C['bg_tabs']}; width: 8px; border: none; }}"
+            f"QScrollBar::handle:vertical {{ background: #444; border-radius: 3px; min-height: 30px; }}"
+            f"QScrollBar::handle:vertical:hover {{ background: #666; }}"
+            f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}")
         self._chat_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         chat_container = QWidget()
         chat_container.setObjectName("chatContainer")
         self._chat_layout = QVBoxLayout(chat_container)
         self._chat_layout.setContentsMargins(16, 12, 16, 12)
-        self._chat_layout.setSpacing(16)
+        self._chat_layout.setSpacing(18)
         self._chat_layout.addStretch()
         self._chat_scroll.setWidget(chat_container)
         self._current_ai_widget = None
@@ -1375,16 +1388,16 @@ class ChatPanel(QWidget):
 
         # Input area — clean, modern look
         inp = QWidget()
-        inp.setStyleSheet(f"background: #222222; border-top: 1px solid {C['border']};")
+        inp.setStyleSheet(f"background: {C['bg_toolbar']}; border-top: 1px solid {C['border']};")
         il = QHBoxLayout(inp); il.setContentsMargins(12, 8, 12, 8); il.setSpacing(8)
 
         self.input_field = QLineEdit()
         self.input_field.setPlaceholderText("Ask about your code...")
         self.input_field.setStyleSheet(f"""
             QLineEdit {{
-                background-color: #2d2d2d; color: {C['fg']};
-                border: 1px solid #404040; border-radius: 4px;
-                padding: 6px 10px; {FONT_BODY}
+                background-color: {C['bg_input']}; color: {C['fg']};
+                border: 1px solid #3a3a3a; border-radius: 10px;
+                padding: 6px 10px; {FONT_CHAT}
             }}
             QLineEdit:focus {{ border-color: {C['teal']}; }}
         """)
@@ -1393,7 +1406,10 @@ class ChatPanel(QWidget):
 
         self.send_btn = QPushButton("Send")
         self.send_btn.setFixedWidth(60)
-        self.send_btn.setStyleSheet(BTN_PRIMARY)
+        self.send_btn.setStyleSheet(
+            f"QPushButton {{ background:{C['teal']};color:#111111;border:none;"
+            f"border-radius:10px;font-weight:bold;padding:5px 10px; }}"
+            f"QPushButton:hover {{ background:{C['teal_hover']}; }}")
         self.send_btn.clicked.connect(self.send_message)
         il.addWidget(self.send_btn)
 
@@ -1401,7 +1417,9 @@ class ChatPanel(QWidget):
         self.stop_btn.setFixedWidth(52)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setStyleSheet(
-            BTN_SECONDARY)
+            f"QPushButton {{ background:{C['bg_input']};color:{C['fg']};border:1px solid {C['border_light']};"
+            f"border-radius:10px;padding:5px 10px; }}"
+            f"QPushButton:hover {{ background:#333333; }}")
         self.stop_btn.clicked.connect(self.stop_generation)
         il.addWidget(self.stop_btn)
 
@@ -1539,19 +1557,24 @@ class ChatPanel(QWidget):
         self.generation_finished.emit()
 
     def _on_error(self, m):
-        # Show error as a left-aligned message with error styling
+        # Show error with "Error" speaker label
         wrapper = QWidget()
         wrapper.setStyleSheet("background: transparent;")
-        wl = QHBoxLayout(wrapper)
-        wl.setContentsMargins(0, 0, 40, 0)
-        err_label = QLabel(f"Error: {m}")
+        vl = QVBoxLayout(wrapper)
+        vl.setContentsMargins(0, 0, 40, 0)
+        vl.setSpacing(5)
+        speaker = QLabel("Error")
+        speaker.setStyleSheet(
+            f"color: {C['fg_err']}; font-size: 14px; font-weight: bold;"
+            f" padding-left: 2px;")
+        vl.addWidget(speaker)
+        err_label = QLabel(m)
         err_label.setWordWrap(True)
         err_label.setStyleSheet(
-            f"color: {C['fg_err']}; {FONT_CHAT} padding: 8px 0;")
+            f"color: #f08080; {FONT_CHAT} padding: 0 2px;")
         err_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        wl.addWidget(err_label)
-        wl.addStretch()
+        vl.addWidget(err_label)
         self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
         self._scroll_to_bottom()
         self._current_ai_widget = None
@@ -1718,34 +1741,55 @@ class ChatPanel(QWidget):
         self.toggle_files_btn.hide()
 
     def _add_user_msg(self, text):
-        """Add a right-aligned user message bubble (Claude desktop style)."""
+        """Add a right-aligned user message bubble with 'You' label."""
         wrapper = QWidget()
         wrapper.setStyleSheet("background: transparent;")
-        wl = QHBoxLayout(wrapper)
-        wl.setContentsMargins(60, 0, 0, 0)  # left margin pushes right
-        wl.addStretch()
+        vl = QVBoxLayout(wrapper)
+        vl.setContentsMargins(60, 0, 0, 0)
+        vl.setSpacing(4)
+        # Speaker label "You" — right-aligned
+        speaker = QLabel("You")
+        speaker.setAlignment(Qt.AlignmentFlag.AlignRight)
+        speaker.setStyleSheet(
+            f"color: {C['fg_link']}; font-size: 14px; font-weight: bold;"
+            f" padding-right: 6px;")
+        vl.addWidget(speaker)
+        # Bubble row
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch()
         bubble = QLabel(text)
         bubble.setWordWrap(True)
+        bubble.setMaximumWidth(500)
         bubble.setStyleSheet(
-            f"background-color: #363636; color: {C['fg']}; {FONT_CHAT}"
-            f" border-radius: 12px; padding: 10px 14px;")
+            f"background-color: {C['bg_input']}; color: #e0e0e0; {FONT_CHAT}"
+            f" border-radius: 14px; padding: 10px 16px;")
         bubble.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        wl.addWidget(bubble)
+        row.addWidget(bubble)
+        vl.addLayout(row)
         self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
         self._scroll_to_bottom()
 
     def _add_ai_msg(self):
-        """Add a left-aligned AI message area (plain text, no bubble)."""
+        """Add a left-aligned AI message area with model name label."""
         wrapper = QWidget()
         wrapper.setStyleSheet("background: transparent;")
-        wl = QHBoxLayout(wrapper)
-        wl.setContentsMargins(0, 0, 40, 0)
+        vl = QVBoxLayout(wrapper)
+        vl.setContentsMargins(0, 0, 40, 0)
+        vl.setSpacing(5)
+        # Speaker label — model name, teal, bold
+        speaker = QLabel(OLLAMA_MODEL)
+        speaker.setStyleSheet(
+            f"color: {C['teal']}; font-size: 14px; font-weight: bold;"
+            f" padding-left: 2px;")
+        vl.addWidget(speaker)
+        # AI text area — transparent, no bubble
         ai_text = QTextEdit()
         ai_text.setReadOnly(True)
         ai_text.setStyleSheet(
             f"QTextEdit {{ background: transparent; color: {C['fg']};"
-            f" border: none; {FONT_CHAT} padding: 0; }}")
+            f" border: none; {FONT_CHAT} padding: 0 2px; }}")
         ai_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         ai_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # Auto-resize as content grows
@@ -1753,8 +1797,7 @@ class ChatPanel(QWidget):
             lambda: ai_text.setFixedHeight(
                 int(ai_text.document().size().height()) + 4))
         ai_text.setFixedHeight(24)
-        wl.addWidget(ai_text)
-        wl.addStretch()
+        vl.addWidget(ai_text)
         self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
         self._current_ai_widget = ai_text
         self._scroll_to_bottom()
@@ -3165,13 +3208,13 @@ class MainWindow(QMainWindow):
 
         # ---- Left icon sidebar ----
         sidebar = QWidget()
-        sidebar.setFixedWidth(52)
+        sidebar.setFixedWidth(48)
         sidebar.setStyleSheet(f"background-color: {C['bg_sidebar']}; border-right: 1px solid {C['border']};")
         sb_layout = QVBoxLayout(sidebar)
-        sb_layout.setContentsMargins(0, 4, 0, 4)
+        sb_layout.setContentsMargins(4, 6, 4, 6)
         sb_layout.setSpacing(2)
 
-        self.btn_code = SidebarButton("{}", "Code Editor")
+        self.btn_code = SidebarButton("</>", "Code Editor")
         self.btn_code.setChecked(True)
         self.btn_chat = SidebarButton("AI", "AI Chat")
         self.btn_files = FileSidebarButton("Files")
@@ -3259,20 +3302,26 @@ class MainWindow(QMainWindow):
     def _setup_statusbar(self):
         sb = QStatusBar()
         sb.setStyleSheet(
-            f"QStatusBar {{ background: {C['bg_toolbar']}; color: {C['fg_dim']};"
+            f"QStatusBar {{ background: {C['bg_sidebar']}; color: #666666;"
             f" border-top: 1px solid {C['border']}; {FONT_SMALL} }}"
             f" QStatusBar::item {{ border: none; }}")
-        sb.setFixedHeight(22)
+        sb.setFixedHeight(26)
         self.setStatusBar(sb)
-        # Left: cursor position
-        self._status_cursor = QLabel("Ln 1, Col 1")
-        self._status_cursor.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL} padding: 0 8px;")
-        sb.addWidget(self._status_cursor)
-        # Right: board/port connection info
+        # Left: teal dot + board/port connection info
+        dot = QLabel("\u25cf")
+        dot.setStyleSheet(f"color:{C['teal']};{FONT_SMALL} padding: 0 0 0 8px;")
+        sb.addWidget(dot)
         self._status_board = QLabel("")
-        self._status_board.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL} padding: 0 8px;")
-        sb.addPermanentWidget(self._status_board)
+        self._status_board.setStyleSheet(f"color:#666666;{FONT_SMALL} padding: 0 8px;")
+        sb.addWidget(self._status_board)
         self._update_status_board()
+        # Right: model name + cursor position
+        self._status_model = QLabel(OLLAMA_MODEL)
+        self._status_model.setStyleSheet(f"color:#666666;{FONT_SMALL} padding: 0 8px;")
+        sb.addPermanentWidget(self._status_model)
+        self._status_cursor = QLabel("Ln 1, Col 1")
+        self._status_cursor.setStyleSheet(f"color:#666666;{FONT_SMALL} padding: 0 8px;")
+        sb.addPermanentWidget(self._status_cursor)
         # Connect board/port combo changes to status bar
         if hasattr(self, 'board_combo'):
             self.board_combo.currentTextChanged.connect(lambda: self._update_status_board())
@@ -3335,28 +3384,27 @@ class MainWindow(QMainWindow):
         toolbar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.addToolBar(toolbar)
 
-        # Icon-only Verify/Upload buttons (Arduino IDE 2.x style)
-        tb_icon_style = (f"QPushButton {{ background:{C['teal']};color:white;border:none;"
-                         f"border-radius:4px;font-size:18px;padding:4px 10px;min-width:32px; }}"
-                         f"QPushButton:hover {{ background:{C['teal_hover']}; }}")
+        # Verify/Upload buttons — teal bg, dark text (per UI_SPEC)
+        tb_primary = (f"QPushButton {{ background:{C['teal']};color:#111111;border:none;"
+                      f"border-radius:6px;font-size:12px;font-weight:600;padding:5px 12px; }}"
+                      f"QPushButton:hover {{ background:{C['teal_hover']}; }}")
 
-        verify_btn = QPushButton("\u2713")
-        verify_btn.setToolTip("Verify / Compile (Ctrl+B)")
-        verify_btn.setStyleSheet(tb_icon_style)
+        verify_btn = QPushButton("\u2713 Verify")
+        verify_btn.setToolTip("Compile sketch (Ctrl+B)")
+        verify_btn.setStyleSheet(tb_primary)
         verify_btn.clicked.connect(self._compile)
         toolbar.addWidget(verify_btn)
 
-        upload_btn = QPushButton("\u27A4")
+        upload_btn = QPushButton("\u27A4 Upload")
         upload_btn.setToolTip("Upload to Teensy (Ctrl+U)")
-        upload_btn.setStyleSheet(tb_icon_style)
+        upload_btn.setStyleSheet(tb_primary)
         upload_btn.clicked.connect(self._upload)
         toolbar.addWidget(upload_btn)
 
         toolbar.addSeparator()
 
-        # Board combo — display friendly names, store FQBNs as item data
+        toolbar.addWidget(QLabel("Board"))
         self.board_combo = QComboBox()
-        self.board_combo.setToolTip("Board")
         fqbns = ["teensy:avr:teensy40", "teensy:avr:teensy41",
                  "teensy:avr:teensy36", "teensy:avr:teensy32", "teensy:avr:teensyLC"]
         for fqbn in fqbns:
@@ -3366,32 +3414,19 @@ class MainWindow(QMainWindow):
         self.board_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         toolbar.addWidget(self.board_combo)
 
-        toolbar.addSeparator()
-
-        # Port combo
+        toolbar.addWidget(QLabel("Port"))
         self.port_combo = QComboBox()
-        self.port_combo.setToolTip("Port")
         self.port_combo.setEditable(True)
         self.port_combo.setMinimumContentsLength(6)
         self.port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._refresh_ports()
         toolbar.addWidget(self.port_combo)
 
-        refresh_style = (f"QPushButton {{ background:transparent;color:{C['fg_dim']};"
-                         f"border:none;font-size:14px;padding:4px; }}"
-                         f"QPushButton:hover {{ color:{C['fg']}; }}")
-        rb = QPushButton("\u21BB")
-        rb.setToolTip("Refresh ports")
-        rb.setStyleSheet(refresh_style)
-        rb.clicked.connect(self._refresh_ports)
-        toolbar.addWidget(rb)
-
         toolbar.addSeparator()
 
-        # AI Model combo
+        toolbar.addWidget(QLabel("AI"))
         self.model_combo = QComboBox()
-        self.model_combo.setToolTip("AI Model")
-        self.model_combo.setMinimumContentsLength(6)
+        self.model_combo.setMinimumContentsLength(10)
         self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._refresh_models()
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
@@ -3399,7 +3434,7 @@ class MainWindow(QMainWindow):
 
         self.model_desc_label = QLabel("")
         self.model_desc_label.setStyleSheet(
-            f"color:{C['fg_dim']};{FONT_SMALL}font-style:italic;"
+            f"color:#666666;{FONT_SMALL}font-style:italic;"
             f"background:transparent;border:none;margin-left:4px;")
         toolbar.addWidget(self.model_desc_label)
         self._update_model_desc()
@@ -3676,6 +3711,8 @@ class MainWindow(QMainWindow):
         if name:
             OLLAMA_MODEL = name
             self._update_model_desc()
+            if hasattr(self, '_status_model'):
+                self._status_model.setText(name)
 
     def _send_errors_to_ai(self):
         if self._compiler_errors:
