@@ -464,6 +464,7 @@ def _load_config():
         "tab_width": 2,
         "ollama_url": "http://localhost:11434",
         "arduino_cli_path": "arduino-cli",
+        "additional_board_urls": [],
     }
     try:
         with open(CONFIG_FILE, "r") as f:
@@ -697,6 +698,30 @@ if _custom_rules:
 # Path to full Teensy API reference (included in WorkingSet for .ino projects)
 _TEENSY_API_REF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                      'docs', 'TEENSY_API_REFERENCE.md')
+_REF_DOCS_FILE = os.path.expanduser("~/.teensy_ide_ref_docs.json")
+
+def _load_ref_docs():
+    """Load reference documents list from config. Returns list of abs paths."""
+    if os.path.exists(_REF_DOCS_FILE):
+        try:
+            with open(_REF_DOCS_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    # First run: seed with Teensy API reference if it exists
+    docs = []
+    if os.path.exists(_TEENSY_API_REF_PATH):
+        docs.append(_TEENSY_API_REF_PATH)
+    _save_ref_docs(docs)
+    return docs
+
+def _save_ref_docs(docs):
+    """Persist reference documents list."""
+    try:
+        with open(_REF_DOCS_FILE, 'w') as f:
+            json.dump(docs, f, indent=2)
+    except OSError:
+        pass
 
 # =============================================================================
 # Stylesheet
@@ -1054,6 +1079,50 @@ class SerialSidebarButton(SidebarButton):
         p.drawLine(int(cx - 1), int(cy + 2), int(cx - 5), int(cy + 5))
         # Cursor underscore
         p.drawLine(int(cx + 1), int(cy + 5), int(cx + 6), int(cy + 5))
+        p.end()
+
+
+class LibrarySidebarButton(SidebarButton):
+    """Sidebar button with book icon for Library Manager."""
+    def __init__(self, tooltip, parent=None):
+        super().__init__("", tooltip, parent)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        col = QColor(C['fg']) if self.isChecked() or self.underMouse() else QColor(C['fg_dim'])
+        p.setPen(QPen(col, 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        cx, cy = self.width() // 2, self.height() // 2
+        # Book spine + pages
+        p.drawLine(cx, cy - 7, cx, cy + 7)
+        p.drawRect(cx - 9, cy - 7, 8, 14)
+        p.drawRect(cx + 1, cy - 7, 8, 14)
+        p.end()
+
+
+class BoardSidebarButton(SidebarButton):
+    """Sidebar button with chip icon for Board Manager."""
+    def __init__(self, tooltip, parent=None):
+        super().__init__("", tooltip, parent)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        col = QColor(C['fg']) if self.isChecked() or self.underMouse() else QColor(C['fg_dim'])
+        p.setPen(QPen(col, 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        cx, cy = self.width() // 2, self.height() // 2
+        # Chip body
+        p.drawRect(cx - 6, cy - 6, 12, 12)
+        # Pins on all 4 sides
+        for offset in [-4, 0, 4]:
+            p.drawLine(cx - 9, cy + offset, cx - 6, cy + offset)
+            p.drawLine(cx + 6, cy + offset, cx + 9, cy + offset)
+            p.drawLine(cx + offset, cy - 9, cx + offset, cy - 6)
+            p.drawLine(cx + offset, cy + 6, cx + offset, cy + 9)
         p.end()
 
 
@@ -1978,6 +2047,624 @@ class FileManagerView(QWidget):
                 self.file_requested.emit(ino_file)
             except OSError as e:
                 QMessageBox.warning(self, "Error", str(e))
+
+
+# =============================================================================
+# Library Manager Panel
+# =============================================================================
+
+class LibraryManagerPanel(QWidget):
+    """Search, install, update, and remove Arduino libraries via arduino-cli."""
+    include_requested = pyqtSignal(str)  # library name
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._installed_libs = []  # list of dicts from arduino-cli
+        self._search_results = []
+        self._filter_mode = 0  # 0=installed, 1=search, 2=updatable
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header, _, _ = _make_panel_header("Library Manager")
+        layout.addWidget(header)
+
+        body = QWidget()
+        body.setStyleSheet(f"background:{C['bg_dark']};")
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(16, 12, 16, 12)
+        bl.setSpacing(10)
+
+        # Search row
+        search_row = QHBoxLayout()
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("Search libraries...")
+        self._search_input.setStyleSheet(SETTINGS_INPUT)
+        self._search_input.returnPressed.connect(self._search)
+        search_row.addWidget(self._search_input, stretch=1)
+        search_btn = QPushButton("Search")
+        search_btn.setStyleSheet(BTN_SM_PRIMARY)
+        search_btn.clicked.connect(self._search)
+        search_row.addWidget(search_btn)
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setStyleSheet(BTN_SM_GHOST)
+        refresh_btn.clicked.connect(self._refresh_installed)
+        search_row.addWidget(refresh_btn)
+        bl.addLayout(search_row)
+
+        # Filter combo
+        self._filter_combo = QComboBox()
+        self._filter_combo.addItems(["Installed", "Search Results", "Updatable"])
+        self._filter_combo.setStyleSheet(SETTINGS_COMBO)
+        self._filter_combo.currentIndexChanged.connect(self._apply_filter)
+        bl.addWidget(self._filter_combo)
+
+        # Table
+        self._table = QTableWidget()
+        self._table.setColumnCount(3)
+        self._table.setHorizontalHeaderLabels(["Library", "Version", "Status"])
+        self._table.horizontalHeader().setStyleSheet(SETTINGS_TBL_HDR)
+        self._table.setStyleSheet(SETTINGS_TABLE)
+        self._table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        hdr.resizeSection(1, 100)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        hdr.resizeSection(2, 120)
+        bl.addWidget(self._table, stretch=1)
+
+        # Action buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        install_btn = QPushButton("Install")
+        install_btn.setStyleSheet(BTN_SM_PRIMARY)
+        install_btn.clicked.connect(self._install)
+        btn_row.addWidget(install_btn)
+        update_btn = QPushButton("Update")
+        update_btn.setStyleSheet(BTN_SM_SECONDARY)
+        update_btn.clicked.connect(self._update)
+        btn_row.addWidget(update_btn)
+        remove_btn = QPushButton("Remove")
+        remove_btn.setStyleSheet(BTN_SM_DANGER)
+        remove_btn.clicked.connect(self._remove)
+        btn_row.addWidget(remove_btn)
+        include_btn = QPushButton("Include in Sketch")
+        include_btn.setStyleSheet(BTN_SM_GHOST)
+        include_btn.clicked.connect(self._include_library)
+        btn_row.addWidget(include_btn)
+        btn_row.addStretch()
+        bl.addLayout(btn_row)
+
+        # Status
+        self._status = QLabel("")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        bl.addWidget(self._status)
+
+        layout.addWidget(body, stretch=1)
+        QTimer.singleShot(500, self._refresh_installed)
+
+    def _selected_name(self):
+        row = self._table.currentRow()
+        if row < 0:
+            return None
+        item = self._table.item(row, 0)
+        return item.text() if item else None
+
+    def _refresh_installed(self):
+        self._status.setText("Loading installed libraries...")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+
+        def go():
+            try:
+                r = subprocess.run(
+                    ["arduino-cli", "lib", "list", "--format", "json"],
+                    capture_output=True, text=True, timeout=30)
+                data = json.loads(r.stdout) if r.stdout.strip() else []
+                if isinstance(data, dict):
+                    data = data.get("installed_libraries", [])
+                QTimer.singleShot(0, lambda: self._on_installed(data))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_error(str(e)))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _on_installed(self, data):
+        self._installed_libs = data
+        self._filter_combo.setCurrentIndex(0)
+        self._show_installed()
+
+    def _on_error(self, msg):
+        self._status.setText(f"Error: {msg}")
+        self._status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+
+    def _show_installed(self):
+        self._table.setRowCount(0)
+        for item in self._installed_libs:
+            lib = item.get("library", item)
+            name = lib.get("name", "?")
+            ver = lib.get("version", "?")
+            release = item.get("release", {})
+            latest = release.get("version", ver)
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            self._table.setItem(row, 0, QTableWidgetItem(name))
+            self._table.setItem(row, 1, QTableWidgetItem(ver))
+            if latest and latest != ver:
+                st = QTableWidgetItem(f"Update → {latest}")
+                st.setForeground(QColor(C['fg_warn']))
+            else:
+                st = QTableWidgetItem("Installed")
+                st.setForeground(QColor(C['fg_ok']))
+            self._table.setItem(row, 2, st)
+        self._status.setText(f"{self._table.rowCount()} installed libraries")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+
+    def _show_search_results(self):
+        self._table.setRowCount(0)
+        installed_names = set()
+        for item in self._installed_libs:
+            lib = item.get("library", item)
+            installed_names.add(lib.get("name", ""))
+        for lib in self._search_results:
+            name = lib.get("name", "?")
+            ver = lib.get("latest", lib.get("version", "?"))
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            self._table.setItem(row, 0, QTableWidgetItem(name))
+            self._table.setItem(row, 1, QTableWidgetItem(str(ver)))
+            if name in installed_names:
+                st = QTableWidgetItem("Installed")
+                st.setForeground(QColor(C['fg_ok']))
+            else:
+                st = QTableWidgetItem("Available")
+                st.setForeground(QColor(C['fg_dim']))
+            self._table.setItem(row, 2, st)
+        self._status.setText(f"{self._table.rowCount()} results")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+
+    def _show_updatable(self):
+        self._table.setRowCount(0)
+        for item in self._installed_libs:
+            lib = item.get("library", item)
+            name = lib.get("name", "?")
+            ver = lib.get("version", "?")
+            release = item.get("release", {})
+            latest = release.get("version", ver)
+            if latest and latest != ver:
+                row = self._table.rowCount()
+                self._table.insertRow(row)
+                self._table.setItem(row, 0, QTableWidgetItem(name))
+                self._table.setItem(row, 1, QTableWidgetItem(ver))
+                st = QTableWidgetItem(f"Update → {latest}")
+                st.setForeground(QColor(C['fg_warn']))
+                self._table.setItem(row, 2, st)
+        self._status.setText(f"{self._table.rowCount()} updatable")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+
+    def _apply_filter(self, idx):
+        self._filter_mode = idx
+        if idx == 0:
+            self._show_installed()
+        elif idx == 1:
+            self._show_search_results()
+        elif idx == 2:
+            self._show_updatable()
+
+    def _search(self):
+        query = self._search_input.text().strip()
+        if not query:
+            return
+        self._status.setText(f"Searching '{query}'...")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+
+        def go():
+            try:
+                r = subprocess.run(
+                    ["arduino-cli", "lib", "search", query, "--format", "json"],
+                    capture_output=True, text=True, timeout=30)
+                data = json.loads(r.stdout) if r.stdout.strip() else {}
+                libs = data.get("libraries", data) if isinstance(data, dict) else data
+                if not isinstance(libs, list):
+                    libs = []
+                QTimer.singleShot(0, lambda: self._on_search(libs))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_error(str(e)))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _on_search(self, libs):
+        self._search_results = libs
+        self._filter_combo.setCurrentIndex(1)
+
+    def _install(self):
+        name = self._selected_name()
+        if not name:
+            return
+        self._status.setText(f"Installing {name}...")
+        self._status.setStyleSheet(f"color:{C['fg_link']};{FONT_SMALL}")
+
+        def go():
+            try:
+                r = subprocess.run(
+                    ["arduino-cli", "lib", "install", name],
+                    capture_output=True, text=True, timeout=120)
+                if r.returncode == 0:
+                    QTimer.singleShot(0, lambda: self._on_action_done(
+                        f"Installed {name}", True))
+                else:
+                    QTimer.singleShot(0, lambda: self._on_action_done(
+                        r.stderr.strip() or "Install failed", False))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_action_done(str(e), False))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _update(self):
+        self._install()  # installing latest = update
+
+    def _remove(self):
+        name = self._selected_name()
+        if not name:
+            return
+        reply = QMessageBox.question(
+            self, "Remove Library",
+            f"Remove library '{name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._status.setText(f"Removing {name}...")
+        self._status.setStyleSheet(f"color:{C['fg_link']};{FONT_SMALL}")
+
+        def go():
+            try:
+                r = subprocess.run(
+                    ["arduino-cli", "lib", "uninstall", name],
+                    capture_output=True, text=True, timeout=60)
+                if r.returncode == 0:
+                    QTimer.singleShot(0, lambda: self._on_action_done(
+                        f"Removed {name}", True))
+                else:
+                    QTimer.singleShot(0, lambda: self._on_action_done(
+                        r.stderr.strip() or "Remove failed", False))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_action_done(str(e), False))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _on_action_done(self, msg, success):
+        self._status.setText(msg)
+        self._status.setStyleSheet(
+            f"color:{C['fg_ok'] if success else C['fg_err']};{FONT_SMALL}")
+        if success:
+            self._refresh_installed()
+
+    def _include_library(self):
+        name = self._selected_name()
+        if name:
+            self.include_requested.emit(name)
+
+
+# =============================================================================
+# Board Manager Panel
+# =============================================================================
+
+class BoardManagerPanel(QWidget):
+    """Search, install, update, and remove platform cores via arduino-cli."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._installed_cores = []
+        self._search_results = []
+        self._filter_mode = 0
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header, _, _ = _make_panel_header("Board Manager")
+        layout.addWidget(header)
+
+        body = QWidget()
+        body.setStyleSheet(f"background:{C['bg_dark']};")
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(16, 12, 16, 12)
+        bl.setSpacing(10)
+
+        # Search + index row
+        search_row = QHBoxLayout()
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("Search boards/platforms...")
+        self._search_input.setStyleSheet(SETTINGS_INPUT)
+        self._search_input.returnPressed.connect(self._search)
+        search_row.addWidget(self._search_input, stretch=1)
+        search_btn = QPushButton("Search")
+        search_btn.setStyleSheet(BTN_SM_PRIMARY)
+        search_btn.clicked.connect(self._search)
+        search_row.addWidget(search_btn)
+        index_btn = QPushButton("Update Index")
+        index_btn.setStyleSheet(BTN_SM_GHOST)
+        index_btn.clicked.connect(self._update_index)
+        search_row.addWidget(index_btn)
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setStyleSheet(BTN_SM_GHOST)
+        refresh_btn.clicked.connect(self._refresh_installed)
+        search_row.addWidget(refresh_btn)
+        bl.addLayout(search_row)
+
+        # Filter combo
+        self._filter_combo = QComboBox()
+        self._filter_combo.addItems(["Installed", "Search Results", "Updatable"])
+        self._filter_combo.setStyleSheet(SETTINGS_COMBO)
+        self._filter_combo.currentIndexChanged.connect(self._apply_filter)
+        bl.addWidget(self._filter_combo)
+
+        # Table
+        self._table = QTableWidget()
+        self._table.setColumnCount(4)
+        self._table.setHorizontalHeaderLabels(
+            ["Platform", "ID", "Version", "Status"])
+        self._table.horizontalHeader().setStyleSheet(SETTINGS_TBL_HDR)
+        self._table.setStyleSheet(SETTINGS_TABLE)
+        self._table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        hdr.resizeSection(1, 140)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        hdr.resizeSection(2, 80)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        hdr.resizeSection(3, 120)
+        bl.addWidget(self._table, stretch=1)
+
+        # Action buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        install_btn = QPushButton("Install")
+        install_btn.setStyleSheet(BTN_SM_PRIMARY)
+        install_btn.clicked.connect(self._install)
+        btn_row.addWidget(install_btn)
+        update_btn = QPushButton("Update")
+        update_btn.setStyleSheet(BTN_SM_SECONDARY)
+        update_btn.clicked.connect(self._update)
+        btn_row.addWidget(update_btn)
+        remove_btn = QPushButton("Remove")
+        remove_btn.setStyleSheet(BTN_SM_DANGER)
+        remove_btn.clicked.connect(self._remove)
+        btn_row.addWidget(remove_btn)
+        btn_row.addStretch()
+        bl.addLayout(btn_row)
+
+        # Status
+        self._status = QLabel("")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        bl.addWidget(self._status)
+
+        layout.addWidget(body, stretch=1)
+        QTimer.singleShot(500, self._refresh_installed)
+
+    def _selected_id(self):
+        row = self._table.currentRow()
+        if row < 0:
+            return None
+        item = self._table.item(row, 1)
+        return item.text() if item else None
+
+    def _refresh_installed(self):
+        self._status.setText("Loading installed platforms...")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+
+        def go():
+            try:
+                r = subprocess.run(
+                    ["arduino-cli", "core", "list", "--format", "json"],
+                    capture_output=True, text=True, timeout=30)
+                data = json.loads(r.stdout) if r.stdout.strip() else []
+                if isinstance(data, dict):
+                    data = data.get("platforms", [])
+                QTimer.singleShot(0, lambda: self._on_installed(data))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_error(str(e)))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _on_installed(self, data):
+        self._installed_cores = data
+        self._filter_combo.setCurrentIndex(0)
+        self._show_installed()
+
+    def _on_error(self, msg):
+        self._status.setText(f"Error: {msg}")
+        self._status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+
+    def _show_installed(self):
+        self._table.setRowCount(0)
+        for item in self._installed_cores:
+            name = item.get("name", item.get("Name", "?"))
+            pid = item.get("id", item.get("ID", "?"))
+            ver = item.get("installed", item.get("installed_version",
+                           item.get("Installed", "?")))
+            latest = item.get("latest", item.get("latest_version",
+                              item.get("Latest", ver)))
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            self._table.setItem(row, 0, QTableWidgetItem(str(name)))
+            self._table.setItem(row, 1, QTableWidgetItem(str(pid)))
+            self._table.setItem(row, 2, QTableWidgetItem(str(ver)))
+            if latest and str(latest) != str(ver):
+                st = QTableWidgetItem(f"Update → {latest}")
+                st.setForeground(QColor(C['fg_warn']))
+            else:
+                st = QTableWidgetItem("Installed")
+                st.setForeground(QColor(C['fg_ok']))
+            self._table.setItem(row, 3, st)
+        self._status.setText(f"{self._table.rowCount()} installed platforms")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+
+    def _show_search_results(self):
+        self._table.setRowCount(0)
+        installed_ids = {item.get("id", item.get("ID", ""))
+                         for item in self._installed_cores}
+        for item in self._search_results:
+            name = item.get("name", item.get("Name", "?"))
+            pid = item.get("id", item.get("ID", "?"))
+            ver = item.get("latest", item.get("latest_version",
+                           item.get("Latest", "?")))
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            self._table.setItem(row, 0, QTableWidgetItem(str(name)))
+            self._table.setItem(row, 1, QTableWidgetItem(str(pid)))
+            self._table.setItem(row, 2, QTableWidgetItem(str(ver)))
+            if pid in installed_ids:
+                st = QTableWidgetItem("Installed")
+                st.setForeground(QColor(C['fg_ok']))
+            else:
+                st = QTableWidgetItem("Available")
+                st.setForeground(QColor(C['fg_dim']))
+            self._table.setItem(row, 3, st)
+        self._status.setText(f"{self._table.rowCount()} results")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+
+    def _show_updatable(self):
+        self._table.setRowCount(0)
+        for item in self._installed_cores:
+            name = item.get("name", item.get("Name", "?"))
+            pid = item.get("id", item.get("ID", "?"))
+            ver = item.get("installed", item.get("installed_version",
+                           item.get("Installed", "?")))
+            latest = item.get("latest", item.get("latest_version",
+                              item.get("Latest", ver)))
+            if latest and str(latest) != str(ver):
+                row = self._table.rowCount()
+                self._table.insertRow(row)
+                self._table.setItem(row, 0, QTableWidgetItem(str(name)))
+                self._table.setItem(row, 1, QTableWidgetItem(str(pid)))
+                self._table.setItem(row, 2, QTableWidgetItem(str(ver)))
+                st = QTableWidgetItem(f"Update → {latest}")
+                st.setForeground(QColor(C['fg_warn']))
+                self._table.setItem(row, 3, st)
+        self._status.setText(f"{self._table.rowCount()} updatable")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+
+    def _apply_filter(self, idx):
+        self._filter_mode = idx
+        if idx == 0:
+            self._show_installed()
+        elif idx == 1:
+            self._show_search_results()
+        elif idx == 2:
+            self._show_updatable()
+
+    def _search(self):
+        query = self._search_input.text().strip()
+        if not query:
+            return
+        self._status.setText(f"Searching '{query}'...")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+
+        def go():
+            try:
+                r = subprocess.run(
+                    ["arduino-cli", "core", "search", query,
+                     "--format", "json"],
+                    capture_output=True, text=True, timeout=30)
+                data = json.loads(r.stdout) if r.stdout.strip() else {}
+                platforms = data.get("platforms", data) if isinstance(
+                    data, dict) else data
+                if not isinstance(platforms, list):
+                    platforms = []
+                QTimer.singleShot(0, lambda: self._on_search(platforms))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_error(str(e)))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _on_search(self, platforms):
+        self._search_results = platforms
+        self._filter_combo.setCurrentIndex(1)
+
+    def _install(self):
+        pid = self._selected_id()
+        if not pid:
+            return
+        self._status.setText(f"Installing {pid}...")
+        self._status.setStyleSheet(f"color:{C['fg_link']};{FONT_SMALL}")
+
+        def go():
+            try:
+                r = subprocess.run(
+                    ["arduino-cli", "core", "install", pid],
+                    capture_output=True, text=True, timeout=300)
+                if r.returncode == 0:
+                    QTimer.singleShot(0, lambda: self._on_action_done(
+                        f"Installed {pid}", True))
+                else:
+                    QTimer.singleShot(0, lambda: self._on_action_done(
+                        r.stderr.strip() or "Install failed", False))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_action_done(
+                    str(e), False))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _update(self):
+        self._install()
+
+    def _remove(self):
+        pid = self._selected_id()
+        if not pid:
+            return
+        reply = QMessageBox.question(
+            self, "Remove Platform",
+            f"Remove platform '{pid}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._status.setText(f"Removing {pid}...")
+        self._status.setStyleSheet(f"color:{C['fg_link']};{FONT_SMALL}")
+
+        def go():
+            try:
+                r = subprocess.run(
+                    ["arduino-cli", "core", "uninstall", pid],
+                    capture_output=True, text=True, timeout=60)
+                if r.returncode == 0:
+                    QTimer.singleShot(0, lambda: self._on_action_done(
+                        f"Removed {pid}", True))
+                else:
+                    QTimer.singleShot(0, lambda: self._on_action_done(
+                        r.stderr.strip() or "Remove failed", False))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_action_done(
+                    str(e), False))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _on_action_done(self, msg, success):
+        self._status.setText(msg)
+        self._status.setStyleSheet(
+            f"color:{C['fg_ok'] if success else C['fg_err']};{FONT_SMALL}")
+        if success:
+            self._refresh_installed()
+
+    def _update_index(self):
+        self._status.setText("Updating board index...")
+        self._status.setStyleSheet(f"color:{C['fg_link']};{FONT_SMALL}")
+
+        def go():
+            try:
+                r = subprocess.run(
+                    ["arduino-cli", "core", "update-index"],
+                    capture_output=True, text=True, timeout=60)
+                if r.returncode == 0:
+                    QTimer.singleShot(0, lambda: self._on_action_done(
+                        "Board index updated", True))
+                else:
+                    QTimer.singleShot(0, lambda: self._on_action_done(
+                        r.stderr.strip() or "Update failed", False))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_action_done(
+                    str(e), False))
+        threading.Thread(target=go, daemon=True).start()
 
 
 # =============================================================================
@@ -2978,17 +3665,17 @@ class ChatPanel(QWidget):
                         e.priority = 2
                 target_entry.priority = 0
 
-        # Include full Teensy API reference at lowest priority for .ino projects
-        if (os.path.exists(_TEENSY_API_REF_PATH)
-                and any(f.endswith('.ino') for f in all_files)):
-            try:
-                with open(_TEENSY_API_REF_PATH, 'r', encoding='utf-8') as _f:
-                    api_content = _f.read()
-                self._working_set.add(
-                    _TEENSY_API_REF_PATH,
-                    'docs/TEENSY_API_REFERENCE.md', 3, api_content)
-            except OSError:
-                pass
+        # Include reference documents at lowest priority for .ino projects
+        if any(f.endswith('.ino') for f in all_files):
+            for ref_path in _load_ref_docs():
+                if os.path.exists(ref_path):
+                    try:
+                        with open(ref_path, 'r', encoding='utf-8') as _f:
+                            ref_content = _f.read()
+                        rel_name = f'ref/{os.path.basename(ref_path)}'
+                        self._working_set.add(ref_path, rel_name, 3, ref_content)
+                    except OSError:
+                        pass
 
         self._update_context_display(proj_name, proj, sorted(all_files.keys()))
 
@@ -6388,6 +7075,52 @@ class ModelsTab(QWidget):
         c11.addWidget(create_card)
         grid.addWidget(cell11, 1, 1, Qt.AlignmentFlag.AlignTop)
 
+        # ── Row 2 (spanning both columns): Reference Documents ─────────────
+        cell20 = QWidget()
+        c20 = QVBoxLayout(cell20); c20.setContentsMargins(0, 0, 0, 0); c20.setSpacing(8)
+
+        hdr20 = QHBoxLayout(); hdr20.setSpacing(6)
+        t20 = QLabel("REFERENCE DOCUMENTS"); t20.setStyleSheet(SETTINGS_STITLE)
+        hdr20.addWidget(t20); hdr20.addStretch()
+        hint20 = QLabel("Markdown/text files included in AI context for .ino projects")
+        hint20.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL}")
+        hdr20.addWidget(hint20)
+        c20.addLayout(hdr20)
+
+        self.ref_table = QTableWidget()
+        self.ref_table.setColumnCount(3)
+        self.ref_table.setHorizontalHeaderLabels(["File", "Size", "Path"])
+        self.ref_table.horizontalHeader().setStyleSheet(SETTINGS_TBL_HDR)
+        self.ref_table.setStyleSheet(SETTINGS_TABLE)
+        self.ref_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.ref_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.ref_table.setMaximumHeight(150)
+        self.ref_table.verticalHeader().setVisible(False)
+        rhdr = self.ref_table.horizontalHeader()
+        rhdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        rhdr.resizeSection(0, 180)
+        rhdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        rhdr.resizeSection(1, 64)
+        rhdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        c20.addWidget(self.ref_table)
+
+        btn_row20 = QHBoxLayout(); btn_row20.setSpacing(6)
+        add_ref_btn = QPushButton("Add…"); add_ref_btn.setStyleSheet(BTN_SM_PRIMARY)
+        add_ref_btn.clicked.connect(self._add_ref_doc); btn_row20.addWidget(add_ref_btn)
+        rm_ref_btn = QPushButton("Remove"); rm_ref_btn.setStyleSheet(BTN_SM_DANGER)
+        rm_ref_btn.clicked.connect(self._remove_ref_doc); btn_row20.addWidget(rm_ref_btn)
+        prev_ref_btn = QPushButton("Preview"); prev_ref_btn.setStyleSheet(BTN_SM_GHOST)
+        prev_ref_btn.clicked.connect(self._preview_ref_doc); btn_row20.addWidget(prev_ref_btn)
+        btn_row20.addStretch()
+        c20.addLayout(btn_row20)
+
+        self.ref_status = QLabel("")
+        self.ref_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        c20.addWidget(self.ref_status)
+
+        grid.addWidget(cell20, 2, 0, 1, 2, Qt.AlignmentFlag.AlignTop)
+
         scroll_layout.addLayout(grid)
         scroll_layout.addStretch()
         scroll.setWidget(content)
@@ -6396,6 +7129,7 @@ class ModelsTab(QWidget):
         outer.addWidget(scroll)
 
         self._populate_curated_list()
+        self._populate_ref_docs_table()
 
     def _build_mf(self):
         lines = [f"FROM {self.base_cb.currentText().strip()}"]
@@ -6830,6 +7564,92 @@ class ModelsTab(QWidget):
         else:
             self.pull_status.setText(f"Pull failed: {name}")
             self.pull_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+
+    # ── Reference Documents management ─────────────────────────────────────
+
+    def _populate_ref_docs_table(self):
+        docs = _load_ref_docs()
+        self.ref_table.setRowCount(len(docs))
+        for i, path in enumerate(docs):
+            name_item = QTableWidgetItem(os.path.basename(path))
+            name_item.setData(Qt.ItemDataRole.UserRole, path)
+            self.ref_table.setItem(i, 0, name_item)
+            try:
+                size = os.path.getsize(path)
+                if size < 1024:
+                    sz = f"{size} B"
+                else:
+                    sz = f"{size // 1024} KB"
+            except OSError:
+                sz = "missing"
+            self.ref_table.setItem(i, 1, QTableWidgetItem(sz))
+            self.ref_table.setItem(i, 2, QTableWidgetItem(path))
+        self.ref_status.setText(f"{len(docs)} reference document(s)")
+        self.ref_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+
+    def _add_ref_doc(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Add Reference Documents", "",
+            "Text/Markdown (*.md *.txt *.h *.c *.cpp *.ino);;All Files (*)")
+        if not paths:
+            return
+        docs = _load_ref_docs()
+        added = 0
+        for p in paths:
+            if p not in docs:
+                docs.append(p)
+                added += 1
+        _save_ref_docs(docs)
+        self._populate_ref_docs_table()
+        if added:
+            self.ref_status.setText(f"Added {added} document(s)")
+            self.ref_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+
+    def _remove_ref_doc(self):
+        row = self.ref_table.currentRow()
+        if row < 0:
+            self.ref_status.setText("Select a document to remove")
+            self.ref_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+            return
+        item = self.ref_table.item(row, 0)
+        path = item.data(Qt.ItemDataRole.UserRole)
+        docs = _load_ref_docs()
+        if path in docs:
+            docs.remove(path)
+        _save_ref_docs(docs)
+        self._populate_ref_docs_table()
+
+    def _preview_ref_doc(self):
+        row = self.ref_table.currentRow()
+        if row < 0:
+            self.ref_status.setText("Select a document to preview")
+            self.ref_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+            return
+        item = self.ref_table.item(row, 0)
+        path = item.data(Qt.ItemDataRole.UserRole)
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read(8000)  # preview first 8KB
+        except OSError as e:
+            self.ref_status.setText(f"Cannot read: {e}")
+            self.ref_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Preview — {os.path.basename(path)}")
+        dlg.resize(600, 400)
+        lay = QVBoxLayout(dlg)
+        te = QPlainTextEdit()
+        te.setReadOnly(True)
+        te.setPlainText(content)
+        te.setStyleSheet(
+            f"background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};{FONT_CODE}")
+        lay.addWidget(te)
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet(BTN_SM_SECONDARY)
+        close_btn.clicked.connect(dlg.accept)
+        lay.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        dlg.exec()
 
 
 # =============================================================================
@@ -8129,6 +8949,8 @@ class MainWindow(QMainWindow):
         self._compile_badge.reposition()
         self.btn_chat = SidebarButton("AI", "AI Chat")
         self.btn_files = FileSidebarButton("Files")
+        self.btn_libs = LibrarySidebarButton("Libraries")
+        self.btn_boards = BoardSidebarButton("Boards")
         self.btn_git = GitSidebarButton("Git")
         self.btn_serial = SerialSidebarButton("Serial Monitor")
         self.btn_settings = SettingsSidebarButton("Settings")
@@ -8139,10 +8961,14 @@ class MainWindow(QMainWindow):
         self.btn_settings.clicked.connect(lambda: self._switch_view(3))
         self.btn_git.clicked.connect(lambda: self._switch_view(4))
         self.btn_serial.clicked.connect(lambda: self._switch_view(5))
+        self.btn_libs.clicked.connect(lambda: self._switch_view(6))
+        self.btn_boards.clicked.connect(lambda: self._switch_view(7))
 
         sb_layout.addWidget(self.btn_code)
         sb_layout.addWidget(self.btn_chat)
         sb_layout.addWidget(self.btn_files)
+        sb_layout.addWidget(self.btn_libs)
+        sb_layout.addWidget(self.btn_boards)
         sb_layout.addWidget(self.btn_git)
         sb_layout.addWidget(self.btn_serial)
         sb_layout.addStretch()
@@ -8264,12 +9090,22 @@ class MainWindow(QMainWindow):
         self.serial_monitor = SerialMonitor()
         self.view_stack.addWidget(self.serial_monitor)
 
+        # View 6: Library Manager
+        self.lib_manager = LibraryManagerPanel()
+        self.lib_manager.include_requested.connect(self._on_include_library)
+        self.view_stack.addWidget(self.lib_manager)
+
+        # View 7: Board Manager
+        self.board_manager = BoardManagerPanel()
+        self.view_stack.addWidget(self.board_manager)
+
         main_layout.addWidget(self.view_stack)
 
     def _switch_view(self, idx):
         self.view_stack.setCurrentIndex(idx)
         for i, btn in enumerate([self.btn_code, self.btn_chat, self.btn_files,
-                                 self.btn_settings, self.btn_git, self.btn_serial]):
+                                 self.btn_settings, self.btn_git, self.btn_serial,
+                                 self.btn_libs, self.btn_boards]):
             btn.setChecked(i == idx)
         if idx == 4:
             self.git_panel.refresh_status()
@@ -8601,6 +9437,9 @@ class MainWindow(QMainWindow):
         sm = mb.addMenu("Sketch")
         sm.addAction(self._make_action("Verify / Compile", self._compile, "Ctrl+B"))
         sm.addAction(self._make_action("Upload", self._upload, "Ctrl+U"))
+        sm.addSeparator()
+        self._include_lib_menu = sm.addMenu("Include Library")
+        self._include_lib_menu.aboutToShow.connect(self._populate_include_menu)
 
         # ── Tools ──
         tm = mb.addMenu("Tools")
@@ -8624,6 +9463,8 @@ class MainWindow(QMainWindow):
         vm.addAction(self._make_action("Files", lambda: self._switch_view(2), "Ctrl+3"))
         vm.addAction(self._make_action("Settings", lambda: self._switch_view(3), "Ctrl+4"))
         vm.addAction(self._make_action("Git", lambda: self._switch_view(4), "Ctrl+5"))
+        vm.addAction(self._make_action("Libraries", lambda: self._switch_view(6), "Ctrl+6"))
+        vm.addAction(self._make_action("Boards", lambda: self._switch_view(7), "Ctrl+7"))
 
         # ── Help ──
         hm = mb.addMenu("Help")
@@ -8751,6 +9592,16 @@ class MainWindow(QMainWindow):
             "Path to arduino-cli (or leave as 'arduino-cli')")
         bg_layout.addRow("arduino-cli:", arduino_cli_input)
 
+        board_urls_input = QPlainTextEdit()
+        board_urls_input.setPlainText(
+            "\n".join(cfg.get("additional_board_urls", [])))
+        board_urls_input.setPlaceholderText("One URL per line")
+        board_urls_input.setMaximumHeight(60)
+        board_urls_input.setStyleSheet(
+            f"QPlainTextEdit{{background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};border-radius:3px;padding:4px 8px;}}")
+        bg_layout.addRow("Board URLs:", board_urls_input)
+
         layout.addWidget(build_group)
 
         # ── Buttons ──
@@ -8770,6 +9621,9 @@ class MainWindow(QMainWindow):
             cfg["tab_width"] = tab_spin.value()
             cfg["ollama_url"] = ollama_url_input.text().strip()
             cfg["arduino_cli_path"] = arduino_cli_input.text().strip()
+            urls = [u.strip() for u in board_urls_input.toPlainText().split('\n')
+                    if u.strip()]
+            cfg["additional_board_urls"] = urls
             _save_config(cfg)
             self._apply_preferences(cfg)
 
@@ -8794,6 +9648,62 @@ class MainWindow(QMainWindow):
         # Ollama URL — update global
         new_url = cfg.get("ollama_url", "http://localhost:11434").rstrip("/")
         OLLAMA_URL = new_url
+        # Board manager additional URLs
+        urls = cfg.get("additional_board_urls", [])
+        if urls:
+            cli = cfg.get("arduino_cli_path", "arduino-cli")
+            try:
+                subprocess.run(
+                    [cli, "config", "set", "board_manager.additional_urls"] + urls,
+                    capture_output=True, timeout=10)
+            except Exception:
+                pass
+
+    def _on_include_library(self, name):
+        """Insert #include <LibName.h> into the active editor."""
+        ed = self.editor.current_editor()
+        if not ed:
+            return
+        include_line = f'#include <{name}.h>'
+        # Check if already included
+        if HAS_QSCINTILLA:
+            text = ed.text()
+        else:
+            text = ed.toPlainText()
+        if include_line in text:
+            return
+        # Find last #include line
+        lines = text.split('\n')
+        last_include = -1
+        for i, line in enumerate(lines):
+            if line.strip().startswith('#include'):
+                last_include = i
+        insert_at = last_include + 1 if last_include >= 0 else 0
+        if HAS_QSCINTILLA:
+            ed.setCursorPosition(insert_at, 0)
+            ed.insert(include_line + '\n')
+        else:
+            cursor = ed.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start)
+            for _ in range(insert_at):
+                cursor.movePosition(cursor.MoveOperation.Down)
+            cursor.insertText(include_line + '\n')
+        self._switch_view(0)
+
+    def _populate_include_menu(self):
+        """Dynamically fill Sketch > Include Library submenu."""
+        self._include_lib_menu.clear()
+        if hasattr(self, 'lib_manager') and self.lib_manager._installed_libs:
+            for item in self.lib_manager._installed_libs:
+                lib = item.get("library", item)
+                name = lib.get("name", "")
+                if name:
+                    action = self._include_lib_menu.addAction(name)
+                    action.triggered.connect(
+                        lambda checked, n=name: self._on_include_library(n))
+        self._include_lib_menu.addSeparator()
+        manage_action = self._include_lib_menu.addAction("Manage Libraries...")
+        manage_action.triggered.connect(lambda: self._switch_view(6))
 
     def _on_branch_changed(self):
         """Reload all project files after a git checkout/merge."""
@@ -9320,7 +10230,7 @@ class MainWindow(QMainWindow):
         self._switch_view(0)
         self.editor.goto_line(filepath, line)
 
-    _PANEL_NAMES = {0: "editor", 1: "chat", 2: "files", 3: "settings", 4: "git", 5: "serial"}
+    _PANEL_NAMES = {0: "editor", 1: "chat", 2: "files", 3: "settings", 4: "git", 5: "serial", 6: "libraries", 7: "boards"}
     _PANEL_INDICES = {v: k for k, v in _PANEL_NAMES.items()}
 
     def _save_project_state(self):
