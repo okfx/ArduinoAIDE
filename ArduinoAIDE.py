@@ -230,13 +230,16 @@ class WorkingSet:
         ]
         if included:
             parts.append(
-                f"[Included {len(included)} file(s), {len(stubs)} excluded by budget]")
+                f"=== FILES IN YOUR CONTEXT ({len(included)} files — you can read and edit these directly) ===")
+            if stubs:
+                parts.append(f"[{len(stubs)} additional file(s) excluded by budget]")
             parts.append("")
             for e in included:
                 label = "ACTIVE FILE" if e.priority == 0 else "FILE"
                 parts.append(f"========== {label}: {e.rel_path} ==========")
                 parts.append(e.content)
                 parts.append(f"========== END: {e.rel_path} ==========\n")
+            parts.append("=== END OF FILE CONTEXT ===")
         if stubs:
             parts.extend(stubs)
         return "\n".join(parts)
@@ -490,15 +493,23 @@ PROJECT_EXTENSIONS = {".ino", ".cpp", ".c", ".h", ".hpp", ".md", ".txt", ".json"
 TARGET_EXTENSIONS = {".ino", ".cpp", ".c", ".h", ".hpp"}  # code extensions for file-targeting detection
 PROJECT_SKIP_DIRS = {'.git', '__pycache__', 'build', 'node_modules', '.venv', 'venv'}
 
-SYSTEM_PROMPT = """You are an expert embedded C/C++ developer for Teensy microcontrollers (PJRC), running inside an IDE.
-You write clean, efficient code for real-time applications.
-You understand hardware registers, interrupts, DMA, timers, and peripheral configuration.
+SYSTEM_PROMPT = """You are an embedded-systems coding assistant integrated into an IDE for Teensy microcontrollers (PJRC).
+You write clean, efficient C/C++ for real-time applications. You understand hardware registers, interrupts, DMA, timers, and peripheral configuration.
 
-IMPORTANT CONTEXT: You can see the ENTIRE project — every file and the full directory structure are provided automatically with every message. You have complete project knowledge.
+YOUR ROLE: Act, don't ask. The user's project files are included in every message — you already have them. Produce code edits directly.
 
-CRITICAL: You are running inside a code editor IDE. You CAN and SHOULD write code directly.
-The IDE will parse your output and apply changes to the files. NEVER refuse to write code.
-ALWAYS provide concrete code when the user asks for changes.
+BEHAVIOR RULES:
+- When asked to change, fix, add, or remove code: produce <<<EDIT blocks immediately. Do not explain what you would do — do it.
+- When asked to explain or analyze code: respond in plain text, no edit blocks.
+- When compiler errors are included: produce <<<EDIT blocks that fix them. Do not ask which errors or which file.
+- NEVER ask the user to "provide", "share", or "paste" a file — you already have it.
+- NEVER say "please provide the path" — look at the files in your context.
+- NEVER respond with only "Sure, I can help with that" — always include an edit or substantive answer.
+- Prefer action over explanation. If the intent is clear, produce the edit.
+- If genuinely ambiguous, ask ONE short clarifying question — never multiple.
+- If you need a file not in your context, name it and the IDE will add it.
+
+EDIT FORMAT — output this exact syntax to modify files:
 
 To replace existing code in a file, output this exact format:
 <<<EDIT path/to/filename.ext
@@ -2235,10 +2246,11 @@ class ChatPanel(QWidget):
 
         if not diags:
             # No structured diagnostics — send raw text only
-            return f"[COMPILER ERRORS:]\n```\n{raw}\n```\n"
+            return (f"[COMPILER ERRORS — produce <<<EDIT blocks to fix these:]\n"
+                    f"```\n{raw}\n```\n")
 
         # --- Diagnostic summary table ---
-        parts = ["[COMPILER ERRORS — STRUCTURED DIAGNOSTICS:]", ""]
+        parts = ["[COMPILER ERRORS — produce <<<EDIT blocks to fix these:]", ""]
         for i, d in enumerate(diags[:15]):  # Cap at 15 to avoid prompt bloat
             loc = f"{d.file}:{d.line}"
             if d.column:
@@ -2639,8 +2651,7 @@ class ChatPanel(QWidget):
             parts = [
                 f"[PROJECT: {proj_name}]", f"[DIRECTORY: {proj}]", "",
                 "[PROJECT STRUCTURE]", tree, "",
-                f"[The following {len(all_files)} files are in the project. "
-                f"This is the COMPLETE content of each file.]", "",
+                f"=== FILES IN YOUR CONTEXT ({len(all_files)} files — you can read and edit these directly) ===", "",
             ]
             for rel_path, content in sorted(all_files.items()):
                 parts.append(f"========== FILE: {rel_path} ==========\n{content}\n========== END: {rel_path} ==========\n")
@@ -3238,17 +3249,17 @@ class ChatPanel(QWidget):
         # Targeting reminder — stronger when a named file was detected
         if self._target_override:
             target_reminder = (
-                f"\n[REMINDER: You are inside an IDE. You CAN and MUST edit files directly. "
-                "Use <<<EDIT path\\n<<<OLD\\n...\\n>>>NEW\\n...\\n>>>END to modify files. "
-                "NEVER say you cannot edit files. ALWAYS output code edits when asked.]\n"
+                f"\n[REMINDER: The project files are above — you already have them. "
+                "Respond with <<<EDIT blocks when changes are needed. Do not ask for file paths or permission. "
+                "Use <<<EDIT path\\n<<<OLD\\n...\\n>>>NEW\\n...\\n>>>END format.]\n"
                 f"(Edit {self._target_override} as requested — not the active file.)\n"
                 f"\n[USER REQUEST:]\n{text}"
             )
         else:
             target_reminder = (
-                "\n[REMINDER: You are inside an IDE. You CAN and MUST edit files directly. "
-                "Use <<<EDIT path\\n<<<OLD\\n...\\n>>>NEW\\n...\\n>>>END to modify files. "
-                "NEVER say you cannot edit files. ALWAYS output code edits when asked. "
+                "\n[REMINDER: The project files are above — you already have them. "
+                "Respond with <<<EDIT blocks when changes are needed. Do not ask for file paths or permission. "
+                "Use <<<EDIT path\\n<<<OLD\\n...\\n>>>NEW\\n...\\n>>>END format. "
                 "Edit the file the USER mentions, NOT the active file unless they ask for it.]\n"
                 f"\n[USER REQUEST:]\n{text}"
             )
