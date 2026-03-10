@@ -3627,8 +3627,53 @@ class ChatPanel(QWidget):
         if '\\n<<<' in text or '\\n>>>' in text:
             text = text.replace('\\n', '\n')
 
+        # Force every recognized marker onto its own line.
+        # Some local models put markers on the same line as content,
+        # e.g. "<<<EDIT file <<<OLD // code..." — the state machine needs
+        # each marker at the start of its own line.
+        # Markers that take a filename argument — newline before only
+        for m in ['<<<EDIT ', '<<<FILE ',
+                   '<<<INSERT_BEFORE ', '<<<INSERT_AFTER ']:
+            text = text.replace(m, '\n' + m)
+        # Standalone markers — newline before AND after trailing content
+        import re as _re
+        for m in ['<<<OLD', '>>>NEW', '>>>END', '>>>FILE',
+                   '<<<ANCHOR', '>>>ANCHOR',
+                   '<<<CONTENT', '>>>CONTENT']:
+            # First: if marker has trailing non-whitespace, split it off
+            # e.g. "<<<OLD // code" → "<<<OLD\n// code"
+            text = _re.sub(_re.escape(m) + r'[ \t]+(\S)', m + '\n\\1', text)
+            # Then: ensure marker starts on its own line
+            text = text.replace(m, '\n' + m)
+
+        # Strip markdown code fences that some LLMs wrap around old/new content.
+        # e.g. <<<OLD\n```cpp\n// code\n```\n>>>NEW
+        # Remove lines that are just ``` or ```<lang> inside edit blocks.
+        cleaned = []
+        for raw_line in text.split('\n'):
+            stripped = raw_line.strip()
+            if stripped == '```' or (stripped.startswith('```') and
+                    len(stripped) < 20 and ' ' not in stripped.lstrip('`')):
+                # Could be a code fence — check if we're inside an edit block
+                # by scanning backward for the most recent marker
+                in_block = False
+                for prev in reversed(cleaned):
+                    ps = prev.strip()
+                    if (ps.startswith('<<<OLD') or ps.startswith('>>>NEW') or
+                            ps.startswith('<<<FILE ') or ps.startswith('<<<ANCHOR') or
+                            ps.startswith('<<<CONTENT')):
+                        in_block = True
+                        break
+                    if (ps.startswith('>>>END') or ps.startswith('>>>FILE') or
+                            ps.startswith('>>>ANCHOR') or ps.startswith('>>>CONTENT') or
+                            ps.startswith('<<<EDIT ')):
+                        break
+                if in_block:
+                    continue  # skip this fence line
+            cleaned.append(raw_line)
+
         edits = []
-        lines = text.split('\n')
+        lines = cleaned
         state = 'idle'
         filename = ''
         old_lines = []
