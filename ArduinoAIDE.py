@@ -508,6 +508,8 @@ BEHAVIOR RULES:
 - Prefer action over explanation. If the intent is clear, produce the edit.
 - If genuinely ambiguous, ask ONE short clarifying question — never multiple.
 - If you need a file not in your context, name it and the IDE will add it.
+- Be CONCISE. Give the shortest useful response. When the user asks for a code change, produce the edit with at most one sentence of explanation. Do not lecture, do not provide tutorials, do not show alternative approaches unless asked.
+- If the user wants more detail, they will ask. Default to brevity.
 
 EDIT FORMAT — output this exact syntax to modify files:
 
@@ -1425,6 +1427,7 @@ else:
 class TabbedEditor(QWidget):
     file_changed = pyqtSignal(str)
     ai_action_requested = pyqtSignal(str)  # propagated from CodeEditor
+    editor_opened = pyqtSignal(object)      # emits CodeEditor widget when a new tab is created
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1455,6 +1458,7 @@ class TabbedEditor(QWidget):
             idx = self.tabs.addTab(editor, os.path.basename(filepath))
             self.tabs.setCurrentIndex(idx)
             self.file_changed.emit(filepath)
+            self.editor_opened.emit(editor)
             return True
         return False
 
@@ -2000,6 +2004,7 @@ class ChatPanel(QWidget):
         self._last_work_result = None             # AIWorkResult from most recent AI turn
         self._selection_mode = False              # True when using selection-based edit flow
         self._selection_edit = None               # dict with selection coords for selection mode
+        self._captured_selection = None            # snapshot of editor selection (survives focus loss)
         self._gen_start_time = None               # time.time() when generation started
         self._gen_token_count = 0                  # token count during streaming
         self._stats_widget = None                  # stats row widget during streaming
@@ -2199,6 +2204,33 @@ class ChatPanel(QWidget):
         self.fix_continuation_bar.hide()
         layout.addWidget(self.fix_continuation_bar)
 
+        # Selection badge — shows captured editor selection
+        sel_badge_row = QWidget()
+        sel_badge_row.setStyleSheet(f"background:{C['bg']};")
+        sbl = QHBoxLayout(sel_badge_row)
+        sbl.setContentsMargins(16, 4, 16, 0)
+        sbl.setSpacing(4)
+        self._selection_badge = QLabel()
+        self._selection_badge.setStyleSheet(
+            f"{FONT_SMALL}color:{C['teal']};background:#1e2a2a;"
+            f"border-radius:4px;padding:2px 8px;")
+        self._selection_badge.hide()
+        sbl.addWidget(self._selection_badge)
+        sel_clear = QPushButton("✕")
+        sel_clear.setFixedSize(20, 20)
+        sel_clear.setStyleSheet(
+            f"QPushButton{{color:{C['fg_dim']};background:transparent;"
+            f"border:none;{FONT_SMALL}font-weight:bold;}}"
+            f"QPushButton:hover{{color:{C['fg']};}}")
+        sel_clear.clicked.connect(self._clear_captured_selection)
+        sel_clear.hide()
+        self._selection_clear_btn = sel_clear
+        sbl.addWidget(sel_clear)
+        sbl.addStretch()
+        sel_badge_row.hide()
+        self._selection_badge_row = sel_badge_row
+        layout.addWidget(sel_badge_row)
+
         # Input area
         inp = QWidget()
         inp.setStyleSheet(f"background:{C['bg']};border-top:1px solid {C['border']};")
@@ -2283,6 +2315,81 @@ class ChatPanel(QWidget):
     def set_editor(self, editor):
         """Link to the TabbedEditor so we can read/write project files."""
         self._editor_ref = editor
+        # Connect tab changes to clear captured selection
+        editor.tabs.currentChanged.connect(self._on_editor_tab_changed)
+        # Connect selectionChanged for all existing editors
+        for fp, ed in editor._editors.items():
+            self._connect_editor_signals(ed)
+        # Auto-connect future editors
+        editor.editor_opened.connect(self._connect_editor_signals)
+
+    def _connect_editor_signals(self, editor_widget):
+        """Connect selectionChanged and textChanged for selection capture."""
+        if hasattr(editor_widget, 'selectionChanged'):
+            editor_widget.selectionChanged.connect(
+                self._on_editor_selection_changed)
+        sig = 'textChanged' if hasattr(editor_widget, 'textChanged') else None
+        if sig:
+            getattr(editor_widget, sig).connect(
+                self._on_editor_text_changed)
+
+    def _on_editor_selection_changed(self):
+        """Snapshot the editor selection when it changes (survives focus loss)."""
+        editor_widget = self.sender()
+        if not editor_widget or not hasattr(editor_widget, 'hasSelectedText'):
+            return
+        if editor_widget.hasSelectedText():
+            sel_text = editor_widget.selectedText()
+            lf, cf, lt, ct = editor_widget.getSelection()
+            # Resolve file path for this editor widget
+            file_path = None
+            if self._editor_ref:
+                for fp, ed in self._editor_ref._editors.items():
+                    if ed is editor_widget:
+                        file_path = fp
+                        break
+            if sel_text.strip() and file_path:
+                self._captured_selection = {
+                    'text': sel_text,
+                    'line_from': lf, 'col_from': cf,
+                    'line_to': lt, 'col_to': ct,
+                    'file_path': file_path,
+                }
+                self._update_selection_badge()
+        # Do NOT clear when selection is empty — might just be focus loss
+
+    def _on_editor_tab_changed(self, index):
+        """Clear captured selection when the user switches to a different file tab."""
+        self._clear_captured_selection()
+
+    def _on_editor_text_changed(self):
+        """Clear captured selection if the editor text changed and no selection remains."""
+        editor_widget = self.sender()
+        if not editor_widget:
+            return
+        if hasattr(editor_widget, 'hasSelectedText') and not editor_widget.hasSelectedText():
+            self._clear_captured_selection()
+
+    def _clear_captured_selection(self):
+        """Clear the captured selection and hide the badge."""
+        self._captured_selection = None
+        self._update_selection_badge()
+
+    def _update_selection_badge(self):
+        """Show or hide the selection badge based on _captured_selection."""
+        if self._captured_selection:
+            text = self._captured_selection['text']
+            preview = text.replace('\n', ' ').strip()
+            if len(preview) > 60:
+                preview = preview[:57] + '...'
+            self._selection_badge.setText(f'Selection: {preview}')
+            self._selection_badge.show()
+            self._selection_clear_btn.show()
+            self._selection_badge_row.show()
+        else:
+            self._selection_badge.hide()
+            self._selection_clear_btn.hide()
+            self._selection_badge_row.hide()
 
     def set_project_path(self, path):
         """Set the project directory path for context."""
@@ -3378,21 +3485,19 @@ class ChatPanel(QWidget):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        # Selection-based edit flow: if the active editor has selected text,
-        # use a simpler prompt/response format that bypasses the <<<EDIT parser
-        if self._editor_ref:
-            editor_widget = self._editor_ref.tabs.currentWidget()
-            if (editor_widget and hasattr(editor_widget, 'hasSelectedText')
-                    and editor_widget.hasSelectedText()):
-                sel_text = editor_widget.selectedText()
-                l_from, c_from, l_to, c_to = editor_widget.getSelection()
-                file_path = self._editor_ref.current_file()
-                if sel_text.strip() and file_path:
-                    self._send_selection_prompt(
-                        text, sel_text, l_from, c_from, l_to, c_to,
-                        file_path, display_text=display_text,
-                        display_code=display_code)
-                    return
+        # Selection-based edit flow: use captured selection snapshot
+        # (survives focus loss when user clicks chat input)
+        if self._captured_selection:
+            sel = self._captured_selection
+            self._captured_selection = None
+            self._update_selection_badge()
+            self._send_selection_prompt(
+                text, sel['text'],
+                sel['line_from'], sel['col_from'],
+                sel['line_to'], sel['col_to'],
+                sel['file_path'], display_text=display_text,
+                display_code=display_code)
+            return
 
         # Detect named files in user message for per-prompt targeting override
         self._target_override = self._detect_named_files(text)
@@ -3500,6 +3605,10 @@ class ChatPanel(QWidget):
         "add punctuation, or rephrase it.\n"
         "- Match the indentation of the original selection exactly. Count the "
         "leading spaces or tabs and reproduce them.\n"
+        "- Be extremely concise. Respond with ONLY the replacement text. "
+        "No explanation, no alternatives, no commentary. If the user asks "
+        "to 'explain', give a brief explanation (2-3 sentences max) — "
+        "not a tutorial.\n"
     )
 
     def _send_selection_prompt(self, user_text, selected_text,
