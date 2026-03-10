@@ -3771,18 +3771,19 @@ class ChatPanel(QWidget):
                 self._create_selection_edit(extracted)
                 return
 
-        # Refusal detection — after delimiter extraction (which takes priority)
-        # but before heuristic strategies that might mistake a refusal for code
+        # Strategy 2: Refusal detection — after delimiter extraction (which
+        # takes priority) but before heuristic strategies
         _refusal_phrases = (
             "i'm sorry", "i can't assist", "i cannot assist",
             "i can't help", "i cannot help", "i apologize",
             "i'm unable to", "i am unable to",
             "i'm not able to", "i am not able to",
             "as an ai", "as a language model",
-            "i don't have the ability", "i cannot fulfill",
-            "i can't fulfill", "against my guidelines",
-            "i must decline", "not appropriate for me",
-            "i can't do that", "i cannot do that",
+            "i must decline", "i can't do that", "i cannot do that",
+            "without more context", "can't provide a direct answer",
+            "it seems like you're asking", "it seems like you",
+            "please provide more", "could you clarify",
+            "if you have any other questions",
         )
         text_lower = text.lower()
         if any(phrase in text_lower for phrase in _refusal_phrases):
@@ -3790,7 +3791,7 @@ class ChatPanel(QWidget):
                 "AI declined to make the edit.", C['fg_warn'])
             return
 
-        # Strategy 2: Single code fence extraction
+        # Strategy 3: Single code fence extraction
         fence_matches = _re.findall(r'```(?:\w*)\n(.*?)```', text, _re.DOTALL)
         if len(fence_matches) == 1:
             candidate = fence_matches[0].strip()
@@ -3798,7 +3799,7 @@ class ChatPanel(QWidget):
                 self._create_selection_edit(candidate)
                 return
 
-        # Strategy 3: Strip wrapping code fences if entire response is fenced
+        # Strategy 4: Strip wrapping code fences if entire response is fenced
         stripped = text
         if stripped.startswith('```'):
             first_nl = stripped.find('\n')
@@ -3809,42 +3810,67 @@ class ChatPanel(QWidget):
         if stripped != text:
             text = stripped
 
-        # Strategy 4: Short response — probably just the replacement
-        if len(text) <= len(original) * 2 and '\n\n' not in text:
+        # Compute prose/code signals used by strategies 5–7
+        original_len = len(original)
+        first_line = text.strip().split('\n')[0].strip() if text.strip() else ''
+        _CODE_STARTERS = (
+            '//', '/*', '#include', '#define', '#pragma', '#if', '#else',
+            '#endif', 'void', 'int', 'float', 'char', 'bool', 'const',
+            'constexpr', 'static', 'class', 'struct', 'enum', 'if', 'for',
+            'while', 'return', 'typedef', 'unsigned', 'signed', 'long',
+            'short', 'double', 'auto', 'extern', 'volatile', 'namespace',
+            'using', 'template', 'virtual', 'public', 'private', 'protected',
+            'switch', 'case', 'break', 'continue', 'do', 'else', 'try',
+            'catch', 'throw', '{', '}', '(', '[', 'Serial', 'digital',
+            'analog', 'delay', 'pinMode', 'String', 'byte', 'uint',
+            'int8', 'int16', 'int32',
+        )
+        starts_with_code = any(
+            first_line.lower().startswith(s.lower()) for s in _CODE_STARTERS)
+        sentence_count = len(_re.findall(r'\.\s+[A-Z]', text))
+        has_list_markers = bool(
+            _re.search(r'^\d+[\.\)]\s', text, _re.MULTILINE))
+        has_markdown = '**' in text or text.strip().startswith('#')
+        is_long = len(text) > original_len * 2
+        has_paragraphs = '\n\n' in text
+
+        # Strategy 5: Short response — probably just the replacement
+        if not is_long and not has_paragraphs and sentence_count < 2:
             self._create_selection_edit(text)
             return
 
-        # Strategy 5: Explanation detection — no apply bar
-        code_starters = ('//', '#', '/*', 'void', 'int', 'float', 'char',
-                         'bool', 'const', 'static', 'class', 'struct', 'enum',
-                         'if', 'for', 'while', 'return', '#include', 'unsigned',
-                         'long', 'short', 'double', 'auto', 'extern', 'typedef',
-                         'namespace', 'template', 'using', 'public', 'private',
-                         'protected', 'virtual', 'inline', 'volatile', 'register',
-                         'switch', 'case', 'break', 'continue', 'do', 'else',
-                         'try', 'catch', 'throw', 'delete', 'new', 'sizeof',
-                         '{', '}', '(', ')', '[', ']')
-        first_word = text.split()[0] if text.split() else ''
-        is_explanation = (
-            len(text) > len(original) * 3
-            and '. ' in text
-            and not any(text.lstrip().startswith(c) for c in code_starters)
-            and not first_word.endswith(';')
-        )
-        if is_explanation:
-            # Already rendered in chat as streaming text — nothing more to do
+        # Strategy 6: Prose detection — 2+ signals means explanation
+        prose_signals = sum([
+            sentence_count >= 2,
+            is_long,
+            not starts_with_code,
+            has_list_markers,
+            has_markdown,
+            has_paragraphs,
+        ])
+        if prose_signals >= 2:
+            self._add_info_msg(
+                "AI responded with an explanation instead of a code edit. "
+                "Try rephrasing your request.", C['fg_warn'])
             return
 
-        # Fallback: treat the (possibly fence-stripped) text as replacement
-        self._create_selection_edit(text)
+        # Strategy 7: Conservative code check — response must look like code
+        if starts_with_code and sentence_count < 2 and not has_paragraphs:
+            self._create_selection_edit(text)
+            return
+
+        # Default: no edit — treat as explanation/prose
+        self._add_info_msg(
+            "AI responded with an explanation instead of a code edit. "
+            "Try rephrasing your request.", C['fg_warn'])
 
     def _create_selection_edit(self, replacement_text):
         """Create a ProposedEdit for a selection replacement and show apply bar."""
-        # Safety net: reject refusal text that slipped through extraction
+        # Safety net: reject refusal/prose that slipped through extraction
         rt_lower = replacement_text.lower()
         if any(p in rt_lower for p in (
-                "i'm sorry", "i can't assist", "i cannot",
-                "i apologize", "as an ai")):
+                "i'm sorry", "i can't", "i cannot",
+                "i apologize", "it seems like")):
             self._add_info_msg(
                 "AI declined to make the edit.", C['fg_warn'])
             return
