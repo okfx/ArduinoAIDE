@@ -4660,8 +4660,14 @@ class SerialMonitor(QWidget):
         self._reader = None
         self._connected = False
         self._timestamps = False
+        self._hex_mode = False
+        self._hex_offset = 0
+        self._hex_buffer = b""  # Buffer for incomplete hex lines
         self._auto_scroll = True
         self._line_buffer = ""  # Buffer for incomplete lines
+        self._rx_count = 0
+        self._tx_count = 0
+        self._msg_count = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -4720,12 +4726,27 @@ class SerialMonitor(QWidget):
         self.ts_check.toggled.connect(self._toggle_timestamps)
         tb_layout.addWidget(self.ts_check)
 
+        self.hex_check = QPushButton("Hex")
+        self.hex_check.setToolTip("Toggle hex display")
+        self.hex_check.setCheckable(True)
+        self.hex_check.setFixedSize(36, 28)
+        self.hex_check.setStyleSheet(BTN_GHOST)
+        self.hex_check.toggled.connect(self._toggle_hex)
+        tb_layout.addWidget(self.hex_check)
+
         clear_btn = QPushButton("Clear")
         clear_btn.setStyleSheet(BTN_GHOST)
         clear_btn.clicked.connect(self._clear_output)
         tb_layout.addWidget(clear_btn)
 
         tb_layout.addStretch()
+
+        self._counter_label = QLabel("RX: 0  TX: 0  Msgs: 0")
+        self._counter_label.setStyleSheet(
+            f"color:#666;font-family:monospace;font-size:11px;"
+            f"background:transparent;border:none;")
+        tb_layout.addWidget(self._counter_label)
+
         layout.addWidget(toolbar)
 
         # --- Output area ---
@@ -4812,6 +4833,12 @@ class SerialMonitor(QWidget):
             self._reader.start()
             self._connected = True
             self._line_buffer = ""
+            self._hex_buffer = b""
+            self._hex_offset = 0
+            self._rx_count = 0
+            self._tx_count = 0
+            self._msg_count = 0
+            self._update_counters()
             self.connect_btn.setText("Disconnect")
             self.connect_btn.setStyleSheet(BTN_DANGER)
             self.port_combo.setEnabled(False)
@@ -4835,17 +4862,37 @@ class SerialMonitor(QWidget):
         self._append_system("Disconnected")
 
     def _on_data(self, data: bytes):
-        text = data.decode("utf-8", errors="replace")
-        # Buffer incomplete lines for timestamp-accurate display
-        self._line_buffer += text
-        while "\n" in self._line_buffer:
-            line, self._line_buffer = self._line_buffer.split("\n", 1)
-            self._append_line(line)
-        # If buffer has content but no newline yet, show it after a short delay
-        if self._line_buffer and "\r" in self._line_buffer:
-            line = self._line_buffer.rstrip("\r")
-            self._line_buffer = ""
-            self._append_line(line)
+        # Update counters
+        self._rx_count += len(data)
+        self._msg_count += data.count(b'\n')
+        self._update_counters()
+
+        if self._hex_mode:
+            self._hex_buffer += data
+            # Process complete 16-byte rows
+            while len(self._hex_buffer) >= 16:
+                chunk = self._hex_buffer[:16]
+                self._hex_buffer = self._hex_buffer[16:]
+                self._append_raw(self._format_hex_line(chunk))
+                self._hex_offset += 16
+            # Flush partial row on newline boundary
+            if self._hex_buffer and b'\n' in data:
+                chunk = self._hex_buffer
+                self._hex_buffer = b""
+                self._append_raw(self._format_hex_line(chunk))
+                self._hex_offset += len(chunk)
+        else:
+            text = data.decode("utf-8", errors="replace")
+            # Buffer incomplete lines for timestamp-accurate display
+            self._line_buffer += text
+            while "\n" in self._line_buffer:
+                line, self._line_buffer = self._line_buffer.split("\n", 1)
+                self._append_line(line)
+            # If buffer has content but no newline yet, show it after a short delay
+            if self._line_buffer and "\r" in self._line_buffer:
+                line = self._line_buffer.rstrip("\r")
+                self._line_buffer = ""
+                self._append_line(line)
 
     def _append_line(self, text):
         if self._timestamps:
@@ -4876,8 +4923,77 @@ class SerialMonitor(QWidget):
     def _toggle_timestamps(self, checked):
         self._timestamps = checked
 
+    def _toggle_hex(self, checked):
+        self._hex_mode = checked
+        if checked:
+            # Flush text buffer when switching to hex
+            if self._line_buffer:
+                self._append_line(self._line_buffer)
+                self._line_buffer = ""
+        else:
+            # Flush hex buffer when switching to text
+            if self._hex_buffer:
+                self._append_raw(self._format_hex_line(self._hex_buffer))
+                self._hex_offset += len(self._hex_buffer)
+                self._hex_buffer = b""
+
+    def _format_hex_line(self, data: bytes) -> str:
+        """Format up to 16 bytes as a hex dump line."""
+        n = len(data)
+        # Offset
+        line = f"{self._hex_offset:08X}  "
+        # First 8 hex bytes
+        hex_parts = []
+        for i in range(8):
+            hex_parts.append(f"{data[i]:02X}" if i < n else "..")
+        line += " ".join(hex_parts) + "  "
+        # Next 8 hex bytes
+        hex_parts = []
+        for i in range(8, 16):
+            hex_parts.append(f"{data[i]:02X}" if i < n else "..")
+        line += " ".join(hex_parts) + "  "
+        # ASCII column
+        ascii_str = ""
+        for i in range(n):
+            b = data[i]
+            ascii_str += chr(b) if 0x20 <= b < 0x7F else "."
+        ascii_str += "." * (16 - n)
+        line += f"|{ascii_str}|"
+        return line
+
+    def _append_raw(self, text):
+        """Append text to output without timestamp processing."""
+        self.output.appendPlainText(text)
+        if self._auto_scroll:
+            sb = self.output.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
+    @staticmethod
+    def _format_si(value: int) -> str:
+        """Format integer with SI suffixes for readability."""
+        if value < 1000:
+            return str(value)
+        elif value < 1_000_000:
+            return f"{value / 1000:.1f}K"
+        elif value < 1_000_000_000:
+            return f"{value / 1_000_000:.1f}M"
+        else:
+            return f"{value / 1_000_000_000:.1f}G"
+
+    def _update_counters(self):
+        rx = self._format_si(self._rx_count)
+        tx = self._format_si(self._tx_count)
+        msgs = self._format_si(self._msg_count)
+        self._counter_label.setText(f"RX: {rx}  TX: {tx}  Msgs: {msgs}")
+
     def _clear_output(self):
         self.output.clear()
+        self._hex_offset = 0
+        self._hex_buffer = b""
+        self._rx_count = 0
+        self._tx_count = 0
+        self._msg_count = 0
+        self._update_counters()
 
     def _send(self):
         if not self._connected or not self._reader:
@@ -4887,7 +5003,10 @@ class SerialMonitor(QWidget):
             return
         ending_map = {"NL": "\n", "CR": "\r", "CR+NL": "\r\n", "None": ""}
         ending = ending_map.get(self.line_ending_combo.currentText(), "\n")
-        self._reader.write_data((text + ending).encode("utf-8"))
+        payload = (text + ending).encode("utf-8")
+        self._reader.write_data(payload)
+        self._tx_count += len(payload)
+        self._update_counters()
         self.send_input.add_to_history(text)
         self.send_input.clear()
 
