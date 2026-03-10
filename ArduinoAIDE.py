@@ -44,7 +44,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QSizePolicy, QListWidget, QListWidgetItem,
     QScrollArea, QFrame, QInputDialog, QStatusBar, QProgressBar,
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
-    QAbstractItemView, QGridLayout
+    QAbstractItemView, QGridLayout, QHeaderView
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread,
@@ -54,7 +54,7 @@ from PyQt6.QtGui import (
     QFont, QColor, QAction, QKeySequence, QTextCursor,
     QTextCharFormat, QPalette, QFileSystemModel,
     QStandardItemModel, QStandardItem, QPainter, QPen,
-    QPainterPath, QPolygonF
+    QPainterPath, QPolygonF, QPixmap, QIcon
 )
 
 try:
@@ -1629,6 +1629,24 @@ class FileBrowser(QWidget):
         self._populate(self._model.invisibleRootItem(), self._root_path)
         self.tree.expandAll()
 
+    @staticmethod
+    def _flat_folder_icon():
+        """Create a flat folder icon matching the dark theme."""
+        if not hasattr(FileBrowser, '_cached_folder_icon'):
+            px = QPixmap(16, 16)
+            px.fill(QColor(0, 0, 0, 0))
+            p = QPainter(px)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(Qt.PenStyle.NoPen)
+            # Tab portion
+            p.setBrush(QColor(C['teal']))
+            p.drawRoundedRect(1, 2, 6, 3, 1, 1)
+            # Body
+            p.drawRoundedRect(1, 4, 14, 10, 2, 2)
+            p.end()
+            FileBrowser._cached_folder_icon = QIcon(px)
+        return FileBrowser._cached_folder_icon
+
     def _populate(self, parent_item, dir_path):
         """Recursively add files and folders to the tree model."""
         try:
@@ -1638,8 +1656,10 @@ class FileBrowser(QWidget):
         # Folders first, then files
         dirs = [e for e in entries if os.path.isdir(os.path.join(dir_path, e)) and not e.startswith('.')]
         files = [e for e in entries if os.path.isfile(os.path.join(dir_path, e)) and not e.startswith('.')]
+        folder_icon = self._flat_folder_icon()
         for d in dirs:
-            item = QStandardItem(f"📁 {d}")
+            item = QStandardItem(d)
+            item.setIcon(folder_icon)
             item.setForeground(QColor(C["fg_dim"]))
             item.setData(os.path.join(dir_path, d), Qt.ItemDataRole.UserRole)
             item.setData("dir", Qt.ItemDataRole.UserRole + 1)
@@ -4566,14 +4586,18 @@ class DiagnosticPanel(QWidget):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSortingEnabled(True)
         self._table.setAlternatingRowColors(False)
         self._table.verticalHeader().setVisible(False)
         self._table.verticalHeader().setDefaultSectionSize(22)
         hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         hdr.resizeSection(0, 24)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         hdr.resizeSection(1, 160)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         hdr.resizeSection(2, 48)
-        hdr.setStretchLastSection(True)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self._table.setStyleSheet(f"""
             QTableWidget {{
                 background:{C['bg_dark']};color:{C['fg']};
@@ -4833,7 +4857,7 @@ class SerialMonitor(QWidget):
         self.hex_check = QPushButton("Hex")
         self.hex_check.setToolTip("Toggle hex display")
         self.hex_check.setCheckable(True)
-        self.hex_check.setFixedSize(36, 28)
+        self.hex_check.setFixedHeight(28)
         self.hex_check.setStyleSheet(BTN_GHOST)
         self.hex_check.toggled.connect(self._toggle_hex)
         tb_layout.addWidget(self.hex_check)
@@ -4847,7 +4871,7 @@ class SerialMonitor(QWidget):
 
         self._counter_label = QLabel("RX: 0  TX: 0  Msgs: 0")
         self._counter_label.setStyleSheet(
-            f"color:#666;font-family:monospace;font-size:11px;"
+            f"color:{C['fg_muted']};font-family:monospace;font-size:11px;"
             f"background:transparent;border:none;")
         tb_layout.addWidget(self._counter_label)
 
@@ -5493,11 +5517,17 @@ class ModelsTab(QWidget):
         self.model_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.model_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.model_table.setSortingEnabled(True)
         self.model_table.setMaximumHeight(200)
         self.model_table.verticalHeader().setVisible(False)
-        self.model_table.horizontalHeader().setStretchLastSection(True)
-        self.model_table.setColumnWidth(1, 64); self.model_table.setColumnWidth(2, 64)
-        self.model_table.setColumnWidth(3, 68)
+        mhdr = self.model_table.horizontalHeader()
+        mhdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        mhdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        mhdr.resizeSection(1, 64)
+        mhdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        mhdr.resizeSection(2, 64)
+        mhdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        mhdr.resizeSection(3, 68)
         self.model_table.itemClicked.connect(self._on_select)
         c00.addWidget(self.model_table)
 
@@ -5541,10 +5571,13 @@ class ModelsTab(QWidget):
         self.curated_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.curated_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.curated_table.setSortingEnabled(True)
         self.curated_table.setMaximumHeight(148)
         self.curated_table.verticalHeader().setVisible(False)
-        self.curated_table.horizontalHeader().setStretchLastSection(True)
-        self.curated_table.setColumnWidth(1, 64)
+        chdr = self.curated_table.horizontalHeader()
+        chdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        chdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        chdr.resizeSection(1, 64)
         c01.addWidget(self.curated_table)
 
         pull_action_row = QHBoxLayout(); pull_action_row.setSpacing(6)
@@ -6229,10 +6262,13 @@ class GitTab(QWidget):
         self._changes_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self._changes_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._changes_table.setSortingEnabled(True)
         self._changes_table.setMaximumHeight(160)
         self._changes_table.verticalHeader().setVisible(False)
-        self._changes_table.horizontalHeader().setStretchLastSection(True)
-        self._changes_table.setColumnWidth(0, 36)
+        ct_hdr = self._changes_table.horizontalHeader()
+        ct_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        ct_hdr.resizeSection(0, 36)
+        ct_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         changes_cl.addWidget(self._changes_table)
         ch_layout.addWidget(changes_card)
 
@@ -6272,10 +6308,15 @@ class GitTab(QWidget):
         self._history_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self._history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._history_table.setSortingEnabled(True)
         self._history_table.setMaximumHeight(180)
         self._history_table.verticalHeader().setVisible(False)
-        self._history_table.horizontalHeader().setStretchLastSection(True)
-        self._history_table.setColumnWidth(0, 66); self._history_table.setColumnWidth(2, 60)
+        ht_hdr = self._history_table.horizontalHeader()
+        ht_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        ht_hdr.resizeSection(0, 66)
+        ht_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        ht_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        ht_hdr.resizeSection(2, 60)
         history_cl.addWidget(self._history_table)
         hi_layout.addWidget(history_card)
         layout.addWidget(history_w)
@@ -6652,9 +6693,9 @@ class GitPanel(QWidget):
     """Git GUI with graphical branch/tag manager and console output."""
     branch_changed = pyqtSignal()  # emitted after checkout so MainWindow can reload files
 
-    _BTN = BTN_SECONDARY
-    _BTN_PRIMARY = BTN_PRIMARY
-    _BTN_DANGER = BTN_DANGER
+    _BTN = BTN_SM_SECONDARY
+    _BTN_PRIMARY = BTN_SM_PRIMARY
+    _BTN_DANGER = BTN_SM_DANGER
 
     def __init__(self, parent=None):
         super().__init__(parent)
