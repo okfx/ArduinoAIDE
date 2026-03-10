@@ -444,7 +444,7 @@ def _make_panel_header(title_text=""):
     return header, title, hl
 
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "teensy-coder"
 DEFAULT_FQBN = "teensy:avr:teensy40"
 
@@ -459,13 +459,17 @@ def _load_config():
         "board_fqbn": DEFAULT_FQBN,
         "port": "",
         "window_geometry": None,  # [x, y, width, height]
+        "recent_projects": [],
+        "editor_font_size": 13,
+        "tab_width": 2,
+        "ollama_url": "http://localhost:11434",
+        "arduino_cli_path": "arduino-cli",
     }
     try:
         with open(CONFIG_FILE, "r") as f:
             saved = json.load(f)
-        for k, v in saved.items():
-            if k in defaults:
-                defaults[k] = v
+        # Merge saved values over defaults (preserves all keys)
+        defaults.update(saved)
         return defaults
     except (FileNotFoundError, json.JSONDecodeError):
         return defaults
@@ -1072,7 +1076,7 @@ class OllamaWorker(QObject):
     def run(self):
         self._stop = False
         try:
-            resp = requests.post(OLLAMA_URL,
+            resp = requests.post(f"{OLLAMA_URL}/api/chat",
                 json={"model": OLLAMA_MODEL, "messages": self.messages, "stream": True},
                 stream=True, timeout=(5, 120))
             resp.raise_for_status()
@@ -3183,7 +3187,7 @@ class ChatPanel(QWidget):
             def run(self_w):
                 try:
                     resp = requests.post(
-                        OLLAMA_URL.replace("/api/chat", "/api/generate"),
+                        f"{OLLAMA_URL}/api/generate",
                         json={"model": OLLAMA_MODEL, "prompt": summary_prompt,
                               "stream": False},
                         timeout=(5, 60))
@@ -5983,7 +5987,10 @@ class SerialMonitor(QWidget):
 
 class ModelsTab(QWidget):
     model_changed = pyqtSignal()
-    BASE = "http://localhost:11434"
+
+    @property
+    def BASE(self):
+        return OLLAMA_URL
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -6404,7 +6411,7 @@ class ModelsTab(QWidget):
                     tech = ", ".join(parts)
                 # Ask the model itself
                 r2 = requests.post(
-                    OLLAMA_URL,
+                    f"{OLLAMA_URL}/api/chat",
                     json={
                         "model": name,
                         "messages": [{"role": "user", "content":
@@ -7805,6 +7812,9 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.port_combo.setCurrentIndex(idx)
 
+        # Apply saved preferences (font size, tab width, Ollama URL)
+        self._apply_preferences(self._config)
+
         if project_path:
             self._open_project(project_path)
 
@@ -8202,7 +8212,7 @@ class MainWindow(QMainWindow):
         """Build a short description from Ollama API metadata, or ask the model itself."""
         try:
             r = requests.post(
-                "http://localhost:11434/api/show",
+                f"{OLLAMA_URL}/api/show",
                 json={"name": name}, timeout=5)
             if r.status_code != 200:
                 return ""
@@ -8235,7 +8245,7 @@ class MainWindow(QMainWindow):
                 # Ask the model itself for a 6-word self-description
                 try:
                     r2 = requests.post(
-                        OLLAMA_URL,
+                        f"{OLLAMA_URL}/api/chat",
                         json={
                             "model": name,
                             "messages": [{
@@ -8275,10 +8285,12 @@ class MainWindow(QMainWindow):
         fm.addAction(self._make_action("New Sketch", self._new_sketch_dialog, "Ctrl+N"))
         fm.addAction(self._make_action("Open Sketch...", self._open_project_dialog, "Ctrl+O"))
         self._recent_menu = fm.addMenu("Open Recent")
-        self._recent_menu.addAction("(none)")
+        self._populate_recent_menu()
         fm.addSeparator()
         fm.addAction(self._make_action("Save", self._save_file, "Ctrl+S"))
         fm.addAction(self._make_action("Save As...", self._save_as, "Ctrl+Shift+S"))
+        fm.addSeparator()
+        fm.addAction(self._make_action("Preferences...", self._show_preferences, "Ctrl+,"))
         fm.addSeparator()
         fm.addAction(self._make_action("Quit", self.close, "Ctrl+Q"))
 
@@ -8351,6 +8363,146 @@ class MainWindow(QMainWindow):
         self.git_panel.set_project(path)
         self.file_manager.set_project(path)
         self._restore_project_state()
+        self._add_to_recent(path)
+
+    # ── Recent Sketches ──
+
+    def _add_to_recent(self, path):
+        """Add a project path to the recent sketches list."""
+        cfg = _load_config()
+        recents = cfg.get("recent_projects", [])
+        abs_path = os.path.abspath(path)
+        recents = [r for r in recents if os.path.abspath(r) != abs_path]
+        recents.insert(0, abs_path)
+        recents = recents[:10]  # keep last 10
+        cfg["recent_projects"] = recents
+        _save_config(cfg)
+        self._populate_recent_menu()
+
+    def _populate_recent_menu(self):
+        """Fill File > Open Recent submenu from config."""
+        self._recent_menu.clear()
+        cfg = _load_config()
+        recents = cfg.get("recent_projects", [])
+        if not recents:
+            self._recent_menu.addAction("(none)").setEnabled(False)
+            return
+        for path in recents:
+            name = os.path.basename(path)
+            action = self._recent_menu.addAction(f"{name}   ({path})")
+            action.triggered.connect(lambda checked, p=path: self._open_project(p))
+        self._recent_menu.addSeparator()
+        clear_action = self._recent_menu.addAction("Clear Recent")
+        clear_action.triggered.connect(self._clear_recent)
+
+    def _clear_recent(self):
+        """Clear all recent projects."""
+        cfg = _load_config()
+        cfg["recent_projects"] = []
+        _save_config(cfg)
+        self._populate_recent_menu()
+
+    # ── Preferences ──
+
+    def _show_preferences(self):
+        """Show Preferences dialog."""
+        from PyQt6.QtWidgets import (QDialog, QFormLayout, QDialogButtonBox,
+                                     QSpinBox, QGroupBox, QVBoxLayout, QLineEdit)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Preferences")
+        dlg.setMinimumWidth(450)
+        dlg.setStyleSheet(
+            f"QDialog{{background:{C['bg']};color:{C['fg']};}}"
+            f"QLabel{{color:{C['fg']};}}"
+            f"QLineEdit,QSpinBox,QComboBox{{background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};border-radius:3px;padding:4px 8px;}}"
+            f"QGroupBox{{color:{C['teal']};border:1px solid {C['border']};border-radius:4px;"
+            f"margin-top:10px;padding-top:16px;}}"
+            f"QGroupBox::title{{subcontrol-origin:margin;left:10px;padding:0 4px;}}")
+
+        layout = QVBoxLayout(dlg)
+        cfg = _load_config()
+
+        # ── Editor Settings ──
+        editor_group = QGroupBox("Editor")
+        eg_layout = QFormLayout(editor_group)
+
+        font_spin = QSpinBox()
+        font_spin.setRange(8, 32)
+        font_spin.setValue(cfg.get("editor_font_size", 13))
+        eg_layout.addRow("Font Size:", font_spin)
+
+        tab_spin = QSpinBox()
+        tab_spin.setRange(1, 8)
+        tab_spin.setValue(cfg.get("tab_width", 2))
+        eg_layout.addRow("Tab Width:", tab_spin)
+
+        layout.addWidget(editor_group)
+
+        # ── AI / Ollama Settings ──
+        ai_group = QGroupBox("AI (Ollama)")
+        ag_layout = QFormLayout(ai_group)
+
+        ollama_url_input = QLineEdit()
+        ollama_url_input.setText(cfg.get("ollama_url", "http://localhost:11434"))
+        ag_layout.addRow("Ollama URL:", ollama_url_input)
+
+        layout.addWidget(ai_group)
+
+        # ── Build Settings ──
+        build_group = QGroupBox("Build")
+        bg_layout = QFormLayout(build_group)
+
+        arduino_cli_input = QLineEdit()
+        arduino_cli_input.setText(cfg.get("arduino_cli_path", "arduino-cli"))
+        arduino_cli_input.setPlaceholderText(
+            "Path to arduino-cli (or leave as 'arduino-cli')")
+        bg_layout.addRow("arduino-cli:", arduino_cli_input)
+
+        layout.addWidget(build_group)
+
+        # ── Buttons ──
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        buttons.setStyleSheet(
+            f"QPushButton{{background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};border-radius:4px;padding:6px 16px;}}"
+            f"QPushButton:hover{{background:{C['teal']};color:white;}}")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            cfg["editor_font_size"] = font_spin.value()
+            cfg["tab_width"] = tab_spin.value()
+            cfg["ollama_url"] = ollama_url_input.text().strip()
+            cfg["arduino_cli_path"] = arduino_cli_input.text().strip()
+            _save_config(cfg)
+            self._apply_preferences(cfg)
+
+    def _apply_preferences(self, cfg):
+        """Apply preferences to the running app."""
+        global OLLAMA_URL
+        # Editor font size
+        font_size = cfg.get("editor_font_size", 13)
+        if hasattr(self, 'editor') and hasattr(self.editor, 'tabs'):
+            for i in range(self.editor.tabs.count()):
+                ed = self.editor.tabs.widget(i)
+                if hasattr(ed, 'lexer') and callable(ed.lexer) and ed.lexer():
+                    font = ed.lexer().font(0)
+                    font.setPointSize(font_size)
+                    ed.lexer().setFont(font)
+            # Tab width
+            tab_width = cfg.get("tab_width", 2)
+            for i in range(self.editor.tabs.count()):
+                ed = self.editor.tabs.widget(i)
+                if hasattr(ed, 'setTabWidth'):
+                    ed.setTabWidth(tab_width)
+        # Ollama URL — update global
+        new_url = cfg.get("ollama_url", "http://localhost:11434").rstrip("/")
+        OLLAMA_URL = new_url
 
     def _on_branch_changed(self):
         """Reload all project files after a git checkout/merge."""
@@ -8672,7 +8824,7 @@ class MainWindow(QMainWindow):
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
         try:
-            r = requests.get("http://localhost:11434/api/tags", timeout=5)
+            r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
             if r.status_code == 200:
                 for m in r.json().get("models",[]):
                     n = m.get("name","")
@@ -8715,7 +8867,7 @@ class MainWindow(QMainWindow):
         import threading
         def do_unload():
             try:
-                requests.post("http://localhost:11434/api/generate",
+                requests.post(f"{OLLAMA_URL}/api/generate",
                     json={"model": model_name, "prompt": "", "keep_alive": "0"},
                     timeout=10)
             except Exception:
@@ -8744,7 +8896,7 @@ class MainWindow(QMainWindow):
 
         def do_load():
             try:
-                requests.post("http://localhost:11434/api/generate",
+                requests.post(f"{OLLAMA_URL}/api/generate",
                     json={"model": model, "prompt": " ", "keep_alive": "10m",
                           "stream": False,
                           "options": {"num_predict": 1}},
@@ -8793,7 +8945,7 @@ class MainWindow(QMainWindow):
 
         def do_unload():
             try:
-                requests.post("http://localhost:11434/api/generate",
+                requests.post(f"{OLLAMA_URL}/api/generate",
                     json={"model": model, "prompt": "", "keep_alive": "0"},
                     timeout=10)
                 QTimer.singleShot(0, lambda: self._on_model_unloaded(model, True))
@@ -8996,7 +9148,7 @@ class MainWindow(QMainWindow):
 def _ensure_ollama():
     """Start Ollama if it isn't already running."""
     try:
-        requests.get("http://localhost:11434/api/tags", timeout=2)
+        requests.get(f"{OLLAMA_URL}/api/tags", timeout=2)
         return  # already running
     except Exception:
         pass
@@ -9014,7 +9166,7 @@ def _ensure_ollama():
     for _ in range(10):
         time.sleep(1)
         try:
-            requests.get("http://localhost:11434/api/tags", timeout=2)
+            requests.get(f"{OLLAMA_URL}/api/tags", timeout=2)
             return
         except Exception:
             pass
@@ -9046,19 +9198,20 @@ def main():
     app.setStyleSheet(STYLESHEET)
     # Auto-create .app bundle for Finder launch (if missing)
     _ensure_app_bundle()
-    # Ensure Ollama is running
-    _ensure_ollama()
     # Load persisted configs
     config = _load_config()
+    # Set globals from config before window creation
+    global OLLAMA_MODEL, OLLAMA_URL
+    OLLAMA_MODEL = config.get("ollama_model", "teensy-coder")
+    OLLAMA_URL = config.get("ollama_url", "http://localhost:11434").rstrip("/")
+    # Ensure Ollama is running (uses OLLAMA_URL)
+    _ensure_ollama()
     # CLI arg takes precedence over saved project path
     project_path = None
     if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
         project_path = os.path.abspath(sys.argv[1])
     elif config.get("project_path") and os.path.isdir(config["project_path"]):
         project_path = config["project_path"]
-    # Set the global model from config before window creation
-    global OLLAMA_MODEL
-    OLLAMA_MODEL = config.get("ollama_model", "teensy-coder")
     w = MainWindow(project_path, config=config)
     w.show()
     sys.exit(app.exec())
