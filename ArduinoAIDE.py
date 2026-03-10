@@ -44,7 +44,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QSizePolicy, QListWidget, QListWidgetItem,
     QScrollArea, QFrame, QInputDialog, QStatusBar, QProgressBar,
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
-    QAbstractItemView, QGridLayout, QHeaderView
+    QAbstractItemView, QGridLayout, QHeaderView, QSpinBox
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread,
@@ -3034,7 +3034,6 @@ class SerialPlotterPanel(QWidget):
 
     @staticmethod
     def _make_int_spin(lo, hi, val):
-        from PyQt6.QtWidgets import QSpinBox
         sb = QSpinBox()
         sb.setRange(lo, hi)
         sb.setValue(val)
@@ -7425,6 +7424,30 @@ class ModelsTab(QWidget):
         self.status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
         layout.addWidget(self.status)
 
+        # ── Context Budget ────────────────────────────────────────────────────
+        budget_row = QHBoxLayout(); budget_row.setSpacing(8)
+        t_budget = QLabel("CONTEXT BUDGET"); t_budget.setStyleSheet(SETTINGS_STITLE)
+        budget_row.addWidget(t_budget)
+
+        self._budget_spin = QSpinBox()
+        self._budget_spin.setRange(2000, 100000)
+        self._budget_spin.setSingleStep(1000)
+        self._budget_spin.setSuffix(" tokens")
+        self._budget_spin.setValue(_load_config().get("context_budget", 12000))
+        self._budget_spin.setStyleSheet(
+            f"QSpinBox{{background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};border-radius:3px;padding:4px 8px;}}")
+        self._budget_spin.valueChanged.connect(self._on_budget_changed)
+        budget_row.addWidget(self._budget_spin)
+
+        budget_hint = QLabel(
+            "Lower for small models (4K\u20136K). Higher for large models (8K\u201312K).")
+        budget_hint.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL}")
+        budget_row.addWidget(budget_hint)
+        budget_row.addStretch()
+
+        layout.addLayout(budget_row)
+
         layout.addStretch()
         scroll.setWidget(content)
 
@@ -7484,6 +7507,15 @@ class ModelsTab(QWidget):
         except Exception:
             self._conn_status.setText("Not reachable")
             self._conn_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+
+    def _on_budget_changed(self, value):
+        """Save context budget to config and notify."""
+        cfg = _load_config()
+        cfg["context_budget"] = value
+        _save_config(cfg)
+        # Update live WorkingSet if MainWindow has set a reference
+        if hasattr(self, '_main_window') and hasattr(self._main_window, 'chat_panel'):
+            self._main_window.chat_panel._working_set.budget = value
 
     def refresh_models(self):
         self.model_table.setRowCount(0)
@@ -9078,6 +9110,7 @@ class MainWindow(QMainWindow):
 
         # View 3: Settings (full panel)
         self.settings_panel = SettingsPanel()
+        self.settings_panel.models_tab._main_window = self
         self.settings_panel.model_changed.connect(self._refresh_models)
         self.view_stack.addWidget(self.settings_panel)
 
@@ -9295,7 +9328,7 @@ class MainWindow(QMainWindow):
 
     def _update_model_desc(self):
         name = self.model_combo.currentText()
-        if not name:
+        if not name or AI_BACKEND == "lmstudio":
             self.model_desc_label.setText("")
             return
 
@@ -9455,6 +9488,8 @@ class MainWindow(QMainWindow):
         vm.addAction(self._make_action("Libraries", lambda: self._switch_view(6), "Ctrl+6"))
         vm.addAction(self._make_action("Boards", lambda: self._switch_view(7), "Ctrl+7"))
         vm.addAction(self._make_action("Serial Plotter", lambda: self._switch_view(8), "Ctrl+8"))
+        vm.addSeparator()
+        vm.addAction(self._make_action("Preferences...", self._show_preferences))
 
         # ── Help ──
         hm = mb.addMenu("Help")
@@ -9529,7 +9564,7 @@ class MainWindow(QMainWindow):
     def _show_preferences(self):
         """Show Preferences dialog."""
         from PyQt6.QtWidgets import (QDialog, QFormLayout, QDialogButtonBox,
-                                     QSpinBox, QGroupBox, QVBoxLayout, QLineEdit)
+                                     QGroupBox, QVBoxLayout, QLineEdit)
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Preferences")
@@ -10036,6 +10071,8 @@ class MainWindow(QMainWindow):
             self._status_model.setText(f"{OLLAMA_MODEL}{backend_label}")
             self._status_model.setToolTip(
                 f"Backend: {'LM Studio' if AI_BACKEND == 'lmstudio' else 'Ollama'}")
+        # Update model desc label (clear for LM Studio, generate for Ollama)
+        self._update_model_desc()
         # Rebuild system prompt in conversation (e.g. after rules change)
         if hasattr(self, 'chat_panel') and self.chat_panel._conversation:
             if self.chat_panel._conversation[0].get("role") == "system":
