@@ -7373,6 +7373,39 @@ class ModelsTab(QWidget):
         scroll_layout = QVBoxLayout(content)
         scroll_layout.setContentsMargins(16, 16, 16, 16)
 
+        # ── Backend Selector Row ──────────────────────────────────────────────
+        backend_row = QHBoxLayout()
+        backend_row.setSpacing(8)
+        t_be = QLabel("AI BACKEND"); t_be.setStyleSheet(SETTINGS_STITLE)
+        backend_row.addWidget(t_be)
+
+        self._backend_combo = QComboBox()
+        self._backend_combo.addItems(["Ollama", "LM Studio (OpenAI-compatible)"])
+        self._backend_combo.setCurrentIndex(1 if AI_BACKEND == "lmstudio" else 0)
+        self._backend_combo.setStyleSheet(SETTINGS_COMBO)
+        self._backend_combo.setFixedWidth(220)
+        self._backend_combo.currentIndexChanged.connect(self._on_backend_switch)
+        backend_row.addWidget(self._backend_combo)
+
+        self._backend_url = QLineEdit()
+        self._backend_url.setStyleSheet(SETTINGS_INPUT)
+        self._backend_url.setPlaceholderText("Backend URL")
+        self._backend_url.setText(
+            LMSTUDIO_URL if AI_BACKEND == "lmstudio" else OLLAMA_URL)
+        self._backend_url.editingFinished.connect(self._on_backend_url_changed)
+        backend_row.addWidget(self._backend_url, stretch=1)
+
+        test_btn = QPushButton("Test Connection"); test_btn.setStyleSheet(BTN_SM_GHOST)
+        test_btn.clicked.connect(self._test_connection)
+        backend_row.addWidget(test_btn)
+
+        self._conn_status = QLabel("")
+        self._conn_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        backend_row.addWidget(self._conn_status)
+
+        scroll_layout.addLayout(backend_row)
+        scroll_layout.addSpacing(8)
+
         grid = QGridLayout()
         grid.setHorizontalSpacing(20)
         grid.setVerticalSpacing(16)
@@ -7420,8 +7453,8 @@ class ModelsTab(QWidget):
         self.unload_btn.setToolTip("Unload from memory")
         self.unload_btn.clicked.connect(self._unload_selected)
         btn_row00.addWidget(self.unload_btn)
-        del00_btn = QPushButton("Delete"); del00_btn.setStyleSheet(BTN_SM_DANGER)
-        del00_btn.clicked.connect(self._delete); btn_row00.addWidget(del00_btn)
+        self._delete_btn = QPushButton("Delete"); self._delete_btn.setStyleSheet(BTN_SM_DANGER)
+        self._delete_btn.clicked.connect(self._delete); btn_row00.addWidget(self._delete_btn)
         btn_row00.addStretch()
         c00.addLayout(btn_row00)
 
@@ -7495,6 +7528,7 @@ class ModelsTab(QWidget):
         self.pull_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
         c01.addWidget(self.pull_status)
 
+        self._cell_pull = cell01
         grid.addWidget(cell01, 0, 1, Qt.AlignmentFlag.AlignTop)
 
         # ── Cell (1,0): Model Details ─────────────────────────────────────────
@@ -7544,6 +7578,7 @@ class ModelsTab(QWidget):
         dcl.addWidget(self.status)
 
         c10.addWidget(details_card)
+        self._cell_details = cell10
         grid.addWidget(cell10, 1, 0, Qt.AlignmentFlag.AlignTop)
 
         # ── Cell (1,1): Create Custom Model ───────────────────────────────────
@@ -7607,6 +7642,7 @@ class ModelsTab(QWidget):
         self.mf_preview.hide(); ccl.addWidget(self.mf_preview)
 
         c11.addWidget(create_card)
+        self._cell_create = cell11
         grid.addWidget(cell11, 1, 1, Qt.AlignmentFlag.AlignTop)
 
         scroll_layout.addLayout(grid)
@@ -7617,6 +7653,73 @@ class ModelsTab(QWidget):
         outer.addWidget(scroll)
 
         self._populate_curated_list()
+        self._update_backend_visibility()
+
+    # -- Backend selector methods -----------------------------------------------
+
+    def _on_backend_switch(self, idx):
+        """Handle backend combo change."""
+        global AI_BACKEND, OLLAMA_URL, LMSTUDIO_URL
+        is_lm = idx == 1
+        AI_BACKEND = "lmstudio" if is_lm else "ollama"
+        # Update URL field to show the active backend's URL
+        if is_lm:
+            self._backend_url.setText(LMSTUDIO_URL)
+        else:
+            self._backend_url.setText(OLLAMA_URL)
+        self._conn_status.setText("")
+        cfg = _load_config()
+        cfg["ai_backend"] = AI_BACKEND
+        _save_config(cfg)
+        self._update_backend_visibility()
+        self.refresh_models()
+        self.model_changed.emit()
+
+    def _on_backend_url_changed(self):
+        """Handle URL field edit — update the corresponding global."""
+        global OLLAMA_URL, LMSTUDIO_URL
+        url = self._backend_url.text().strip().rstrip("/")
+        if not url:
+            return
+        cfg = _load_config()
+        if AI_BACKEND == "lmstudio":
+            LMSTUDIO_URL = url
+            cfg["lmstudio_url"] = url
+        else:
+            OLLAMA_URL = url
+            cfg["ollama_url"] = url
+        _save_config(cfg)
+
+    def _test_connection(self):
+        """Quick GET to verify the backend is reachable."""
+        self._conn_status.setText("Testing…")
+        self._conn_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        QApplication.processEvents()
+        try:
+            if AI_BACKEND == "lmstudio":
+                url = f"{LMSTUDIO_URL}/v1/models"
+            else:
+                url = f"{OLLAMA_URL}/api/tags"
+            resp = requests.get(url, timeout=3)
+            if resp.status_code == 200:
+                self._conn_status.setText("Connected")
+                self._conn_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+            else:
+                self._conn_status.setText(f"HTTP {resp.status_code}")
+                self._conn_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+        except Exception:
+            self._conn_status.setText("Not reachable")
+            self._conn_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+
+    def _update_backend_visibility(self):
+        """Show/hide Ollama-only sections based on active backend."""
+        is_ollama = AI_BACKEND == "ollama"
+        self._cell_pull.setVisible(is_ollama)
+        self._cell_details.setVisible(is_ollama)
+        self._cell_create.setVisible(is_ollama)
+        self.load_btn.setVisible(is_ollama)
+        self.unload_btn.setVisible(is_ollama)
+        self._delete_btn.setVisible(is_ollama)
 
     def _build_mf(self):
         lines = [f"FROM {self.base_cb.currentText().strip()}"]
@@ -10007,7 +10110,9 @@ class MainWindow(QMainWindow):
         fm.addAction(self._make_action("Save", self._save_file, "Ctrl+S"))
         fm.addAction(self._make_action("Save As...", self._save_as, "Ctrl+Shift+S"))
         fm.addSeparator()
-        fm.addAction(self._make_action("Preferences...", self._show_preferences, "Ctrl+,"))
+        pref_action = self._make_action("Preferences...", self._show_preferences, "Ctrl+,")
+        pref_action.setMenuRole(QAction.MenuRole.PreferencesRole)
+        fm.addAction(pref_action)
         fm.addSeparator()
         fm.addAction(self._make_action("Quit", self.close, "Ctrl+Q"))
 
@@ -10163,37 +10268,6 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(editor_group)
 
-        # ── AI Backend Settings ──
-        ai_group = QGroupBox("AI Backend")
-        ag_layout = QFormLayout(ai_group)
-
-        backend_combo = QComboBox()
-        backend_combo.addItems(["Ollama", "LM Studio (OpenAI-compatible)"])
-        cur_backend = cfg.get("ai_backend", "ollama")
-        backend_combo.setCurrentIndex(1 if cur_backend == "lmstudio" else 0)
-        ag_layout.addRow("Backend:", backend_combo)
-
-        ollama_url_input = QLineEdit()
-        ollama_url_input.setText(cfg.get("ollama_url", "http://localhost:11434"))
-        ollama_url_label = QLabel("Ollama URL:")
-        ag_layout.addRow(ollama_url_label, ollama_url_input)
-
-        lmstudio_url_input = QLineEdit()
-        lmstudio_url_input.setText(cfg.get("lmstudio_url", "http://localhost:1234"))
-        lmstudio_url_label = QLabel("LM Studio URL:")
-        ag_layout.addRow(lmstudio_url_label, lmstudio_url_input)
-
-        def _on_backend_changed(idx):
-            is_lm = idx == 1
-            ollama_url_input.setVisible(not is_lm)
-            ollama_url_label.setVisible(not is_lm)
-            lmstudio_url_input.setVisible(is_lm)
-            lmstudio_url_label.setVisible(is_lm)
-        backend_combo.currentIndexChanged.connect(_on_backend_changed)
-        _on_backend_changed(backend_combo.currentIndex())
-
-        layout.addWidget(ai_group)
-
         # ── Build Settings ──
         build_group = QGroupBox("Build")
         bg_layout = QFormLayout(build_group)
@@ -10231,9 +10305,6 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             cfg["editor_font_size"] = font_spin.value()
             cfg["tab_width"] = tab_spin.value()
-            cfg["ai_backend"] = "lmstudio" if backend_combo.currentIndex() == 1 else "ollama"
-            cfg["ollama_url"] = ollama_url_input.text().strip()
-            cfg["lmstudio_url"] = lmstudio_url_input.text().strip()
             cfg["arduino_cli_path"] = arduino_cli_input.text().strip()
             urls = [u.strip() for u in board_urls_input.toPlainText().split('\n')
                     if u.strip()]
@@ -10242,8 +10313,8 @@ class MainWindow(QMainWindow):
             self._apply_preferences(cfg)
 
     def _apply_preferences(self, cfg):
-        """Apply preferences to the running app."""
-        global OLLAMA_URL, AI_BACKEND, LMSTUDIO_URL
+        """Apply preferences to the running app (editor + build settings only;
+        AI backend is managed by the Models tab)."""
         # Editor font size
         font_size = cfg.get("editor_font_size", 13)
         if hasattr(self, 'editor') and hasattr(self.editor, 'tabs'):
@@ -10259,18 +10330,6 @@ class MainWindow(QMainWindow):
                 ed = self.editor.tabs.widget(i)
                 if hasattr(ed, 'setTabWidth'):
                     ed.setTabWidth(tab_width)
-        # AI backend globals
-        AI_BACKEND = cfg.get("ai_backend", "ollama")
-        new_url = cfg.get("ollama_url", "http://localhost:11434").rstrip("/")
-        OLLAMA_URL = new_url
-        LMSTUDIO_URL = cfg.get("lmstudio_url", "http://localhost:1234").rstrip("/")
-        # Refresh model list and status bar for new backend
-        if hasattr(self, '_status_model'):
-            self._refresh_models()
-            backend_label = " (LM Studio)" if AI_BACKEND == "lmstudio" else ""
-            self._status_model.setText(f"{OLLAMA_MODEL}{backend_label}")
-            self._status_model.setToolTip(
-                f"Backend: {'LM Studio' if AI_BACKEND == 'lmstudio' else 'Ollama'}")
         # Board manager additional URLs
         urls = cfg.get("additional_board_urls", [])
         if urls:
@@ -10673,6 +10732,12 @@ class MainWindow(QMainWindow):
         current = self.model_combo.currentText()
         if current:
             OLLAMA_MODEL = current
+        # Update status bar with backend info
+        if hasattr(self, '_status_model'):
+            backend_label = " (LM Studio)" if AI_BACKEND == "lmstudio" else ""
+            self._status_model.setText(f"{OLLAMA_MODEL}{backend_label}")
+            self._status_model.setToolTip(
+                f"Backend: {'LM Studio' if AI_BACKEND == 'lmstudio' else 'Ollama'}")
         # Rebuild system prompt in conversation (e.g. after rules change)
         if hasattr(self, 'chat_panel') and self.chat_panel._conversation:
             if self.chat_panel._conversation[0].get("role") == "system":
