@@ -1299,15 +1299,19 @@ class OllamaWorker(QObject):
                     continue
 
     def _run_openai(self):
+        # Don't pass Ollama-specific stop sequences to OpenAI-compatible APIs —
+        # tokens like <|im_end|> are chat template internals that cause
+        # immediate termination on backends like LM Studio MLX.
+        payload = {
+            "model": OLLAMA_MODEL,
+            "messages": self.messages,
+            "stream": True,
+            "temperature": OLLAMA_CHAT_OPTIONS.get("temperature", 0.3),
+            "top_p": OLLAMA_CHAT_OPTIONS.get("top_p", 0.8),
+            "max_tokens": OLLAMA_CHAT_OPTIONS.get("num_predict", 4096),
+        }
         resp = requests.post(f"{LMSTUDIO_URL}/v1/chat/completions",
-            json={"model": OLLAMA_MODEL, "messages": self.messages,
-                  "stream": True,
-                  "temperature": OLLAMA_CHAT_OPTIONS.get("temperature", 0.3),
-                  "top_p": OLLAMA_CHAT_OPTIONS.get("top_p", 0.8),
-                  "max_tokens": OLLAMA_CHAT_OPTIONS.get("num_predict", 4096),
-                  "stop": OLLAMA_STOP_SEQUENCES},
-            headers={"Content-Type": "application/json"},
-            stream=True, timeout=(5, 120))
+            json=payload, stream=True, timeout=(5, 120))
         resp.raise_for_status()
         for line in resp.iter_lines():
             if self._stop:
@@ -1316,12 +1320,25 @@ class OllamaWorker(QObject):
             if not line:
                 continue
             text = line.decode("utf-8", errors="replace")
+            # SSE prefix: handle both "data: " (with space) and "data:" (without)
             if text.startswith("data: "):
                 text = text[6:]
-            if text.strip() == "[DONE]":
+            elif text.startswith("data:"):
+                text = text[5:]
+            text = text.strip()
+            if not text:
+                continue
+            if text == "[DONE]":
                 break
             try:
                 chunk = json.loads(text)
+                # Detect error responses (non-streaming JSON error objects)
+                if "error" in chunk:
+                    err_msg = chunk["error"]
+                    if isinstance(err_msg, dict):
+                        err_msg = err_msg.get("message", str(err_msg))
+                    self.error_occurred.emit(f"LM Studio: {err_msg}")
+                    return
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
                 t = delta.get("content", "")
                 if t: self.token_received.emit(t)
