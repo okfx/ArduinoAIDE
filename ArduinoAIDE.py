@@ -811,7 +811,7 @@ QToolBar QPushButton:pressed {{ background-color: {C['teal']}; color: white; }}
 
 /* File tabs across top — wider, left-aligned text */
 QTabWidget#fileTabs::pane {{ border: none; }}
-QTabBar#fileTabBar {{ background-color: {C['bg_dark']}; }}
+QTabBar#fileTabBar {{ background-color: {C['bg_dark']}; alignment: left; }}
 QTabBar#fileTabBar::tab {{
     background-color: {C['bg_dark']}; color: {C['fg_dim']};
     border: none; border-right: 1px solid {C['border']};
@@ -833,6 +833,7 @@ QTabBar#fileTabBar::close-button {{
 
 /* Bottom panel tabs */
 QTabWidget#bottomTabs::pane {{ border: none; background-color: {C['bg_dark']}; }}
+QTabWidget#bottomTabs > QTabBar {{ alignment: left; }}
 QTabWidget#bottomTabs > QTabBar::tab {{
     background-color: {C['bg_dark']}; color: {C['fg_dim']};
     border: none; border-right: 1px solid {C['border']};
@@ -960,6 +961,7 @@ QMenu::right-arrow {{
 
 /* Settings panel tabs */
 QTabWidget#settingsTabs::pane {{ border: none; background-color: {C['bg']}; }}
+QTabWidget#settingsTabs > QTabBar {{ alignment: left; }}
 QTabWidget#settingsTabs > QTabBar::tab {{
     background-color: {C['bg_dark']}; color: {C['fg_dim']};
     border: none; border-right: 1px solid {C['border']};
@@ -1850,6 +1852,7 @@ class TabbedEditor(QWidget):
         self.tabs.tabBar().setObjectName("fileTabBar")
         self.tabs.setTabsClosable(True)
         self.tabs.tabBar().setExpanding(False)  # Left-justify tabs
+        self.tabs.setDocumentMode(True)
         self.tabs.tabCloseRequested.connect(self._close_tab)
         self.tabs.currentChanged.connect(self._on_changed)
         layout.addWidget(self.tabs)
@@ -2359,24 +2362,35 @@ class FileManagerView(QWidget):
 
     def _new_sketch(self):
         """Create a new Arduino sketch folder with a .ino file."""
-        target = self._current_focus_path or self._project_path
-        if not target:
-            target = os.path.expanduser("~/Documents/Arduino")
-            os.makedirs(target, exist_ok=True)
-        name, ok = QInputDialog.getText(self, "New Sketch", "Sketch name:")
-        if ok and name:
-            sketch_dir = os.path.join(target, name)
-            ino_file = os.path.join(sketch_dir, f"{name}.ino")
-            try:
-                os.makedirs(sketch_dir, exist_ok=True)
-                with open(ino_file, "w") as f:
-                    f.write(f"// {name}.ino\n\nvoid setup() {{\n\n}}\n\nvoid loop() {{\n\n}}\n")
-                self.file_browser._refresh()
-                self._refresh_parent_context(self._current_focus_path)
-                # Signal to open the new sketch file
-                self.file_requested.emit(ino_file)
-            except OSError as e:
-                QMessageBox.warning(self, "Error", str(e))
+        default_dir = self._current_focus_path or self._project_path
+        if not default_dir or not os.path.isdir(default_dir):
+            default_dir = os.path.expanduser("~/Documents/Arduino")
+        os.makedirs(default_dir, exist_ok=True)
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Create New Sketch",
+            os.path.join(default_dir, "new_sketch"),
+            "Arduino Sketch (*.ino)")
+        if not filepath:
+            return
+        if not filepath.endswith(".ino"):
+            filepath += ".ino"
+        sketch_name = os.path.splitext(os.path.basename(filepath))[0]
+        chosen_dir = os.path.dirname(filepath)
+        sketch_dir = os.path.join(chosen_dir, sketch_name)
+        ino_file = os.path.join(sketch_dir, f"{sketch_name}.ino")
+        if os.path.exists(sketch_dir):
+            QMessageBox.warning(self, "Exists",
+                                f"Folder '{sketch_name}' already exists.")
+            return
+        try:
+            os.makedirs(sketch_dir, exist_ok=True)
+            with open(ino_file, "w") as f:
+                f.write(f"// {sketch_name}.ino\n\nvoid setup() {{\n\n}}\n\nvoid loop() {{\n\n}}\n")
+            self.file_browser._refresh()
+            self._refresh_parent_context(self._current_focus_path)
+            self.file_requested.emit(ino_file)
+        except OSError as e:
+            QMessageBox.warning(self, "Error", str(e))
 
 
 # =============================================================================
@@ -5049,22 +5063,28 @@ class ChatPanel(QWidget):
                 "Please wait — model is currently responding.", C['fg_warn'])
             return
 
-        # Guard: warn if pending edits will be discarded
-        # apply_bar is hidden after edits are applied, so escalation buttons
-        # (which fire after apply) naturally bypass this check.
+        # Guard: check model is set and backend is reachable
+        if not OLLAMA_MODEL or OLLAMA_MODEL.strip() == "":
+            self._add_info_msg(
+                "No model selected. Choose a model from the toolbar dropdown "
+                "or the Models tab in Settings.", C['fg_warn'])
+            return
+        base_url = LMSTUDIO_URL if AI_BACKEND == "lmstudio" else OLLAMA_URL
+        try:
+            import urllib.request
+            req = urllib.request.Request(base_url, method='HEAD')
+            urllib.request.urlopen(req, timeout=2)
+        except Exception:
+            backend_name = "LM Studio" if AI_BACKEND == "lmstudio" else "Ollama"
+            self._add_info_msg(
+                f"Cannot reach {backend_name} at {base_url}. "
+                f"Make sure {backend_name} is running.", C['fg_warn'])
+            return
+
+        # Silently discard any pending edits when sending a new message
         if self._pending_edits and self.apply_bar.isVisible():
-            n = len(self._pending_edits)
-            reply = QMessageBox.question(
-                self,
-                "Discard pending edits?",
-                f"You have {n} pending edit{'s' if n != 1 else ''} in the apply bar.\n"
-                "Sending a new message will discard them.\n\n"
-                "Discard and send?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+            self._pending_edits = []
+            self.apply_bar.hide()
 
         # Selection-based edit flow: use captured selection snapshot
         # (survives focus loss when user clicks chat input)
@@ -7005,7 +7025,7 @@ class ChatPanel(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse)
         bl.addWidget(text_label)
         if code:
-            # Code block inside the bubble — scrollable for long lines
+            # Expandable code block inside the bubble
             code_label = QLabel(code)
             code_label.setWordWrap(False)
             code_label.setStyleSheet(
@@ -7018,17 +7038,58 @@ class ChatPanel(QWidget):
             code_scroll.setWidgetResizable(False)
             code_scroll.setHorizontalScrollBarPolicy(
                 Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            code_scroll.setVerticalScrollBarPolicy(
-                Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            code_scroll.setStyleSheet(
+            scroll_ss = (
                 f"QScrollArea{{background-color:{C['bg']};border-radius:8px;border:none;}}"
                 f"QScrollBar:horizontal{{background:{C['bg']};height:6px;}}"
                 f"QScrollBar::handle:horizontal{{background:{C['border_light']};"
                 f"border-radius:3px;min-width:20px;}}"
                 f"QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal"
-                f"{{width:0px;}}")
-            code_scroll.setFixedHeight(code_label.sizeHint().height() + 10)
-            bl.addWidget(code_scroll)
+                f"{{width:0px;}}"
+                f"QScrollBar:vertical{{background:{C['bg']};width:6px;}}"
+                f"QScrollBar::handle:vertical{{background:{C['border_light']};"
+                f"border-radius:3px;min-height:20px;}}"
+                f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical"
+                f"{{height:0px;}}")
+            code_scroll.setStyleSheet(scroll_ss)
+            natural_h = code_label.sizeHint().height() + 10
+            collapsed_h = 120
+            expanded_max = 500
+            if natural_h <= collapsed_h:
+                # Short code — show at natural height, no toggle needed
+                code_scroll.setFixedHeight(natural_h)
+                code_scroll.setVerticalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                bl.addWidget(code_scroll)
+            else:
+                # Tall code — start collapsed with expand/collapse toggle
+                code_scroll.setFixedHeight(collapsed_h)
+                code_scroll.setVerticalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                bl.addWidget(code_scroll)
+                toggle_btn = QPushButton("Show more")
+                toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                toggle_btn.setStyleSheet(
+                    f"QPushButton{{color:{C['teal']};background:transparent;"
+                    f"border:none;{FONT_SMALL}padding:2px 0px;text-align:left;}}"
+                    f"QPushButton:hover{{color:{C['fg_head']};}}")
+                toggle_btn.setProperty("_expanded", False)
+                def _toggle_code(checked, btn=toggle_btn, scr=code_scroll,
+                                 nat=natural_h, col=collapsed_h, mx=expanded_max):
+                    expanded = btn.property("_expanded")
+                    if expanded:
+                        scr.setFixedHeight(col)
+                        scr.setVerticalScrollBarPolicy(
+                            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                        btn.setText("Show more")
+                        btn.setProperty("_expanded", False)
+                    else:
+                        scr.setFixedHeight(min(nat, mx))
+                        scr.setVerticalScrollBarPolicy(
+                            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+                        btn.setText("Show less")
+                        btn.setProperty("_expanded", True)
+                toggle_btn.clicked.connect(_toggle_code)
+                bl.addWidget(toggle_btn)
         row.addWidget(bubble)
         vl.addLayout(row)
         self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
@@ -8687,6 +8748,7 @@ class SettingsPanel(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("settingsTabs")
         self.tabs.tabBar().setExpanding(False)
+        self.tabs.setDocumentMode(True)
 
         self.models_tab = ModelsTab()
         self.models_tab.model_changed.connect(self.model_changed.emit)
@@ -9533,6 +9595,7 @@ class MainWindow(QMainWindow):
         self.bottom_tabs = QTabWidget()
         self.bottom_tabs.setObjectName("bottomTabs")
         self.bottom_tabs.tabBar().setExpanding(False)
+        self.bottom_tabs.setDocumentMode(True)
         # Output tab: raw compiler output + diagnostic table
         self._output_tab = output_wrapper = QWidget()
         ow_layout = QVBoxLayout(output_wrapper)
@@ -10311,26 +10374,31 @@ class MainWindow(QMainWindow):
         self.editor.save_all()
 
     def _new_sketch_dialog(self):
-        """File > New Sketch — create sketch folder with .ino, then open it."""
+        """File > New Sketch — user picks location via file browser."""
         import datetime
         default_name = f"sketch_{datetime.datetime.now().strftime('%b%d').lower()}"
-        base_dir = os.path.expanduser("~/Documents/Arduino")
-        os.makedirs(base_dir, exist_ok=True)
-        name, ok = QInputDialog.getText(self, "New Sketch", "Sketch name:",
-                                        text=default_name)
-        if not ok or not name.strip():
+        default_dir = os.path.expanduser("~/Documents/Arduino")
+        os.makedirs(default_dir, exist_ok=True)
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Create New Sketch",
+            os.path.join(default_dir, default_name),
+            "Arduino Sketch (*.ino)")
+        if not filepath:
             return
-        name = name.strip()
-        sketch_dir = os.path.join(base_dir, name)
-        ino_file = os.path.join(sketch_dir, f"{name}.ino")
+        if not filepath.endswith(".ino"):
+            filepath += ".ino"
+        sketch_name = os.path.splitext(os.path.basename(filepath))[0]
+        chosen_dir = os.path.dirname(filepath)
+        sketch_dir = os.path.join(chosen_dir, sketch_name)
+        ino_file = os.path.join(sketch_dir, f"{sketch_name}.ino")
         if os.path.exists(sketch_dir):
             QMessageBox.warning(self, "Exists",
-                                f"Folder '{name}' already exists in Arduino directory.")
+                                f"Folder '{sketch_name}' already exists at that location.")
             return
         try:
             os.makedirs(sketch_dir)
             with open(ino_file, "w") as f:
-                f.write(f"// {name}.ino\n\nvoid setup() {{\n\n}}\n\nvoid loop() {{\n\n}}\n")
+                f.write(f"// {sketch_name}.ino\n\nvoid setup() {{\n\n}}\n\nvoid loop() {{\n\n}}\n")
             self._open_project(sketch_dir)
         except OSError as e:
             QMessageBox.warning(self, "Error", str(e))
