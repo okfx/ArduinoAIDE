@@ -3573,6 +3573,12 @@ class ChatPanel(QWidget):
             # Already rendered in chat as streaming text — nothing more to do
             return
 
+        # Preserve trailing newline from original selection
+        if original.endswith('\r\n') and not text.endswith('\r\n'):
+            text = text.rstrip('\n') + '\r\n'
+        elif original.endswith('\n') and not text.endswith('\n'):
+            text += '\n'
+
         # Create a ProposedEdit for the selection replacement
         file_path = self._selection_edit['file_path']
         edit = ProposedEdit(
