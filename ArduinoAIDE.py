@@ -54,7 +54,7 @@ from PyQt6.QtGui import (
     QFont, QColor, QAction, QKeySequence, QTextCursor,
     QTextCharFormat, QPalette, QFileSystemModel,
     QStandardItemModel, QStandardItem, QPainter, QPen,
-    QPainterPath, QPolygonF, QPixmap, QIcon
+    QPainterPath, QPolygonF, QPixmap, QIcon, QShortcut
 )
 
 try:
@@ -7859,6 +7859,48 @@ class MainWindow(QMainWindow):
         cv_layout.setContentsMargins(0, 0, 0, 0)
         cv_layout.setSpacing(0)
 
+        # Find/Replace bar (hidden by default, shown with Ctrl+F)
+        self._find_bar = QFrame()
+        self._find_bar.setStyleSheet(
+            f"QFrame{{background:{C['bg_input']};border-bottom:1px solid {C['border_light']};"
+            f"padding:4px 8px;}}")
+        self._find_bar.hide()
+        fb_layout = QHBoxLayout(self._find_bar)
+        fb_layout.setContentsMargins(8, 4, 8, 4)
+        fb_layout.setSpacing(6)
+        fb_find_lbl = QLabel("Find:")
+        fb_find_lbl.setStyleSheet(f"color:{C['fg']};{FONT_BODY}")
+        fb_layout.addWidget(fb_find_lbl)
+        self._find_input = QLineEdit()
+        self._find_input.setPlaceholderText("Search...")
+        self._find_input.setStyleSheet(
+            f"QLineEdit{{background:{C['bg']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};border-radius:3px;padding:3px 6px;}}")
+        self._find_input.returnPressed.connect(self._find_next)
+        fb_layout.addWidget(self._find_input)
+        fb_repl_lbl = QLabel("Replace:")
+        fb_repl_lbl.setStyleSheet(f"color:{C['fg']};{FONT_BODY}")
+        fb_layout.addWidget(fb_repl_lbl)
+        self._replace_input = QLineEdit()
+        self._replace_input.setPlaceholderText("Replace with...")
+        self._replace_input.setStyleSheet(self._find_input.styleSheet())
+        fb_layout.addWidget(self._replace_input)
+        for label, slot in [("Next", self._find_next), ("Prev", self._find_prev),
+                            ("Replace", self._replace_one), ("All", self._replace_all)]:
+            btn = QPushButton(label)
+            btn.setStyleSheet(BTN_GHOST)
+            btn.clicked.connect(slot)
+            fb_layout.addWidget(btn)
+        close_btn = QPushButton("\u2715")
+        close_btn.setFixedWidth(24)
+        close_btn.setStyleSheet(BTN_GHOST)
+        close_btn.clicked.connect(lambda: self._find_bar.hide())
+        fb_layout.addWidget(close_btn)
+        # Escape key closes find bar
+        QShortcut(QKeySequence("Escape"), self._find_bar,
+                  lambda: self._find_bar.hide())
+        cv_layout.addWidget(self._find_bar)
+
         v_splitter = QSplitter(Qt.Orientation.Vertical)
 
         self.editor = TabbedEditor()
@@ -8227,28 +8269,66 @@ class MainWindow(QMainWindow):
 
     def _setup_menubar(self):
         mb = self.menuBar()
+
+        # ── File ──
         fm = mb.addMenu("File")
-        fm.addAction(self._make_action("Open Project...", self._open_project_dialog, "Ctrl+O"))
+        fm.addAction(self._make_action("New Sketch", self._new_sketch_dialog, "Ctrl+N"))
+        fm.addAction(self._make_action("Open Sketch...", self._open_project_dialog, "Ctrl+O"))
+        self._recent_menu = fm.addMenu("Open Recent")
+        self._recent_menu.addAction("(none)")
+        fm.addSeparator()
         fm.addAction(self._make_action("Save", self._save_file, "Ctrl+S"))
+        fm.addAction(self._make_action("Save As...", self._save_as, "Ctrl+Shift+S"))
         fm.addSeparator()
         fm.addAction(self._make_action("Quit", self.close, "Ctrl+Q"))
 
-        bm = mb.addMenu("Build")
-        bm.addAction(self._make_action("Verify/Compile", self._compile, "Ctrl+B"))
-        bm.addAction(self._make_action("Upload", self._upload, "Ctrl+U"))
+        # ── Edit ──
+        em = mb.addMenu("Edit")
+        em.addAction(self._make_action("Undo", self._editor_undo, "Ctrl+Z"))
+        em.addAction(self._make_action("Redo", self._editor_redo, "Ctrl+Shift+Z"))
+        em.addSeparator()
+        em.addAction(self._make_action("Find / Replace", self._toggle_find_bar, "Ctrl+F"))
+        em.addSeparator()
+        em.addAction(self._make_action("Toggle Comment", self._toggle_comment, "Ctrl+/"))
+        em.addSeparator()
+        em.addAction(self._make_action("Increase Font Size", self._zoom_in, "Ctrl+="))
+        em.addAction(self._make_action("Decrease Font Size", self._zoom_out, "Ctrl+-"))
 
+        # ── Sketch ──
+        sm = mb.addMenu("Sketch")
+        sm.addAction(self._make_action("Verify / Compile", self._compile, "Ctrl+B"))
+        sm.addAction(self._make_action("Upload", self._upload, "Ctrl+U"))
+
+        # ── Tools ──
+        tm = mb.addMenu("Tools")
+        tm.addAction(self._make_action("Serial Monitor", lambda: self._switch_view(5), "Ctrl+Shift+M"))
+        self._tools_board_action = tm.addAction("Board: (see toolbar)")
+        self._tools_board_action.setEnabled(False)
+        self._tools_port_action = tm.addAction("Port: (see toolbar)")
+        self._tools_port_action.setEnabled(False)
+
+        # ── AI ──
         am = mb.addMenu("AI")
         am.addAction(self._make_action("Open AI Chat", lambda: self._switch_view(1), "Ctrl+Shift+A"))
         am.addAction(self._make_action("Send Errors to AI", self._send_errors_to_ai, "Ctrl+Shift+E"))
         am.addAction(self._make_action("Fix Compile Errors", self.chat_panel._cmd_fix, "Ctrl+Shift+F"))
         am.addAction(self._make_action("Clear Chat", self.chat_panel.clear_chat))
 
+        # ── View ──
         vm = mb.addMenu("View")
         vm.addAction(self._make_action("Code Editor", lambda: self._switch_view(0), "Ctrl+1"))
         vm.addAction(self._make_action("AI Chat", lambda: self._switch_view(1), "Ctrl+2"))
         vm.addAction(self._make_action("Files", lambda: self._switch_view(2), "Ctrl+3"))
         vm.addAction(self._make_action("Settings", lambda: self._switch_view(3), "Ctrl+4"))
         vm.addAction(self._make_action("Git", lambda: self._switch_view(4), "Ctrl+5"))
+
+        # ── Help ──
+        hm = mb.addMenu("Help")
+        hm.addAction(self._make_action("About ArduinoAIDE", self._show_about))
+
+        # Ctrl+H shortcut to open find bar with focus on replace field
+        QShortcut(QKeySequence("Ctrl+H"), self).activated.connect(
+            self._toggle_find_bar_replace)
 
     # ---- File operations ----
     def _open_project_dialog(self):
@@ -8339,6 +8419,180 @@ class MainWindow(QMainWindow):
 
     def _save_file(self):
         self.editor.save_all()
+
+    def _new_sketch_dialog(self):
+        """File > New Sketch — create sketch folder with .ino, then open it."""
+        import datetime
+        default_name = f"sketch_{datetime.datetime.now().strftime('%b%d').lower()}"
+        base_dir = os.path.expanduser("~/Documents/Arduino")
+        os.makedirs(base_dir, exist_ok=True)
+        name, ok = QInputDialog.getText(self, "New Sketch", "Sketch name:",
+                                        text=default_name)
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        sketch_dir = os.path.join(base_dir, name)
+        ino_file = os.path.join(sketch_dir, f"{name}.ino")
+        if os.path.exists(sketch_dir):
+            QMessageBox.warning(self, "Exists",
+                                f"Folder '{name}' already exists in Arduino directory.")
+            return
+        try:
+            os.makedirs(sketch_dir)
+            with open(ino_file, "w") as f:
+                f.write(f"// {name}.ino\n\nvoid setup() {{\n\n}}\n\nvoid loop() {{\n\n}}\n")
+            self._open_project(sketch_dir)
+        except OSError as e:
+            QMessageBox.warning(self, "Error", str(e))
+
+    def _save_as(self):
+        """File > Save As — save current file to a new location."""
+        ed = self.editor.tabs.currentWidget()
+        if not ed:
+            return
+        current_path = getattr(ed, 'current_file', None)
+        suggested = current_path or os.path.expanduser(
+            "~/Documents/Arduino/untitled.ino")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save As", suggested,
+            "Arduino Files (*.ino *.h *.cpp);;All Files (*)")
+        if path:
+            try:
+                content = ed.text() if hasattr(ed, 'text') else ed.toPlainText()
+                with open(path, "w") as f:
+                    f.write(content)
+                # Update tab label
+                idx = self.editor.tabs.indexOf(ed)
+                if idx >= 0:
+                    self.editor.tabs.setTabText(idx, os.path.basename(path))
+                self.setWindowTitle(f"{WINDOW_TITLE} — {os.path.basename(path)}")
+            except OSError as e:
+                QMessageBox.warning(self, "Error", str(e))
+
+    # ---- Edit menu helpers ----
+    def _editor_undo(self):
+        ed = self.editor.tabs.currentWidget()
+        if ed and hasattr(ed, 'undo'):
+            ed.undo()
+
+    def _editor_redo(self):
+        ed = self.editor.tabs.currentWidget()
+        if ed and hasattr(ed, 'redo'):
+            ed.redo()
+
+    def _zoom_in(self):
+        ed = self.editor.tabs.currentWidget()
+        if ed and hasattr(ed, 'zoomIn'):
+            ed.zoomIn(1)
+
+    def _zoom_out(self):
+        ed = self.editor.tabs.currentWidget()
+        if ed and hasattr(ed, 'zoomOut'):
+            ed.zoomOut(1)
+
+    def _toggle_comment(self):
+        """Toggle // comment on selected lines (or current line)."""
+        ed = self.editor.tabs.currentWidget()
+        if not ed:
+            return
+        if hasattr(ed, 'hasSelectedText') and ed.hasSelectedText():
+            line_from, _, line_to, col_to = ed.getSelection()
+            if col_to == 0 and line_to > line_from:
+                line_to -= 1
+        else:
+            line_from, _ = ed.getCursorPosition()
+            line_to = line_from
+
+        # Check if ALL lines are already commented
+        all_commented = True
+        for ln in range(line_from, line_to + 1):
+            text = ed.text(ln).rstrip('\n').rstrip('\r')
+            stripped = text.lstrip()
+            if stripped and not stripped.startswith("//"):
+                all_commented = False
+                break
+
+        ed.beginUndoAction()
+        for ln in range(line_from, line_to + 1):
+            text = ed.text(ln).rstrip('\n').rstrip('\r')
+            if all_commented:
+                idx = text.find("//")
+                if idx >= 0:
+                    if text[idx:idx + 3] == "// ":
+                        new_text = text[:idx] + text[idx + 3:]
+                    else:
+                        new_text = text[:idx] + text[idx + 2:]
+                    ed.setSelection(ln, 0, ln, len(text))
+                    ed.replaceSelectedText(new_text)
+            else:
+                stripped = text.lstrip()
+                indent = len(text) - len(stripped)
+                new_text = text[:indent] + "// " + text[indent:]
+                ed.setSelection(ln, 0, ln, len(text))
+                ed.replaceSelectedText(new_text)
+        ed.endUndoAction()
+
+    # ---- Find / Replace ----
+    def _toggle_find_bar(self):
+        if self._find_bar.isVisible():
+            self._find_bar.hide()
+        else:
+            self._find_bar.show()
+            self._find_input.setFocus()
+            ed = self.editor.tabs.currentWidget()
+            if ed and hasattr(ed, 'hasSelectedText') and ed.hasSelectedText():
+                self._find_input.setText(ed.selectedText())
+            self._find_input.selectAll()
+
+    def _toggle_find_bar_replace(self):
+        self._find_bar.show()
+        self._replace_input.setFocus()
+
+    def _find_next(self):
+        ed = self.editor.tabs.currentWidget()
+        text = self._find_input.text()
+        if not ed or not text:
+            return
+        if hasattr(ed, 'findFirst'):
+            ed.findFirst(text, False, False, False, True, True)
+
+    def _find_prev(self):
+        ed = self.editor.tabs.currentWidget()
+        text = self._find_input.text()
+        if not ed or not text:
+            return
+        if hasattr(ed, 'findFirst'):
+            ed.findFirst(text, False, False, False, True, False)
+
+    def _replace_one(self):
+        ed = self.editor.tabs.currentWidget()
+        if not ed or not self._find_input.text():
+            return
+        if (hasattr(ed, 'hasSelectedText') and ed.hasSelectedText()
+                and ed.selectedText() == self._find_input.text()):
+            ed.replaceSelectedText(self._replace_input.text())
+        self._find_next()
+
+    def _replace_all(self):
+        ed = self.editor.tabs.currentWidget()
+        text = self._find_input.text()
+        repl = self._replace_input.text()
+        if not ed or not text:
+            return
+        count = 0
+        ed.beginUndoAction()
+        ed.setCursorPosition(0, 0)
+        while ed.findFirst(text, False, False, False, False, True):
+            ed.replaceSelectedText(repl)
+            count += 1
+        ed.endUndoAction()
+
+    def _show_about(self):
+        QMessageBox.about(self, "About ArduinoAIDE",
+            "ArduinoAIDE\n\n"
+            "An AI-powered IDE for Teensy & Arduino development.\n"
+            "Built with PyQt6, QScintilla, and Ollama.\n\n"
+            "github.com/okfx/ArduinoAIDE")
 
     # ---- Build ----
     def _compile(self):
