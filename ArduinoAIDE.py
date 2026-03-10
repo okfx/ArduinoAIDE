@@ -2004,6 +2004,7 @@ class ChatPanel(QWidget):
         self._last_work_result = None             # AIWorkResult from most recent AI turn
         self._selection_mode = False              # True when using selection-based edit flow
         self._selection_edit = None               # dict with selection coords for selection mode
+        self._selection_prefilled = False         # True when pre-fill was used for selection prompt
         self._captured_selection = None            # snapshot of editor selection (survives focus loss)
         self._gen_start_time = None               # time.time() when generation started
         self._gen_token_count = 0                  # token count during streaming
@@ -3588,6 +3589,8 @@ class ChatPanel(QWidget):
     _SELECTION_SYSTEM_PROMPT = (
         "You are a code editor. The user's file is shown below with a selected "
         "region marked between <<<SELECTED>>> and >>>SELECTED>>>.\n\n"
+        "Your response will be inserted directly as code. "
+        "Output ONLY the replacement code — nothing else.\n\n"
         "RULES:\n"
         "- Respond with ONLY the replacement text for the selected region.\n"
         "- Do NOT include <<<SELECTED>>> or >>>SELECTED>>> markers.\n"
@@ -3605,32 +3608,20 @@ class ChatPanel(QWidget):
         "add punctuation, or rephrase it.\n"
         "- Match the indentation of the original selection exactly. Count the "
         "leading spaces or tabs and reproduce them.\n"
-        "- Be extremely concise. Respond with ONLY the replacement text. "
-        "No explanation, no alternatives, no commentary. If the user asks "
-        "to 'explain', give a brief explanation (2-3 sentences max) — "
-        "not a tutorial.\n"
-        "- Wrap your replacement in <<<REPLACEMENT>>> and >>>REPLACEMENT>>> "
-        "delimiters, like this:\n"
-        "<<<REPLACEMENT>>>\n"
-        "// your replacement code here\n"
-        ">>>REPLACEMENT>>>\n"
-        "- If your entire response IS the replacement (no explanation), "
-        "the delimiters are optional.\n"
+        "- Be extremely concise. No explanation, no alternatives, no commentary. "
+        "If the user asks to 'explain', give a brief explanation (2-3 sentences "
+        "max) — not a tutorial.\n"
         "\nEXAMPLES:\n\n"
         "Example 1:\n"
         "User selected: // This is the old comment\n"
         "User request: replace this with hello world\n"
         "Your response:\n"
-        "<<<REPLACEMENT>>>\n"
-        "// hello world\n"
-        ">>>REPLACEMENT>>>\n\n"
+        "// hello world\n\n"
         "Example 2:\n"
         "User selected: int delay_ms = 100;\n"
         "User request: change the delay to 250\n"
         "Your response:\n"
-        "<<<REPLACEMENT>>>\n"
-        "int delay_ms = 250;\n"
-        ">>>REPLACEMENT>>>\n\n"
+        "int delay_ms = 250;\n\n"
         "Example 3:\n"
         "User selected:\n"
         "void setup() {\n"
@@ -3638,19 +3629,15 @@ class ChatPanel(QWidget):
         "}\n"
         "User request: add a pin mode setup for pin 13\n"
         "Your response:\n"
-        "<<<REPLACEMENT>>>\n"
         "void setup() {\n"
         "  Serial.begin(9600);\n"
         "  pinMode(13, OUTPUT);\n"
-        "}\n"
-        ">>>REPLACEMENT>>>\n\n"
+        "}\n\n"
         "Example 4:\n"
         "User selected: // FIRMWARE_VERSION auto-generated from compile date\n"
         "User request: replace this with wowser\n"
         "Your response:\n"
-        "<<<REPLACEMENT>>>\n"
-        "// wowser\n"
-        ">>>REPLACEMENT>>>\n\n"
+        "// wowser\n\n"
         "Notice: every response is ONLY the replacement code. "
         "No explanation. No markdown fences. No preamble.\n"
     )
@@ -3689,11 +3676,13 @@ class ChatPanel(QWidget):
         user_msg = (f"File: {basename}\n\n{marked_content}\n\n"
                     f"User request: {user_text}")
 
-        # One-shot conversation: system + single user message (no history)
+        # One-shot conversation with assistant pre-fill to force code output
         messages = [
             {"role": "system", "content": self._SELECTION_SYSTEM_PROMPT},
             {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": "<<<REPLACEMENT>>>\n"},
         ]
+        self._selection_prefilled = True
 
         # Show user bubble
         show = display_text or user_text
@@ -3753,14 +3742,46 @@ class ChatPanel(QWidget):
 
     def _handle_selection_response(self, response_text):
         """Process the LLM response in selection mode.
-        Uses multi-strategy extraction to find the replacement text."""
+        Uses pre-fill extraction first, then multi-strategy fallbacks."""
         import re as _re
         text = response_text.strip()
         original = self._selection_edit['original_text']
+        prefilled = self._selection_prefilled
+        self._selection_prefilled = False
 
-        # Strategy 1: Delimiter extraction (<<<REPLACEMENT>>>...>>>REPLACEMENT>>>)
-        # Checked first — if the LLM wrapped actual code in delimiters alongside
-        # an apology preamble, the code inside the delimiters is still valid.
+        # ── Pre-fill path ──────────────────────────────────────────────
+        # When we pre-filled with "<<<REPLACEMENT>>>\n", the streamed
+        # response IS the replacement content (possibly followed by the
+        # closing >>>REPLACEMENT>>> marker).
+        if prefilled:
+            # Strip closing delimiter if the model added it
+            if '>>>REPLACEMENT>>>' in text:
+                text = text[:text.index('>>>REPLACEMENT>>>')].strip()
+            # Strip opening delimiter if the model echoed it
+            if text.startswith('<<<REPLACEMENT>>>'):
+                text = text[len('<<<REPLACEMENT>>>'):].lstrip('\n')
+            # Strip trailing code fences
+            if text.endswith('```'):
+                text = text[:text.rfind('```')].strip()
+            # Strip wrapping code fences
+            if text.startswith('```'):
+                first_nl = text.find('\n')
+                if first_nl != -1:
+                    text = text[first_nl + 1:]
+                if text.endswith('```'):
+                    text = text[:text.rfind('```')].strip()
+
+            if text:
+                # Run safety filters before creating edit
+                if self._selection_is_refusal(text):
+                    return
+                if self._selection_is_prose(text, original):
+                    return
+                self._create_selection_edit(text)
+                return
+
+        # ── Non-pre-fill fallback path ─────────────────────────────────
+        # Strategy 1: Delimiter extraction
         start_marker = '<<<REPLACEMENT>>>'
         end_marker = '>>>REPLACEMENT>>>'
         if start_marker in text and end_marker in text:
@@ -3771,24 +3792,8 @@ class ChatPanel(QWidget):
                 self._create_selection_edit(extracted)
                 return
 
-        # Strategy 2: Refusal detection — after delimiter extraction (which
-        # takes priority) but before heuristic strategies
-        _refusal_phrases = (
-            "i'm sorry", "i can't assist", "i cannot assist",
-            "i can't help", "i cannot help", "i apologize",
-            "i'm unable to", "i am unable to",
-            "i'm not able to", "i am not able to",
-            "as an ai", "as a language model",
-            "i must decline", "i can't do that", "i cannot do that",
-            "without more context", "can't provide a direct answer",
-            "it seems like you're asking", "it seems like you",
-            "please provide more", "could you clarify",
-            "if you have any other questions",
-        )
-        text_lower = text.lower()
-        if any(phrase in text_lower for phrase in _refusal_phrases):
-            self._add_info_msg(
-                "AI declined to make the edit.", C['fg_warn'])
+        # Strategy 2: Refusal detection
+        if self._selection_is_refusal(text):
             return
 
         # Strategy 3: Single code fence extraction
@@ -3799,7 +3804,7 @@ class ChatPanel(QWidget):
                 self._create_selection_edit(candidate)
                 return
 
-        # Strategy 4: Strip wrapping code fences if entire response is fenced
+        # Strategy 4: Strip wrapping code fences
         stripped = text
         if stripped.startswith('```'):
             first_nl = stripped.find('\n')
@@ -3810,51 +3815,23 @@ class ChatPanel(QWidget):
         if stripped != text:
             text = stripped
 
-        # Compute prose/code signals used by strategies 5–7
-        original_len = len(original)
-        first_line = text.strip().split('\n')[0].strip() if text.strip() else ''
-        _CODE_STARTERS = (
-            '//', '/*', '#include', '#define', '#pragma', '#if', '#else',
-            '#endif', 'void', 'int', 'float', 'char', 'bool', 'const',
-            'constexpr', 'static', 'class', 'struct', 'enum', 'if', 'for',
-            'while', 'return', 'typedef', 'unsigned', 'signed', 'long',
-            'short', 'double', 'auto', 'extern', 'volatile', 'namespace',
-            'using', 'template', 'virtual', 'public', 'private', 'protected',
-            'switch', 'case', 'break', 'continue', 'do', 'else', 'try',
-            'catch', 'throw', '{', '}', '(', '[', 'Serial', 'digital',
-            'analog', 'delay', 'pinMode', 'String', 'byte', 'uint',
-            'int8', 'int16', 'int32',
-        )
-        starts_with_code = any(
-            first_line.lower().startswith(s.lower()) for s in _CODE_STARTERS)
-        sentence_count = len(_re.findall(r'\.\s+[A-Z]', text))
-        has_list_markers = bool(
-            _re.search(r'^\d+[\.\)]\s', text, _re.MULTILINE))
-        has_markdown = '**' in text or text.strip().startswith('#')
-        is_long = len(text) > original_len * 2
-        has_paragraphs = '\n\n' in text
+        # Safety filters on remaining text
+        if self._selection_is_prose(text, original):
+            return
 
         # Strategy 5: Short response — probably just the replacement
+        original_len = len(original)
+        sentence_count = len(_re.findall(r'\.\s+[A-Z]', text))
+        has_paragraphs = '\n\n' in text
+        is_long = len(text) > original_len * 2
         if not is_long and not has_paragraphs and sentence_count < 2:
             self._create_selection_edit(text)
             return
 
-        # Strategy 6: Prose detection — 2+ signals means explanation
-        prose_signals = sum([
-            sentence_count >= 2,
-            is_long,
-            not starts_with_code,
-            has_list_markers,
-            has_markdown,
-            has_paragraphs,
-        ])
-        if prose_signals >= 2:
-            self._add_info_msg(
-                "AI responded with an explanation instead of a code edit. "
-                "Try rephrasing your request.", C['fg_warn'])
-            return
-
-        # Strategy 7: Conservative code check — response must look like code
+        # Strategy 6: Conservative code check
+        first_line = text.strip().split('\n')[0].strip() if text.strip() else ''
+        starts_with_code = any(
+            first_line.lower().startswith(s.lower()) for s in self._CODE_STARTERS)
         if starts_with_code and sentence_count < 2 and not has_paragraphs:
             self._create_selection_edit(text)
             return
@@ -3863,6 +3840,60 @@ class ChatPanel(QWidget):
         self._add_info_msg(
             "AI responded with an explanation instead of a code edit. "
             "Try rephrasing your request.", C['fg_warn'])
+
+    # Code token prefixes for detecting code vs prose in selection responses
+    _CODE_STARTERS = (
+        '//', '/*', '#include', '#define', '#pragma', '#if', '#else',
+        '#endif', 'void', 'int', 'float', 'char', 'bool', 'const',
+        'constexpr', 'static', 'class', 'struct', 'enum', 'if', 'for',
+        'while', 'return', 'typedef', 'unsigned', 'signed', 'long',
+        'short', 'double', 'auto', 'extern', 'volatile', 'namespace',
+        'using', 'template', 'virtual', 'public', 'private', 'protected',
+        'switch', 'case', 'break', 'continue', 'do', 'else', 'try',
+        'catch', 'throw', '{', '}', '(', '[', 'Serial', 'digital',
+        'analog', 'delay', 'pinMode', 'String', 'byte', 'uint',
+        'int8', 'int16', 'int32',
+    )
+
+    def _selection_is_refusal(self, text):
+        """Check if text is an LLM refusal. If so, show info and return True."""
+        _refusal_phrases = (
+            "i'm sorry", "i can't assist", "i cannot assist",
+            "i can't help", "i cannot help", "i apologize",
+            "i'm unable to", "i am unable to",
+            "as an ai", "as a language model",
+            "it seems like you're asking", "it seems like you",
+            "without more context", "could you clarify",
+            "if you have any other questions", "please provide more",
+        )
+        text_lower = text.lower()
+        if any(phrase in text_lower for phrase in _refusal_phrases):
+            self._add_info_msg(
+                "AI declined to make the edit.", C['fg_warn'])
+            return True
+        return False
+
+    def _selection_is_prose(self, text, original):
+        """Check if text looks like prose/explanation. If so, show info and return True."""
+        import re as _re
+        original_len = len(original)
+        sentence_count = len(_re.findall(r'\.\s+[A-Z]', text))
+        has_list_markers = bool(
+            _re.search(r'^\d+[\.\)]\s', text, _re.MULTILINE))
+        has_paragraphs = '\n\n' in text
+        is_long = len(text) > original_len * 2
+        prose_signals = sum([
+            sentence_count >= 2,
+            is_long,
+            has_list_markers,
+            has_paragraphs,
+        ])
+        if prose_signals >= 2:
+            self._add_info_msg(
+                "AI responded with an explanation instead of a code edit. "
+                "Try rephrasing your request.", C['fg_warn'])
+            return True
+        return False
 
     def _create_selection_edit(self, replacement_text):
         """Create a ProposedEdit for a selection replacement and show apply bar."""
@@ -3910,6 +3941,7 @@ class ChatPanel(QWidget):
     def stop_generation(self):
         self.worker.stop()
         self._selection_mode = False
+        self._selection_prefilled = False
         if self.thread.isRunning():
             self.thread.quit()
             if not self.thread.wait(2000):
@@ -4094,6 +4126,7 @@ class ChatPanel(QWidget):
 
     def _on_error(self, m):
         self._selection_mode = False
+        self._selection_prefilled = False
         self._finalize_stats(suffix=" (error)")
         # Show error with "Error" speaker label
         wrapper = QWidget()
@@ -5077,6 +5110,7 @@ class ChatPanel(QWidget):
         self._pending_edits = []
         self._file_acceptance = {}
         self._selection_mode = False
+        self._selection_prefilled = False
         self._selection_edit = None
         self._ai_edited_files.clear()
         self._working_set.clear()
