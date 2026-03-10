@@ -1946,6 +1946,8 @@ class ChatPanel(QWidget):
         self._target_override = None              # str: rel_path of file detected in user message (per-prompt only)
         self._symbol_index = {}                   # {name: [SymbolEntry, ...]} across all project files
         self._last_work_result = None             # AIWorkResult from most recent AI turn
+        self._selection_mode = False              # True when using selection-based edit flow
+        self._selection_edit = None               # dict with selection coords for selection mode
         self._gen_start_time = None               # time.time() when generation started
         self._gen_token_count = 0                  # token count during streaming
         self._stats_widget = None                  # stats row widget during streaming
@@ -3324,6 +3326,22 @@ class ChatPanel(QWidget):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
+        # Selection-based edit flow: if the active editor has selected text,
+        # use a simpler prompt/response format that bypasses the <<<EDIT parser
+        if self._editor_ref:
+            editor_widget = self._editor_ref.tabs.currentWidget()
+            if (editor_widget and hasattr(editor_widget, 'hasSelectedText')
+                    and editor_widget.hasSelectedText()):
+                sel_text = editor_widget.selectedText()
+                l_from, c_from, l_to, c_to = editor_widget.getSelection()
+                file_path = self._editor_ref.current_file()
+                if sel_text.strip() and file_path:
+                    self._send_selection_prompt(
+                        text, sel_text, l_from, c_from, l_to, c_to,
+                        file_path, display_text=display_text,
+                        display_code=display_code)
+                    return
+
         # Detect named files in user message for per-prompt targeting override
         self._target_override = self._detect_named_files(text)
 
@@ -3408,8 +3426,172 @@ class ChatPanel(QWidget):
         self.generation_started.emit()
         self.thread.start()
 
+    # -- Selection-based edit flow -------------------------------------------
+
+    _SELECTION_SYSTEM_PROMPT = (
+        "You are a code editor. The user's file is shown below with a selected "
+        "region marked between <<<SELECTED>>> and >>>SELECTED>>>.\n\n"
+        "RULES:\n"
+        "- Respond with ONLY the replacement text for the selected region.\n"
+        "- Do NOT include <<<SELECTED>>> or >>>SELECTED>>> markers.\n"
+        "- Do NOT wrap your response in ```code fences```.\n"
+        "- Do NOT include any explanation, preamble, or commentary.\n"
+        "- Do NOT repeat the rest of the file — ONLY the replacement.\n"
+        "- If the user asks to explain or analyze (not change) the code, "
+        "respond with a plain text explanation instead.\n"
+        "- Match the indentation style of the surrounding code.\n"
+    )
+
+    def _send_selection_prompt(self, user_text, selected_text,
+                                line_from, col_from, line_to, col_to,
+                                file_path, display_text=None,
+                                display_code=None):
+        """Send a selection-based edit prompt — simpler than <<<EDIT flow.
+        The LLM responds with just the replacement text for the selection."""
+        # Store selection details for apply time
+        self._selection_mode = True
+        self._selection_edit = {
+            'file_path': file_path,
+            'line_from': line_from,
+            'col_from': col_from,
+            'line_to': line_to,
+            'col_to': col_to,
+            'original_text': selected_text,
+        }
+
+        # Build file content with <<<SELECTED>>> markers
+        editor_widget = self._editor_ref.tabs.currentWidget()
+        full_content = editor_widget.text() if hasattr(editor_widget, 'text') else ""
+        lines = full_content.split('\n')
+        marked = []
+        for i, line in enumerate(lines):
+            if i == line_from:
+                marked.append('<<<SELECTED>>>')
+            marked.append(line)
+            if i == line_to:
+                marked.append('>>>SELECTED>>>')
+        marked_content = '\n'.join(marked)
+
+        basename = os.path.basename(file_path)
+        user_msg = (f"File: {basename}\n\n{marked_content}\n\n"
+                    f"User request: {user_text}")
+
+        # One-shot conversation: system + single user message (no history)
+        messages = [
+            {"role": "system", "content": self._SELECTION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ]
+
+        # Show user bubble
+        show = display_text or user_text
+        sel_preview = selected_text[:80].replace('\n', ' ')
+        if len(selected_text) > 80:
+            sel_preview += '…'
+        self._add_user_msg(show, code=sel_preview if display_code is None else display_code)
+
+        # Prepare UI for streaming (same as _send_prompt)
+        self.input_field.clear()
+        self.input_field.setEnabled(False)
+        self.send_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self._current_response = ""
+        self.apply_bar.hide()
+        self._pending_edits = []
+        self._apply_snapshot.clear()
+        self._undo_btn.hide()
+        self._add_ai_msg()
+
+        # Stats row
+        self._gen_start_time = time.time()
+        self._gen_token_count = 0
+        stats_wrapper = QWidget()
+        stats_wrapper.setStyleSheet("background: transparent;")
+        stats_hl = QHBoxLayout(stats_wrapper)
+        stats_hl.setContentsMargins(2, 4, 0, 4)
+        stats_hl.setSpacing(6)
+        spinner = SpinnerWidget()
+        spinner.start()
+        stats_hl.addWidget(spinner)
+        stats_lbl = QLabel("0 tokens")
+        stats_lbl.setStyleSheet(
+            f"color:{C['fg_dim']};{FONT_SMALL}background:transparent;border:none;")
+        stats_hl.addWidget(stats_lbl)
+        stats_hl.addStretch()
+        if self._current_ai_wrapper:
+            self._current_ai_wrapper.layout().addWidget(stats_wrapper)
+        else:
+            self._chat_layout.insertWidget(
+                self._chat_layout.count() - 1, stats_wrapper)
+        self._stats_widget = stats_wrapper
+        self._stats_label = stats_lbl
+        self._stats_spinner = spinner
+
+        # Send to Ollama with selection-specific messages
+        self.worker.messages = messages
+        if self.thread.isRunning():
+            self.worker.stop()
+            self.thread.quit()
+            if not self.thread.wait(2000):
+                self.thread.terminate()
+                self.thread.wait(1000)
+                self._setup_worker_thread()
+        self.generation_started.emit()
+        self.thread.start()
+
+    def _handle_selection_response(self, response_text):
+        """Process the LLM response in selection mode.
+        Strip code fences, detect explanations, or create selection edit."""
+        text = response_text.strip()
+
+        # Strip markdown code fences if LLM wrapped its response
+        if text.startswith('```'):
+            first_nl = text.find('\n')
+            if first_nl != -1:
+                text = text[first_nl + 1:]
+        if text.endswith('```'):
+            text = text[:text.rfind('```')].rstrip()
+
+        # Detect explanation responses (no apply bar needed)
+        original = self._selection_edit['original_text']
+        code_starters = ('//', '#', '/*', 'void', 'int', 'float', 'char',
+                         'bool', 'const', 'static', 'class', 'struct', 'enum',
+                         'if', 'for', 'while', 'return', '#include', 'unsigned',
+                         'long', 'short', 'double', 'auto', 'extern', 'typedef',
+                         'namespace', 'template', 'using', 'public', 'private',
+                         'protected', 'virtual', 'inline', 'volatile', 'register',
+                         'switch', 'case', 'break', 'continue', 'do', 'else',
+                         'try', 'catch', 'throw', 'delete', 'new', 'sizeof',
+                         '{', '}', '(', ')', '[', ']')
+        first_word = text.split()[0] if text.split() else ''
+        is_explanation = (
+            len(text) > len(original) * 3
+            and '. ' in text
+            and not any(text.lstrip().startswith(c) for c in code_starters)
+            and not first_word.endswith(';')
+        )
+        if is_explanation:
+            # Already rendered in chat as streaming text — nothing more to do
+            return
+
+        # Create a ProposedEdit for the selection replacement
+        file_path = self._selection_edit['file_path']
+        edit = ProposedEdit(
+            edit_type="selection",
+            filename=os.path.basename(file_path),
+            old_text=original,
+            new_text=text,
+            operation="selection_replace",
+            resolved_path=file_path,
+        )
+        self._pending_edits = [edit]
+        self._populate_apply_bar([edit])
+        self._add_info_msg(
+            'Selection edit ready — use the Apply bar to replace the selected text.',
+            C['fg_ok'])
+
     def stop_generation(self):
         self.worker.stop()
+        self._selection_mode = False
         if self.thread.isRunning():
             self.thread.quit()
             if not self.thread.wait(2000):
@@ -3539,12 +3721,18 @@ class ChatPanel(QWidget):
         if self.thread.isRunning():
             self.thread.quit()
         if self._current_response:
-            self._conversation.append({"role": "assistant", "content": self._current_response})
-            self._render_formatted_response()
-            result = AIWorkResult(assistant_text=self._current_response)
-            result.diagnostics = list(self._error_diagnostics)
-            self._parse_edits(self._current_response, result)
-            self._last_work_result = result
+            # Selection mode: bypass <<<EDIT parser, handle replacement directly
+            if self._selection_mode:
+                self._handle_selection_response(self._current_response)
+                self._selection_mode = False
+            else:
+                self._conversation.append(
+                    {"role": "assistant", "content": self._current_response})
+                self._render_formatted_response()
+                result = AIWorkResult(assistant_text=self._current_response)
+                result.diagnostics = list(self._error_diagnostics)
+                self._parse_edits(self._current_response, result)
+                self._last_work_result = result
         # Finalize stats — stop spinner, show final stats
         self._finalize_stats()
         self._current_ai_widget = None
@@ -3574,6 +3762,7 @@ class ChatPanel(QWidget):
         self._gen_start_time = None
 
     def _on_error(self, m):
+        self._selection_mode = False
         self._finalize_stats(suffix=" (error)")
         # Show error with "Error" speaker label
         wrapper = QWidget()
@@ -4136,6 +4325,62 @@ class ChatPanel(QWidget):
                     self._track_ai_edited_file(edit.filename)
                 else:
                     errors.append(f"✗ Could not write: {edit.filename}")
+            elif edit.operation == "selection_replace":
+                # Selection-based edit — replace using stored coordinates
+                sel = self._selection_edit
+                if sel and fp:
+                    editor_w = self._editor_ref.tabs.currentWidget()
+                    file_matches = (
+                        self._editor_ref.current_file() == sel['file_path'])
+                    if editor_w and file_matches and hasattr(editor_w, 'setSelection'):
+                        # Safety check: verify text at stored range still matches
+                        lf, cf = sel['line_from'], sel['col_from']
+                        lt, ct = sel['line_to'], sel['col_to']
+                        editor_w.setSelection(lf, cf, lt, ct)
+                        current_sel = editor_w.selectedText()
+                        if current_sel == sel['original_text']:
+                            editor_w.replaceSelectedText(edit.new_text)
+                            applied += 1
+                            self._track_ai_edited_file(edit.filename)
+                            # Save to disk
+                            if hasattr(editor_w, 'save_file'):
+                                editor_w.save_file()
+                        else:
+                            # Selection shifted — fall back to search_replace
+                            files = self._editor_ref.get_all_files()
+                            content = files.get(fp, "")
+                            if edit.old_text and edit.old_text in content:
+                                new_content = content.replace(
+                                    edit.old_text, edit.new_text, 1)
+                                if self._editor_ref.set_file_content(
+                                        fp, new_content):
+                                    applied += 1
+                                    self._track_ai_edited_file(edit.filename)
+                                else:
+                                    errors.append(
+                                        f"✗ Could not write {edit.filename}")
+                            else:
+                                errors.append(
+                                    f"✗ Selection changed since prompt was sent. "
+                                    f"Copy the replacement manually.")
+                    else:
+                        # File not active — fall back to search_replace
+                        files = self._editor_ref.get_all_files()
+                        content = files.get(fp, "")
+                        if edit.old_text and edit.old_text in content:
+                            new_content = content.replace(
+                                edit.old_text, edit.new_text, 1)
+                            if self._editor_ref.set_file_content(fp, new_content):
+                                applied += 1
+                                self._track_ai_edited_file(edit.filename)
+                            else:
+                                errors.append(
+                                    f"✗ Could not write {edit.filename}")
+                        else:
+                            errors.append(
+                                f"✗ Original selection not found in "
+                                f"{edit.filename}")
+                self._selection_edit = None
 
         parts = [f"Applied {applied}/{applied + len(errors)} change{'s' if applied != 1 else ''}."]
         if rejected:
@@ -4493,6 +4738,8 @@ class ChatPanel(QWidget):
         self.fix_continuation_bar.hide()
         self._pending_edits = []
         self._file_acceptance = {}
+        self._selection_mode = False
+        self._selection_edit = None
         self._ai_edited_files.clear()
         self._working_set.clear()
         self._update_context_bar()
