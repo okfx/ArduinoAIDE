@@ -1126,6 +1126,31 @@ class BoardSidebarButton(SidebarButton):
         p.end()
 
 
+class PlotterSidebarButton(SidebarButton):
+    """Sidebar button with a line-chart icon for Serial Plotter."""
+    def __init__(self, tooltip, parent=None):
+        super().__init__("", tooltip, parent)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        col = QColor(C['fg']) if self.isChecked() or self.underMouse() else QColor(C['fg_dim'])
+        p.setPen(QPen(col, 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        cx, cy = self.width() // 2, self.height() // 2
+        # Axes
+        p.drawLine(cx - 9, cy - 8, cx - 9, cy + 8)
+        p.drawLine(cx - 9, cy + 8, cx + 9, cy + 8)
+        # Line chart polyline
+        p.setPen(QPen(QColor(C['teal']), 1.8))
+        points = [QPointF(cx - 7, cy + 4), QPointF(cx - 3, cy - 2),
+                  QPointF(cx + 1, cy + 1), QPointF(cx + 5, cy - 6),
+                  QPointF(cx + 8, cy - 3)]
+        p.drawPolyline(QPolygonF(points))
+        p.end()
+
+
 class NavBadge(QLabel):
     """Small circular count badge overlaid on a sidebar icon button."""
     def __init__(self, parent=None):
@@ -2665,6 +2690,454 @@ class BoardManagerPanel(QWidget):
                 QTimer.singleShot(0, lambda: self._on_action_done(
                     str(e), False))
         threading.Thread(target=go, daemon=True).start()
+
+
+# =============================================================================
+# Serial Plotter
+# =============================================================================
+
+PLOT_COLORS = ["#50fa7b", "#ff79c6", "#8be9fd", "#ffb86c", "#bd93f9",
+               "#f1fa8c", "#ff5555", "#6272a4"]
+
+
+class PlotWidget(QWidget):
+    """Custom QPainter-based line chart widget."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(200)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMouseTracking(True)
+        self._data = []          # list of deques, one per channel
+        self._channel_names = []
+        self._auto_scale = True
+        self._y_min = 0.0
+        self._y_max = 100.0
+        self._mouse_pos = None   # for crosshair
+        self._margin_left = 60
+        self._margin_right = 16
+        self._margin_top = 16
+        self._margin_bottom = 30
+
+    def set_data(self, data, names):
+        self._data = data
+        self._channel_names = names
+
+    def set_y_range(self, auto, y_min=0.0, y_max=100.0):
+        self._auto_scale = auto
+        self._y_min = y_min
+        self._y_max = y_max
+
+    def mouseMoveEvent(self, event):
+        self._mouse_pos = event.pos()
+        self.update()
+
+    def leaveEvent(self, event):
+        self._mouse_pos = None
+        self.update()
+
+    def paintEvent(self, event):
+        from collections import deque
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Background
+        p.fillRect(0, 0, w, h, QColor(C['bg_dark']))
+
+        ml, mr, mt, mb = self._margin_left, self._margin_right, self._margin_top, self._margin_bottom
+        plot_w = w - ml - mr
+        plot_h = h - mt - mb
+        if plot_w < 10 or plot_h < 10:
+            p.end()
+            return
+
+        # Compute Y range
+        y_min, y_max = self._y_min, self._y_max
+        if self._auto_scale and self._data:
+            all_vals = []
+            for d in self._data:
+                all_vals.extend(d)
+            if all_vals:
+                y_min = min(all_vals)
+                y_max = max(all_vals)
+                margin = (y_max - y_min) * 0.1 or 1.0
+                y_min -= margin
+                y_max += margin
+            else:
+                y_min, y_max = 0.0, 100.0
+        if y_max == y_min:
+            y_max = y_min + 1.0
+
+        max_samples = max((len(d) for d in self._data), default=0)
+
+        # Grid lines
+        grid_pen = QPen(QColor(C['border']))
+        grid_pen.setStyle(Qt.PenStyle.DotLine)
+        p.setPen(grid_pen)
+        n_grid_y = 5
+        for i in range(n_grid_y + 1):
+            gy = mt + plot_h - (i / n_grid_y) * plot_h
+            p.drawLine(int(ml), int(gy), int(ml + plot_w), int(gy))
+        n_grid_x = min(5, max_samples - 1) if max_samples > 1 else 0
+        if n_grid_x > 0:
+            for i in range(n_grid_x + 1):
+                gx = ml + (i / n_grid_x) * plot_w
+                p.drawLine(int(gx), int(mt), int(gx), int(mt + plot_h))
+
+        # Axis labels
+        label_font = QFont("monospace", 9)
+        p.setFont(label_font)
+        p.setPen(QColor(C['fg_muted']))
+        for i in range(n_grid_y + 1):
+            val = y_min + (i / n_grid_y) * (y_max - y_min)
+            gy = mt + plot_h - (i / n_grid_y) * plot_h
+            p.drawText(2, int(gy - 6), ml - 6, 12,
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       f"{val:.1f}")
+        # X-axis: sample numbers
+        if max_samples > 0 and n_grid_x > 0:
+            for i in range(n_grid_x + 1):
+                gx = ml + (i / n_grid_x) * plot_w
+                sample_idx = int(i / n_grid_x * (max_samples - 1)) if max_samples > 1 else 0
+                p.drawText(int(gx - 20), int(mt + plot_h + 4), 40, 16,
+                           Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                           str(sample_idx))
+
+        # Draw data lines
+        for ch_idx, d in enumerate(self._data):
+            if len(d) < 2:
+                continue
+            color = QColor(PLOT_COLORS[ch_idx % len(PLOT_COLORS)])
+            pen = QPen(color, 2)
+            p.setPen(pen)
+            points = []
+            data_list = list(d)
+            for i, val in enumerate(data_list):
+                x = ml + (i / (max_samples - 1)) * plot_w if max_samples > 1 else ml
+                y = mt + plot_h - ((val - y_min) / (y_max - y_min)) * plot_h
+                points.append(QPointF(x, y))
+            if len(points) >= 2:
+                p.drawPolyline(QPolygonF(points))
+
+        # Crosshair + tooltip
+        if self._mouse_pos and self._data and max_samples > 1:
+            mx, my = self._mouse_pos.x(), self._mouse_pos.y()
+            if ml <= mx <= ml + plot_w and mt <= my <= mt + plot_h:
+                cross_pen = QPen(QColor(C['fg_dim']))
+                cross_pen.setStyle(Qt.PenStyle.DashLine)
+                p.setPen(cross_pen)
+                p.drawLine(mx, mt, mx, mt + plot_h)
+                p.drawLine(ml, my, ml + plot_w, my)
+                # Determine sample index
+                frac = (mx - ml) / plot_w
+                sample_idx = int(frac * (max_samples - 1))
+                sample_idx = max(0, min(sample_idx, max_samples - 1))
+                # Build tooltip
+                tip_lines = [f"Sample {sample_idx}"]
+                for ch_idx, d in enumerate(self._data):
+                    data_list = list(d)
+                    if sample_idx < len(data_list):
+                        name = self._channel_names[ch_idx] if ch_idx < len(self._channel_names) else f"ch{ch_idx}"
+                        tip_lines.append(f"  {name}: {data_list[sample_idx]:.2f}")
+                tip_text = "\n".join(tip_lines)
+                # Draw tooltip box
+                tip_font = QFont("monospace", 9)
+                p.setFont(tip_font)
+                fm = p.fontMetrics()
+                tip_w = max(fm.horizontalAdvance(l) for l in tip_lines) + 12
+                tip_h = fm.height() * len(tip_lines) + 8
+                tx = min(mx + 10, w - tip_w - 4)
+                ty = max(my - tip_h - 10, mt)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(C['bg']))
+                p.drawRect(tx, ty, tip_w, tip_h)
+                p.setPen(QColor(C['fg']))
+                p.drawText(tx + 6, ty + 4, tip_w - 12, tip_h - 8,
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                           tip_text)
+
+        # Legend (top-right)
+        if self._channel_names:
+            legend_font = QFont("monospace", 9)
+            p.setFont(legend_font)
+            fm = p.fontMetrics()
+            lx = ml + plot_w - 10
+            ly = mt + 6
+            for ch_idx, name in enumerate(self._channel_names):
+                color = QColor(PLOT_COLORS[ch_idx % len(PLOT_COLORS)])
+                tw = fm.horizontalAdvance(name)
+                rx = lx - tw - 14
+                # Background
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(C['bg']))
+                p.drawRect(rx - 2, ly - 2, tw + 18, fm.height() + 4)
+                # Color dot
+                p.setBrush(color)
+                p.drawEllipse(rx, ly + 3, 8, 8)
+                # Label
+                p.setPen(QColor(C['fg_dim']))
+                p.drawText(rx + 12, ly, tw + 4, fm.height(),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                           name)
+                ly += fm.height() + 4
+
+        p.end()
+
+
+class SerialPlotterPanel(QWidget):
+    """Real-time serial plotter with QPainter line charts."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from collections import deque
+        self._deque_cls = deque
+        self._data = []            # list of deques
+        self._channel_count = 0
+        self._channel_names = []
+        self._sample_count = 0
+        self._paused = False
+        self._dirty = False
+        self._header_detected = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header, _, hl = _make_panel_header("SERIAL PLOTTER")
+        layout.addWidget(header)
+
+        # Toolbar
+        toolbar = QWidget()
+        toolbar.setStyleSheet(
+            f"background:{C['bg']};border-bottom:1px solid {C['border']};")
+        toolbar.setFixedHeight(36)
+        tb = QHBoxLayout(toolbar)
+        tb.setContentsMargins(8, 2, 8, 2)
+        tb.setSpacing(6)
+
+        self._ch_label = QLabel("Channels: 0")
+        self._ch_label.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        tb.addWidget(self._ch_label)
+
+        self._pause_btn = QPushButton("Pause")
+        self._pause_btn.setCheckable(True)
+        self._pause_btn.setStyleSheet(BTN_SM_SECONDARY)
+        self._pause_btn.clicked.connect(self._toggle_pause)
+        tb.addWidget(self._pause_btn)
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setStyleSheet(BTN_SM_GHOST)
+        clear_btn.clicked.connect(self._clear)
+        tb.addWidget(clear_btn)
+
+        tb.addWidget(QLabel("|"))
+
+        self._auto_scale_btn = QPushButton("Auto Y")
+        self._auto_scale_btn.setCheckable(True)
+        self._auto_scale_btn.setChecked(True)
+        self._auto_scale_btn.setStyleSheet(BTN_SM_SECONDARY)
+        self._auto_scale_btn.clicked.connect(self._on_auto_scale_changed)
+        tb.addWidget(self._auto_scale_btn)
+
+        ymin_lbl = QLabel("Min:")
+        ymin_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        tb.addWidget(ymin_lbl)
+        self._y_min_spin = self._make_double_spin(-1e6, 1e6, 0.0)
+        self._y_min_spin.setEnabled(False)
+        tb.addWidget(self._y_min_spin)
+
+        ymax_lbl = QLabel("Max:")
+        ymax_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        tb.addWidget(ymax_lbl)
+        self._y_max_spin = self._make_double_spin(-1e6, 1e6, 100.0)
+        self._y_max_spin.setEnabled(False)
+        tb.addWidget(self._y_max_spin)
+
+        tb.addWidget(QLabel("|"))
+
+        pts_lbl = QLabel("Points:")
+        pts_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        tb.addWidget(pts_lbl)
+        self._max_points_spin = self._make_int_spin(100, 10000, 500)
+        self._max_points_spin.valueChanged.connect(self._on_max_points_changed)
+        tb.addWidget(self._max_points_spin)
+
+        tb.addStretch()
+
+        export_btn = QPushButton("Export CSV")
+        export_btn.setStyleSheet(BTN_SM_GHOST)
+        export_btn.clicked.connect(self._export_csv)
+        tb.addWidget(export_btn)
+
+        layout.addWidget(toolbar)
+
+        # Plot area
+        self._plot_widget = PlotWidget()
+        layout.addWidget(self._plot_widget, stretch=1)
+
+        # Refresh timer (~16 FPS)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(60)
+        self._refresh_timer.timeout.connect(self._on_refresh_tick)
+        self._refresh_timer.start()
+
+    @staticmethod
+    def _make_double_spin(lo, hi, val):
+        from PyQt6.QtWidgets import QDoubleSpinBox
+        sb = QDoubleSpinBox()
+        sb.setRange(lo, hi)
+        sb.setValue(val)
+        sb.setDecimals(1)
+        sb.setFixedWidth(72)
+        sb.setStyleSheet(
+            f"QDoubleSpinBox{{background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};border-radius:3px;"
+            f"padding:1px 4px;{FONT_SMALL}}}")
+        return sb
+
+    @staticmethod
+    def _make_int_spin(lo, hi, val):
+        from PyQt6.QtWidgets import QSpinBox
+        sb = QSpinBox()
+        sb.setRange(lo, hi)
+        sb.setValue(val)
+        sb.setFixedWidth(64)
+        sb.setStyleSheet(
+            f"QSpinBox{{background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};border-radius:3px;"
+            f"padding:1px 4px;{FONT_SMALL}}}")
+        return sb
+
+    # ── Data handling ──────────────────────────────────────────────────────
+
+    def on_serial_line(self, line):
+        """Called for every serial line. Parse and append to data model."""
+        values = self._parse_serial_line(line)
+        if values is None:
+            return
+        if self._channel_count == 0 or len(values) != self._channel_count:
+            self._reset_channels(len(values))
+        for i, v in enumerate(values):
+            self._data[i].append(v)
+        self._sample_count += 1
+        self._dirty = True
+
+    def on_connection_changed(self, connected):
+        """Reset plot data when serial connection starts."""
+        if connected:
+            self._reset_channels(0)
+            self._header_detected = False
+            self._plot_widget.update()
+
+    def _parse_serial_line(self, line):
+        """Parse a serial line into a list of floats, or None."""
+        line = line.strip()
+        if not line:
+            return None
+        # Try splitting: comma, tab, then whitespace
+        for sep in [',', '\t', None]:
+            tokens = line.split(sep) if sep else line.split()
+            if len(tokens) >= 1:
+                values = []
+                all_numeric = True
+                for t in tokens:
+                    t = t.strip()
+                    if not t:
+                        continue
+                    try:
+                        values.append(float(t))
+                    except ValueError:
+                        all_numeric = False
+                        break
+                if all_numeric and values:
+                    return values
+        # Check if it's a label header (non-numeric first line)
+        if not self._header_detected and self._channel_count == 0:
+            for sep in [',', '\t', None]:
+                tokens = line.split(sep) if sep else line.split()
+                labels = [t.strip() for t in tokens if t.strip()]
+                if len(labels) >= 1 and all(not self._is_numeric(l) for l in labels):
+                    self._channel_names = labels
+                    self._header_detected = True
+                    return None
+        return None
+
+    @staticmethod
+    def _is_numeric(s):
+        try:
+            float(s)
+            return True
+        except ValueError:
+            return False
+
+    def _reset_channels(self, count):
+        """Reset data model for new channel count."""
+        max_pts = self._max_points_spin.value()
+        self._channel_count = count
+        self._data = [self._deque_cls(maxlen=max_pts) for _ in range(count)]
+        if not self._header_detected or len(self._channel_names) != count:
+            self._channel_names = [f"ch{i}" for i in range(count)]
+        self._sample_count = 0
+        self._plot_widget.set_data(self._data, self._channel_names)
+        self._update_channel_label()
+
+    def _update_channel_label(self):
+        self._ch_label.setText(f"Channels: {self._channel_count}")
+
+    # ── UI actions ─────────────────────────────────────────────────────────
+
+    def _toggle_pause(self):
+        self._paused = self._pause_btn.isChecked()
+        self._pause_btn.setText("Resume" if self._paused else "Pause")
+
+    def _clear(self):
+        self._reset_channels(0)
+        self._header_detected = False
+        self._plot_widget.update()
+
+    def _on_auto_scale_changed(self):
+        auto = self._auto_scale_btn.isChecked()
+        self._y_min_spin.setEnabled(not auto)
+        self._y_max_spin.setEnabled(not auto)
+        self._update_y_range()
+
+    def _on_max_points_changed(self):
+        max_pts = self._max_points_spin.value()
+        new_data = []
+        for d in self._data:
+            nd = self._deque_cls(d, maxlen=max_pts)
+            new_data.append(nd)
+        self._data = new_data
+        self._plot_widget.set_data(self._data, self._channel_names)
+        self._dirty = True
+
+    def _update_y_range(self):
+        auto = self._auto_scale_btn.isChecked()
+        self._plot_widget.set_y_range(auto, self._y_min_spin.value(), self._y_max_spin.value())
+        self._dirty = True
+
+    def _on_refresh_tick(self):
+        if self._dirty and not self._paused:
+            self._update_y_range()
+            self._plot_widget.update()
+            self._dirty = False
+
+    def _export_csv(self):
+        if not self._data:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export Plot Data", "", "CSV (*.csv)")
+        if not path:
+            return
+        max_len = max((len(d) for d in self._data), default=0)
+        with open(path, 'w') as f:
+            f.write(",".join(self._channel_names) + "\n")
+            for i in range(max_len):
+                row = []
+                for d in self._data:
+                    data_list = list(d)
+                    row.append(str(data_list[i]) if i < len(data_list) else "")
+                f.write(",".join(row) + "\n")
 
 
 # =============================================================================
@@ -6450,6 +6923,9 @@ class SerialReaderThread(QThread):
 
 class SerialMonitor(QWidget):
     """Full serial monitor panel with threaded reader, toolbar, output, and input row."""
+    serial_line_received = pyqtSignal(str)
+    connection_changed = pyqtSignal(bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._reader = None
@@ -6639,6 +7115,7 @@ class SerialMonitor(QWidget):
             self.port_combo.setEnabled(False)
             self.baud_combo.setEnabled(False)
             self._append_system(f"Connected to {port} at {baud} baud")
+            self.connection_changed.emit(True)
         except ImportError:
             self._append_system("pyserial not installed. Run: pip install pyserial")
         except Exception as e:
@@ -6655,6 +7132,7 @@ class SerialMonitor(QWidget):
         self.port_combo.setEnabled(True)
         self.baud_combo.setEnabled(True)
         self._append_system("Disconnected")
+        self.connection_changed.emit(False)
 
     def _on_data(self, data: bytes):
         # Update counters
@@ -6690,6 +7168,7 @@ class SerialMonitor(QWidget):
                 self._append_line(line)
 
     def _append_line(self, text):
+        self.serial_line_received.emit(text)
         if self._timestamps:
             from datetime import datetime
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -8953,6 +9432,7 @@ class MainWindow(QMainWindow):
         self.btn_boards = BoardSidebarButton("Boards")
         self.btn_git = GitSidebarButton("Git")
         self.btn_serial = SerialSidebarButton("Serial Monitor")
+        self.btn_plotter = PlotterSidebarButton("Serial Plotter")
         self.btn_settings = SettingsSidebarButton("Settings")
 
         self.btn_code.clicked.connect(lambda: self._switch_view(0))
@@ -8963,6 +9443,7 @@ class MainWindow(QMainWindow):
         self.btn_serial.clicked.connect(lambda: self._switch_view(5))
         self.btn_libs.clicked.connect(lambda: self._switch_view(6))
         self.btn_boards.clicked.connect(lambda: self._switch_view(7))
+        self.btn_plotter.clicked.connect(lambda: self._switch_view(8))
 
         sb_layout.addWidget(self.btn_code)
         sb_layout.addWidget(self.btn_chat)
@@ -8971,6 +9452,7 @@ class MainWindow(QMainWindow):
         sb_layout.addWidget(self.btn_boards)
         sb_layout.addWidget(self.btn_git)
         sb_layout.addWidget(self.btn_serial)
+        sb_layout.addWidget(self.btn_plotter)
         sb_layout.addStretch()
         sb_layout.addWidget(self.btn_settings)
 
@@ -9099,13 +9581,19 @@ class MainWindow(QMainWindow):
         self.board_manager = BoardManagerPanel()
         self.view_stack.addWidget(self.board_manager)
 
+        # View 8: Serial Plotter
+        self.serial_plotter = SerialPlotterPanel()
+        self.serial_monitor.serial_line_received.connect(self.serial_plotter.on_serial_line)
+        self.serial_monitor.connection_changed.connect(self.serial_plotter.on_connection_changed)
+        self.view_stack.addWidget(self.serial_plotter)
+
         main_layout.addWidget(self.view_stack)
 
     def _switch_view(self, idx):
         self.view_stack.setCurrentIndex(idx)
         for i, btn in enumerate([self.btn_code, self.btn_chat, self.btn_files,
                                  self.btn_settings, self.btn_git, self.btn_serial,
-                                 self.btn_libs, self.btn_boards]):
+                                 self.btn_libs, self.btn_boards, self.btn_plotter]):
             btn.setChecked(i == idx)
         if idx == 4:
             self.git_panel.refresh_status()
@@ -9465,6 +9953,7 @@ class MainWindow(QMainWindow):
         vm.addAction(self._make_action("Git", lambda: self._switch_view(4), "Ctrl+5"))
         vm.addAction(self._make_action("Libraries", lambda: self._switch_view(6), "Ctrl+6"))
         vm.addAction(self._make_action("Boards", lambda: self._switch_view(7), "Ctrl+7"))
+        vm.addAction(self._make_action("Serial Plotter", lambda: self._switch_view(8), "Ctrl+8"))
 
         # ── Help ──
         hm = mb.addMenu("Help")
@@ -10230,7 +10719,7 @@ class MainWindow(QMainWindow):
         self._switch_view(0)
         self.editor.goto_line(filepath, line)
 
-    _PANEL_NAMES = {0: "editor", 1: "chat", 2: "files", 3: "settings", 4: "git", 5: "serial", 6: "libraries", 7: "boards"}
+    _PANEL_NAMES = {0: "editor", 1: "chat", 2: "files", 3: "settings", 4: "git", 5: "serial", 6: "libraries", 7: "boards", 8: "plotter"}
     _PANEL_INDICES = {v: k for k, v in _PANEL_NAMES.items()}
 
     def _save_project_state(self):
