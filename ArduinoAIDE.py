@@ -482,6 +482,43 @@ def _save_config(data):
     except Exception:
         pass
 
+# Ollama inference options — tuned for Qwen3 non-thinking mode
+OLLAMA_CHAT_OPTIONS = {
+    "enable_thinking": False,
+    "temperature": 0.3,
+    "top_p": 0.8,
+    "top_k": 20,
+    "repeat_penalty": 1.1,
+    "num_predict": 4096,
+}
+
+# Stop sequences to catch format leakage
+OLLAMA_STOP_SEQUENCES = ["```", "<|im_start|>", "<|im_end|>", "<think>"]
+
+# Persist custom rules to disk
+_RULES_FILE = os.path.expanduser("~/.teensy_ide_rules.txt")
+
+def _load_custom_rules():
+    """Load custom system prompt rules from disk, or return None if no custom rules."""
+    try:
+        with open(_RULES_FILE, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+        return text if text else None
+    except (FileNotFoundError, OSError):
+        return None
+
+def _save_custom_rules(text):
+    """Save custom rules to disk. Pass empty string to delete."""
+    try:
+        if not text.strip():
+            if os.path.exists(_RULES_FILE):
+                os.remove(_RULES_FILE)
+            return
+        with open(_RULES_FILE, "w", encoding="utf-8") as f:
+            f.write(text)
+    except OSError:
+        pass
+
 # Board FQBN → friendly display name mapping
 BOARD_DISPLAY = {
     "teensy:avr:teensy40": "Teensy 4.0",
@@ -497,104 +534,140 @@ PROJECT_EXTENSIONS = {".ino", ".cpp", ".c", ".h", ".hpp", ".md", ".txt", ".json"
 TARGET_EXTENSIONS = {".ino", ".cpp", ".c", ".h", ".hpp"}  # code extensions for file-targeting detection
 PROJECT_SKIP_DIRS = {'.git', '__pycache__', 'build', 'node_modules', '.venv', 'venv'}
 
-SYSTEM_PROMPT = """You are an embedded-systems coding assistant integrated into an IDE for Teensy microcontrollers (PJRC).
-You write clean, efficient C/C++ for real-time applications. You understand hardware registers, interrupts, DMA, timers, and peripheral configuration.
+SYSTEM_PROMPT = """You are ArduinoAIDE, an embedded firmware coding assistant for Teensy/Arduino C/C++ projects. The IDE already provides the project files and relevant context. Act on them directly.
 
-YOUR ROLE: Act, don't ask. The user's project files are included in every message — you already have them. Produce code edits directly.
+DEFAULT MODE
+- If the user asks to change, fix, add, remove, refactor, implement, replace, or resolve errors: output edits immediately.
+- If the user asks to explain, review, summarize, or analyze: answer in plain text only.
+- If compiler or build errors are shown: fix them immediately using edits.
+- Do not ask for files, paths, snippets, or pasted code that should already be in context.
+- Ask at most one short clarifying question only when a safe edit is impossible without it.
 
-BEHAVIOR RULES:
-- When asked to change, fix, add, or remove code: produce <<<EDIT blocks immediately. Do not explain what you would do — do it.
-- When asked to explain or analyze code: respond in plain text, no edit blocks.
-- When compiler errors are included: produce <<<EDIT blocks that fix them. Do not ask which errors or which file.
-- NEVER ask the user to "provide", "share", or "paste" a file — you already have it.
-- NEVER say "please provide the path" — look at the files in your context.
-- NEVER respond with only "Sure, I can help with that" — always include an edit or substantive answer.
-- Prefer action over explanation. If the intent is clear, produce the edit.
-- If genuinely ambiguous, ask ONE short clarifying question — never multiple.
-- If you need a file not in your context, name it and the IDE will add it.
-- A Teensy quick reference is appended below. A comprehensive API reference may also be in your file context — consult it for pin mappings, peripheral APIs, and library usage.
-- Be CONCISE. Give the shortest useful response. When the user asks for a code change, produce the edit with at most one sentence of explanation. Do not lecture, do not provide tutorials, do not show alternative approaches unless asked.
-- If the user wants more detail, they will ask. Default to brevity.
+OUTPUT RULES
+- Be brief.
+- For edit requests, output only the edit block(s). No preface. No afterword.
+- Never say you can help, would you like me to, here is the fix, or similar filler.
+- Never output markdown fences.
+- Never output unified diffs.
+- Never output XML, JSON, YAML, LaTeX, role labels, special tokens, or chat wrappers.
+- Never output <think>, </think>, <|im_start|>, <|im_end|>, assistant:, or similar tokens anywhere.
+- Plain text only unless emitting the edit syntax below.
 
-EDIT FORMAT — output this exact syntax to modify files:
+EDIT SYNTAX
 
-To replace existing code in a file, output this exact format:
-<<<EDIT path/to/filename.ext
+Replace code:
+<<<EDIT path/to/file.ext
 <<<OLD
-(exact lines to find and replace — must match the file EXACTLY)
+exact existing text
 >>>NEW
-(replacement lines)
+replacement text
 >>>END
 
-To write or rewrite an entire file (also used for CREATING NEW files):
-<<<FILE path/to/filename.ext
-(complete file contents)
+Write full file:
+<<<FILE path/to/file.ext
+complete file contents
 >>>FILE
 
-Rules:
-- Use the RELATIVE PATH as shown in the directory tree (e.g., src/helper.cpp, not just helper.cpp).
-- For files in the project root, just use the filename (e.g., sketch.ino).
-- The OLD block must match existing code EXACTLY (including whitespace/indentation).
-- You can include multiple EDIT or FILE blocks in one response.
-- STRONGLY PREFER <<<EDIT over <<<FILE for ALL changes to existing files. <<<EDIT is safer because it only replaces what you specify. <<<FILE replaces THE ENTIRE FILE — any code you don't include will be DELETED.
-- ONLY use <<<FILE for: (a) creating brand new files, or (b) completely rewriting a file from scratch when more than 50% of the code changes.
-- For adding code near a known landmark WITHOUT modifying existing code, prefer <<<INSERT_BEFORE or <<<INSERT_AFTER (see below). These only need a short anchor — no OLD/NEW replacement.
-- You can also use <<<EDIT with enough OLD context to find the insertion point.
-- NEVER use <<<FILE just to add a comment or make a small change — use <<<EDIT or <<<INSERT_BEFORE/<<<INSERT_AFTER.
-- You can create files in new subdirectories — the IDE will create the directories.
-- You can edit and create .ino, .cpp, .c, .h, .hpp, .md, .txt, .json, and other project files.
-- Keep explanations brief and focused.
-- ALWAYS provide code. Never say you cannot modify files — the IDE does that for you.
-- Edit the CORRECT file. If the user says "add a comment to audio_init.h", edit audio_init.h — not any other file.
-- NEVER use unified diff format (diff --git, @@, +/- lines). The IDE does NOT understand diffs. ONLY use <<<EDIT or <<<FILE format.
-
-Example — editing an existing file:
-<<<EDIT sketch.ino
-<<<OLD
-void setup() {
-  Serial.begin(115200);
-}
->>>NEW
-void blinkLED(int pin, int ms) {
-  digitalWrite(pin, HIGH);
-  delay(ms);
-  digitalWrite(pin, LOW);
-}
-
-void setup() {
-  Serial.begin(115200);
-  pinMode(LED_BUILTIN, OUTPUT);
-}
->>>END
-
-Example — creating a new file:
-<<<FILE src/utils.h
-#ifndef UTILS_H
-#define UTILS_H
-// Utility functions
-void initPins();
-#endif
->>>FILE
-
-To INSERT new code before or after a known anchor line (without replacing anything):
+Insert before anchor:
 <<<INSERT_BEFORE path/to/file.ext
+<<<ANCHOR
+exact anchor text
+>>>ANCHOR
+<<<CONTENT
+inserted text
+>>>CONTENT
+
+Insert after anchor:
+<<<INSERT_AFTER path/to/file.ext
+<<<ANCHOR
+exact anchor text
+>>>ANCHOR
+<<<CONTENT
+inserted text
+>>>CONTENT
+
+SELECTION MODE
+If the input contains:
+<<<SELECTED>>>
+...
+>>>SELECTED>>>
+then output only:
+<<<REPLACEMENT>>>
+replacement code only
+>>>REPLACEMENT>>>
+No explanation. No edit blocks. No markdown. No extra text.
+
+EDIT DECISION RULES
+- Prefer <<<EDIT for existing files.
+- Use <<<FILE only for new files or true full rewrites.
+- For small or moderate changes, do not use <<<FILE.
+- Use relative paths exactly as shown by the IDE.
+- OLD must match the existing file exactly, including whitespace.
+- Never invent OLD content.
+- If exact OLD cannot be trusted, use INSERT_BEFORE or INSERT_AFTER with a real anchor from context.
+- Do not guess missing file content.
+- Preserve unrelated code.
+
+PRIORITY ORDER
+1. Correct syntax and markers
+2. Exact OLD or exact anchor
+3. Smallest safe edit
+4. No commentary
+
+GOOD EXAMPLES
+
+User: Fix the compile error from missing include for millis().
+Assistant:
+<<<INSERT_BEFORE src/main.cpp
 <<<ANCHOR
 void setup() {
 >>>ANCHOR
 <<<CONTENT
-void blinkLED(int pin, int ms) {
-  digitalWrite(pin, HIGH);
-  delay(ms);
-  digitalWrite(pin, LOW);
+#include <Arduino.h>
+>>>CONTENT
+
+User: Rename loop counter i to channel in the selected code.
+Assistant:
+<<<REPLACEMENT>>>
+for (int channel = 0; channel < 8; ++channel) {
+  readMux(channel);
+}
+>>>REPLACEMENT>>>
+
+User: Add a helper to clamp PWM duty and use it in setFanDuty().
+Assistant:
+<<<INSERT_BEFORE src/fan.cpp
+<<<ANCHOR
+void setFanDuty(uint8_t duty) {
+>>>ANCHOR
+<<<CONTENT
+static inline uint8_t clampDuty(uint8_t duty) {
+  return duty > 100 ? 100 : duty;
 }
 >>>CONTENT
 
-<<<INSERT_AFTER works the same way but inserts AFTER the anchor.
-Use INSERT_BEFORE/INSERT_AFTER when:
-- Adding a new function, #include, or variable near a known landmark
-- You don't need to modify the anchor code, just add code next to it
-- The anchor is a short, unique snippet (e.g., a function signature, #include line)
-Use <<<EDIT when you need to REPLACE existing code."""
+<<<EDIT src/fan.cpp
+<<<OLD
+void setFanDuty(uint8_t duty) {
+  analogWrite(FAN_PIN, duty);
+}
+>>>NEW
+void setFanDuty(uint8_t duty) {
+  analogWrite(FAN_PIN, clampDuty(duty));
+}
+>>>END
+
+BAD EXAMPLE (never do this)
+
+User: Fix the bug.
+Assistant: Sure, I can help with that. Please provide the file path and confirm whether you want a full rewrite.
+```diff
+@@ -old
++new
+```
+This change should solve the issue.
+
+A Teensy quick reference is appended below. A comprehensive API reference may also be in your file context — consult it for pin mappings, peripheral APIs, and library usage."""
 
 # Load Teensy quick reference (appended to system prompt at startup)
 _quick_ref_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -606,6 +679,20 @@ except (FileNotFoundError, OSError):
     _TEENSY_QUICK_REF = ""
 if _TEENSY_QUICK_REF:
     SYSTEM_PROMPT += "\n\n--- TEENSY QUICK REFERENCE ---\n" + _TEENSY_QUICK_REF
+
+# Snapshot default prompt before custom rules override
+# _DEFAULT_SYSTEM_PROMPT includes Teensy ref (for full runtime use)
+# _DEFAULT_RULES_TEXT excludes Teensy ref (for editor display)
+_DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPT
+_DEFAULT_RULES_TEXT = SYSTEM_PROMPT.split(
+    "\n\n--- TEENSY QUICK REFERENCE ---\n")[0] if _TEENSY_QUICK_REF else SYSTEM_PROMPT
+
+# Load custom rules if they exist (overrides default prompt)
+_custom_rules = _load_custom_rules()
+if _custom_rules:
+    SYSTEM_PROMPT = _custom_rules
+    if _TEENSY_QUICK_REF and _TEENSY_QUICK_REF not in SYSTEM_PROMPT:
+        SYSTEM_PROMPT += "\n\n--- TEENSY QUICK REFERENCE ---\n" + _TEENSY_QUICK_REF
 
 # Path to full Teensy API reference (included in WorkingSet for .ino projects)
 _TEENSY_API_REF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -1077,7 +1164,10 @@ class OllamaWorker(QObject):
         self._stop = False
         try:
             resp = requests.post(f"{OLLAMA_URL}/api/chat",
-                json={"model": OLLAMA_MODEL, "messages": self.messages, "stream": True},
+                json={"model": OLLAMA_MODEL, "messages": self.messages,
+                      "stream": True,
+                      "options": OLLAMA_CHAT_OPTIONS,
+                      "stop": OLLAMA_STOP_SEQUENCES},
                 stream=True, timeout=(5, 120))
             resp.raise_for_status()
             for line in resp.iter_lines():
@@ -3876,6 +3966,33 @@ class ChatPanel(QWidget):
         """Strip special tokens and role markers that leak from various LLMs."""
         return self._MODEL_ARTIFACT_RE.sub('', text)
 
+    def _validate_output_format(self, text):
+        """Check for common Qwen format violations. Returns (is_valid, issues)."""
+        issues = []
+        if '```' in text:
+            issues.append("markdown_fence")
+        if re.search(r'^@@\s', text, re.MULTILINE):
+            issues.append("unified_diff")
+        if re.search(r'^[+-]\s+\w', text, re.MULTILINE):
+            if '<<<EDIT' not in text and '<<<FILE' not in text and '<<<REPLACEMENT' not in text:
+                issues.append("diff_style")
+        if '<think>' in text or '</think>' in text:
+            issues.append("think_leak")
+        if '<|im_start|>' in text or '<|im_end|>' in text:
+            issues.append("special_token")
+        # Preamble before first edit marker (verbosity detection)
+        first_marker = None
+        for marker in ['<<<EDIT', '<<<FILE', '<<<INSERT_BEFORE',
+                        '<<<INSERT_AFTER', '<<<REPLACEMENT>>>']:
+            idx = text.find(marker)
+            if idx >= 0 and (first_marker is None or idx < first_marker):
+                first_marker = idx
+        if first_marker is not None and first_marker > 80:
+            preamble = text[:first_marker].strip()
+            if preamble:
+                issues.append("preamble")
+        return (len(issues) == 0, issues)
+
     def _strip_latex(self, text):
         """Convert common LaTeX formatting to plain text."""
         def _repl(m):
@@ -4174,13 +4291,31 @@ class ChatPanel(QWidget):
             # Final pass: strip any remaining model artifacts
             self._current_response = self._clean_model_artifacts(
                 self._current_response).strip()
+            # Validate output format and auto-clean known violations
+            _is_valid, _fmt_issues = self._validate_output_format(
+                self._current_response)
+            if not _is_valid and _fmt_issues:
+                cleaned = self._current_response
+                if "markdown_fence" in _fmt_issues:
+                    cleaned = re.sub(r'```\w*\n?', '', cleaned)
+                if "think_leak" in _fmt_issues:
+                    cleaned = re.sub(
+                        r'<think>.*?</think>', '', cleaned, flags=re.DOTALL)
+                if "special_token" in _fmt_issues:
+                    cleaned = cleaned.replace(
+                        '<|im_start|>', '').replace('<|im_end|>', '')
+                self._current_response = cleaned.strip()
             # Selection mode: bypass <<<EDIT parser, handle replacement directly
             if self._selection_mode:
                 self._handle_selection_response(self._current_response)
                 self._selection_mode = False
             else:
+                # Strip think blocks from history — keep only final answer
+                _clean_hist = re.sub(
+                    r'<think>.*?</think>', '', self._current_response,
+                    flags=re.DOTALL).strip()
                 self._conversation.append(
-                    {"role": "assistant", "content": self._current_response})
+                    {"role": "assistant", "content": _clean_hist})
                 self._render_formatted_response()
                 result = AIWorkResult(assistant_text=self._current_response)
                 result.diagnostics = list(self._error_diagnostics)
@@ -6427,7 +6562,8 @@ class ModelsTab(QWidget):
                             "In EXACTLY 6 words or fewer, describe what you specialize in. "
                             "Reply with ONLY the description, nothing else. "
                             "Example: 'Teensy embedded systems and audio'"}],
-                        "stream": False
+                        "stream": False,
+                        "options": OLLAMA_CHAT_OPTIONS,
                     }, timeout=60)
                 if r2.status_code == 200:
                     ai_desc = r2.json().get("message", {}).get("content", "").strip()
@@ -7165,11 +7301,148 @@ class GitTab(QWidget):
 
 
 # =============================================================================
+# Rules Tab (System Prompt Editor)
+# =============================================================================
+
+class RulesTab(QWidget):
+    """Editor for the AI system prompt / rules."""
+    rules_changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        desc = QLabel(
+            "Edit the system prompt rules that control how the AI assistant behaves. "
+            "Changes take effect on the next message.")
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"color:{C['fg_dim']};{FONT_BODY}")
+        layout.addWidget(desc)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setStyleSheet(
+            f"QPlainTextEdit{{background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};border-radius:6px;"
+            f"padding:8px;{FONT_CODE}}}")
+        self.editor.setPlaceholderText("System prompt rules...")
+        self.editor.setTabStopDistance(28)
+        layout.addWidget(self.editor, stretch=1)
+
+        self._status = QLabel("")
+        self._status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        layout.addWidget(self._status)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        save_btn = QPushButton("Save Rules")
+        save_btn.setStyleSheet(BTN_SM_PRIMARY)
+        save_btn.setToolTip("Save rules to disk and apply to next message")
+        save_btn.clicked.connect(self._save)
+        btn_row.addWidget(save_btn)
+
+        revert_btn = QPushButton("Revert to Default")
+        revert_btn.setStyleSheet(BTN_SM_SECONDARY)
+        revert_btn.setToolTip("Reset rules to the built-in default")
+        revert_btn.clicked.connect(self._revert)
+        btn_row.addWidget(revert_btn)
+
+        load_btn = QPushButton("Load from File...")
+        load_btn.setStyleSheet(BTN_SM_GHOST)
+        load_btn.setToolTip("Import rules from a text file")
+        load_btn.clicked.connect(self._load_from_file)
+        btn_row.addWidget(load_btn)
+
+        export_btn = QPushButton("Export to File...")
+        export_btn.setStyleSheet(BTN_SM_GHOST)
+        export_btn.setToolTip("Export current rules to a text file")
+        export_btn.clicked.connect(self._export_to_file)
+        btn_row.addWidget(export_btn)
+
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        self._load_initial()
+
+    def _load_initial(self):
+        """Load custom rules if they exist, otherwise show default."""
+        custom = _load_custom_rules()
+        if custom is not None:
+            self.editor.setPlainText(custom)
+            self._status.setText("Custom rules loaded from disk.")
+        else:
+            self.editor.setPlainText(_DEFAULT_RULES_TEXT)
+            self._status.setText("Showing default rules.")
+
+    def _save(self):
+        """Save current editor content as custom rules."""
+        text = self.editor.toPlainText()
+        _save_custom_rules(text)
+        global SYSTEM_PROMPT
+        base = text.strip() if text.strip() else _DEFAULT_RULES_TEXT
+        if _TEENSY_QUICK_REF and _TEENSY_QUICK_REF not in base:
+            SYSTEM_PROMPT = base + "\n\n--- TEENSY QUICK REFERENCE ---\n" + _TEENSY_QUICK_REF
+        else:
+            SYSTEM_PROMPT = base
+        self._status.setText("Rules saved and applied.")
+        self._status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+        self.rules_changed.emit()
+
+    def _revert(self):
+        """Reset to built-in default rules."""
+        reply = QMessageBox.question(
+            self, "Revert Rules",
+            "Reset to the built-in default rules? Your custom rules will be deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.editor.setPlainText(_DEFAULT_RULES_TEXT)
+            _save_custom_rules("")
+            global SYSTEM_PROMPT
+            SYSTEM_PROMPT = _DEFAULT_SYSTEM_PROMPT  # already includes Teensy ref
+            self._status.setText("Reverted to default rules.")
+            self._status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+            self.rules_changed.emit()
+
+    def _load_from_file(self):
+        """Import rules from a text file."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Rules", os.path.expanduser("~"),
+            "Text Files (*.txt *.md);;All Files (*)")
+        if path:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    self.editor.setPlainText(f.read())
+                self._status.setText(
+                    f"Loaded from {os.path.basename(path)}. Click Save to apply.")
+                self._status.setStyleSheet(f"color:{C['fg_link']};{FONT_SMALL}")
+            except OSError as e:
+                self._status.setText(f"Error: {e}")
+                self._status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+
+    def _export_to_file(self):
+        """Export current rules to a text file."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Rules", os.path.expanduser("~/aide_rules.txt"),
+            "Text Files (*.txt *.md);;All Files (*)")
+        if path:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(self.editor.toPlainText())
+                self._status.setText(f"Exported to {os.path.basename(path)}.")
+                self._status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+            except OSError as e:
+                self._status.setText(f"Error: {e}")
+                self._status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+
+
+# =============================================================================
 # Settings Panel — Container
 # =============================================================================
 
 class SettingsPanel(QWidget):
-    """Settings panel with Models and Git tabs."""
+    """Settings panel with Models, Git, and Rules tabs."""
     model_changed = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -7193,8 +7466,16 @@ class SettingsPanel(QWidget):
         self.git_tab = GitTab()
         self.tabs.addTab(self.git_tab, "Git")
 
+        self.rules_tab = RulesTab()
+        self.rules_tab.rules_changed.connect(self._on_rules_changed)
+        self.tabs.addTab(self.rules_tab, "Rules")
+
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs)
+
+    def _on_rules_changed(self):
+        """Notify that rules changed — triggers system prompt rebuild."""
+        self.model_changed.emit()
 
     def _on_tab_changed(self, index):
         if index == 1:  # Git tab
@@ -8264,7 +8545,8 @@ class MainWindow(QMainWindow):
                                     "Reply with ONLY the description, nothing else. "
                                     "Example: 'Teensy embedded systems and audio'")
                             }],
-                            "stream": False
+                            "stream": False,
+                            "options": OLLAMA_CHAT_OPTIONS,
                         },
                         timeout=15)
                     if r2.status_code == 200:
@@ -8850,6 +9132,11 @@ class MainWindow(QMainWindow):
         current = self.model_combo.currentText()
         if current:
             OLLAMA_MODEL = current
+        # Rebuild system prompt in conversation (e.g. after rules change)
+        if hasattr(self, 'chat_panel') and self.chat_panel._conversation:
+            if self.chat_panel._conversation[0].get("role") == "system":
+                self.chat_panel._conversation[0]["content"] = \
+                    self.chat_panel._build_system_prompt()
 
     def _on_model_changed(self, name):
         global OLLAMA_MODEL
