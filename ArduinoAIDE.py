@@ -58,7 +58,7 @@ from PyQt6.QtGui import (
 )
 
 try:
-    from PyQt6.Qsci import QsciScintilla, QsciScintillaBase, QsciLexerCPP
+    from PyQt6.Qsci import QsciScintilla, QsciScintillaBase, QsciLexerCPP, QsciAPIs
     HAS_QSCINTILLA = True
 except ImportError:
     HAS_QSCINTILLA = False
@@ -286,6 +286,7 @@ class SymbolEntry:
     rel_path: str       # relative path to source file
     line: int           # 1-based line number
     kind: str           # "function", "global", "type"
+    signature: str = "" # e.g. "void digitalWrite(uint8_t pin, uint8_t val)"
 
 @dataclass
 class StructuredDiagnostic:
@@ -539,6 +540,48 @@ WINDOW_TITLE = "Teensy Ollama IDE"
 PROJECT_EXTENSIONS = {".ino", ".cpp", ".c", ".h", ".hpp", ".md", ".txt", ".json", ".yaml", ".yml", ".cfg", ".ini"}
 TARGET_EXTENSIONS = {".ino", ".cpp", ".c", ".h", ".hpp"}  # code extensions for file-targeting detection
 PROJECT_SKIP_DIRS = {'.git', '__pycache__', 'build', 'node_modules', '.venv', 'venv'}
+
+# ── Arduino/Teensy calltip signatures for built-in functions ──
+ARDUINO_CALLTIPS = {
+    "pinMode": "void pinMode(uint8_t pin, uint8_t mode)",
+    "digitalWrite": "void digitalWrite(uint8_t pin, uint8_t val)",
+    "digitalRead": "int digitalRead(uint8_t pin)",
+    "analogRead": "int analogRead(uint8_t pin)",
+    "analogWrite": "void analogWrite(uint8_t pin, int val)",
+    "delay": "void delay(unsigned long ms)",
+    "delayMicroseconds": "void delayMicroseconds(unsigned int us)",
+    "millis": "unsigned long millis()",
+    "micros": "unsigned long micros()",
+    "attachInterrupt": "void attachInterrupt(uint8_t pin, void(*fn)(void), int mode)",
+    "Serial.begin": "void Serial.begin(unsigned long baud)",
+    "Serial.print": "size_t Serial.print(val) / Serial.print(val, format)",
+    "Serial.println": "size_t Serial.println(val) / Serial.println(val, format)",
+    "Serial.write": "size_t Serial.write(uint8_t byte) / Serial.write(buf, len)",
+    "Serial.read": "int Serial.read()",
+    "Serial.available": "int Serial.available()",
+    "Serial.readString": "String Serial.readString()",
+    "tone": "void tone(uint8_t pin, unsigned int freq, unsigned long dur=0)",
+    "noTone": "void noTone(uint8_t pin)",
+    "map": "long map(long val, long fromLow, long fromHigh, long toLow, long toHigh)",
+    "constrain": "x constrain(x, a, b)",
+    "shiftOut": "void shiftOut(uint8_t dataPin, uint8_t clockPin, uint8_t bitOrder, uint8_t val)",
+    "pulseIn": "unsigned long pulseIn(uint8_t pin, uint8_t state, unsigned long timeout=1000000)",
+    "Wire.begin": "void Wire.begin() / Wire.begin(uint8_t addr)",
+    "Wire.beginTransmission": "void Wire.beginTransmission(uint8_t addr)",
+    "Wire.write": "size_t Wire.write(uint8_t val) / Wire.write(buf, len)",
+    "Wire.endTransmission": "uint8_t Wire.endTransmission(bool stop=true)",
+    "Wire.requestFrom": "uint8_t Wire.requestFrom(uint8_t addr, uint8_t qty)",
+    "Wire.read": "int Wire.read()",
+    "SPI.begin": "void SPI.begin()",
+    "SPI.transfer": "uint8_t SPI.transfer(uint8_t val)",
+    "SPI.beginTransaction": "void SPI.beginTransaction(SPISettings settings)",
+    "SPI.endTransaction": "void SPI.endTransaction()",
+    "digitalWriteFast": "void digitalWriteFast(uint8_t pin, uint8_t val)",
+    "digitalReadFast": "int digitalReadFast(uint8_t pin)",
+    "analogReadResolution": "void analogReadResolution(unsigned int bits)",
+    "analogWriteResolution": "void analogWriteResolution(unsigned int bits)",
+    "analogWriteFrequency": "void analogWriteFrequency(uint8_t pin, float freq)",
+}
 
 SYSTEM_PROMPT = """You are ArduinoAIDE, an embedded firmware coding assistant for Teensy/Arduino C/C++ projects. The IDE already provides the project files and relevant context. Act on them directly.
 
@@ -1361,9 +1404,10 @@ if HAS_QSCINTILLA:
     class CodeEditor(QsciScintilla):
         ask_llm_requested = pyqtSignal()
 
-        def __init__(self, parent=None):
+        def __init__(self, parent=None, chat_panel=None):
             super().__init__(parent)
             self._current_file = None
+            self._chat_panel = chat_panel
             font = QFont("Menlo", 13)
             font.setStyleHint(QFont.StyleHint.Monospace)
             self.setFont(font)
@@ -1425,6 +1469,228 @@ if HAS_QSCINTILLA:
             try: lexer.setKeywords(1, "setup loop pinMode digitalWrite digitalRead analogWrite analogRead Serial delay millis micros attachInterrupt digitalWriteFast IntervalTimer AudioStream AudioConnection AudioMemory Wire SPI INPUT OUTPUT HIGH LOW volatile")
             except: pass
             self.setLexer(lexer)
+
+            # ── Code Intelligence ──
+            # Autocomplete via QsciAPIs
+            self.setAutoCompletionSource(QsciScintilla.AutoCompletionSource.AcsAPIs)
+            self.setAutoCompletionThreshold(3)
+            self.setAutoCompletionCaseSensitivity(True)
+            self.setAutoCompletionReplaceWord(True)
+            self.setAutoCompletionUseSingle(
+                QsciScintilla.AutoCompletionUseSingle.AcusNever)
+            self._rebuild_api_list()
+
+            # Calltip colors (dark theme)
+            self.SendScintilla(QsciScintillaBase.SCI_CALLTIPSETBACK,
+                               int(QColor("#2d2d2d").rgb() & 0xFFFFFF))
+            self.SendScintilla(QsciScintillaBase.SCI_CALLTIPSETFORE,
+                               int(QColor("#d4d4d4").rgb() & 0xFFFFFF))
+
+            # Calltip trigger on ( and ) characters
+            self.SCN_CHARADDED.connect(self._on_char_added)
+
+            # Ctrl+Click indicator (blue underline)
+            self._ctrl_indicator = 0
+            self.SendScintilla(QsciScintillaBase.SCI_INDICSETSTYLE,
+                               self._ctrl_indicator, 1)  # INDIC_PLAIN
+            self.SendScintilla(QsciScintillaBase.SCI_INDICSETFORE,
+                               self._ctrl_indicator,
+                               int(QColor("#569cd6").rgb() & 0xFFFFFF))
+            self._ctrl_held = False
+
+            # F12 → Go to Definition
+            from PyQt6.QtWidgets import QShortcut
+            QShortcut(QKeySequence("F12"), self).activated.connect(
+                self._goto_definition)
+
+        # ── Code Intelligence Methods ──
+
+        def _rebuild_api_list(self):
+            """Rebuild QsciAPIs word list from keywords + project symbols."""
+            apis = QsciAPIs(self.lexer())
+            # C++ built-in keywords
+            for kw in ("int", "float", "double", "char", "bool", "void",
+                        "long", "short", "unsigned", "signed", "const",
+                        "static", "extern", "volatile", "struct", "class",
+                        "enum", "typedef", "union", "namespace", "template",
+                        "typename", "return", "if", "else", "for", "while",
+                        "do", "switch", "case", "break", "continue",
+                        "default", "sizeof", "new", "delete", "true",
+                        "false", "nullptr", "this", "public", "private",
+                        "protected", "virtual", "override", "inline", "auto"):
+                apis.add(kw)
+            # Arduino/Teensy keywords
+            for kw in ("setup", "loop", "pinMode", "digitalWrite",
+                        "digitalRead", "analogWrite", "analogRead",
+                        "Serial", "delay", "millis", "micros",
+                        "attachInterrupt", "noInterrupts", "interrupts",
+                        "map", "constrain", "min", "max", "abs", "pow",
+                        "sqrt", "sin", "cos", "tan", "randomSeed", "random",
+                        "INPUT", "OUTPUT", "INPUT_PULLUP", "HIGH", "LOW",
+                        "LED_BUILTIN", "byte", "word", "boolean", "String",
+                        "bitRead", "bitWrite", "bitSet", "bitClear", "bit",
+                        "highByte", "lowByte", "tone", "noTone", "shiftOut",
+                        "shiftIn", "pulseIn", "Wire", "SPI",
+                        "digitalWriteFast", "digitalReadFast",
+                        "IntervalTimer", "elapsedMillis", "elapsedMicros",
+                        "AudioStream", "AudioConnection", "AudioMemory"):
+                apis.add(kw)
+            # Project symbols from symbol index
+            if self._chat_panel and hasattr(self._chat_panel, '_symbol_index'):
+                for name, entries in self._chat_panel._symbol_index.items():
+                    # For functions with signatures, add with params hint
+                    func_entries = [e for e in entries if e.kind == "function" and e.signature]
+                    if func_entries:
+                        sig = func_entries[0].signature
+                        # Extract params from signature: "type name(params)" → "name(params)"
+                        paren = sig.find('(')
+                        if paren >= 0:
+                            apis.add(f"{name}{sig[paren:]}")
+                        else:
+                            apis.add(name)
+                    else:
+                        apis.add(name)
+            apis.prepare()
+            self._apis = apis
+
+        def _on_char_added(self, char_code):
+            """Show/hide calltips on ( and ) characters."""
+            ch = chr(char_code) if char_code > 0 else ""
+            if ch == "(":
+                word = self._word_before_paren()
+                if not word:
+                    return
+                # Look up in project calltip map first, then Arduino built-ins
+                tip = None
+                if self._chat_panel and hasattr(self._chat_panel, '_calltip_map'):
+                    tip = self._chat_panel._calltip_map.get(word)
+                if not tip:
+                    tip = ARDUINO_CALLTIPS.get(word)
+                if tip:
+                    line, col = self.getCursorPosition()
+                    pos = self.positionFromLineIndex(line, col)
+                    self.SendScintilla(
+                        QsciScintillaBase.SCI_CALLTIPSHOW, pos,
+                        tip.encode("utf-8"))
+            elif ch == ")":
+                self.SendScintilla(QsciScintillaBase.SCI_CALLTIPCANCEL)
+
+        def _word_before_paren(self):
+            """Get the word immediately before the cursor (before the just-typed '(')."""
+            line, col = self.getCursorPosition()
+            if col < 2:
+                return ""
+            # col-1 is where '(' was inserted, so look at col-2 for end of word
+            text = self.text(line)
+            end = col - 1  # position of '('
+            # Skip back over the word
+            start = end
+            while start > 0 and (text[start - 1].isalnum() or text[start - 1] in ('_', '.')):
+                start -= 1
+            return text[start:end] if start < end else ""
+
+        def _goto_definition(self):
+            """Jump to the definition of the symbol under cursor."""
+            if not self._chat_panel:
+                return
+            # Get word under cursor
+            if self.hasSelectedText():
+                word = self.selectedText().strip()
+            else:
+                line, col = self.getCursorPosition()
+                word = self.wordAtLineIndex(line, col)
+            if not word:
+                return
+            sym_index = getattr(self._chat_panel, '_symbol_index', {})
+            entries = sym_index.get(word, [])
+            if not entries:
+                # Flash status bar
+                mw = self.window()
+                if mw and hasattr(mw, 'statusBar'):
+                    mw.statusBar().showMessage(
+                        f"No definition found for '{word}'", 3000)
+                return
+            editor_ref = getattr(self._chat_panel, '_editor_ref', None)
+            if not editor_ref:
+                return
+            proj = getattr(self._chat_panel, '_project_path', None) or ""
+            if len(entries) == 1:
+                e = entries[0]
+                abs_path = os.path.join(proj, e.rel_path) if proj else e.rel_path
+                editor_ref.goto_line(abs_path, e.line)
+            else:
+                # Multiple matches — show popup menu
+                from PyQt6.QtWidgets import QMenu
+                menu = QMenu(self)
+                menu.setStyleSheet(
+                    f"QMenu{{background:{C['bg_input']};color:{C['fg']};"
+                    f"border:1px solid {C['border_light']};border-radius:4px;padding:4px;}}"
+                    f"QMenu::item{{padding:4px 16px;}}"
+                    f"QMenu::item:selected{{background:{C['teal']};color:#fff;}}")
+                for e in entries:
+                    label = f"{e.kind} {e.name} \u2014 {e.rel_path}:{e.line}"
+                    abs_path = os.path.join(proj, e.rel_path) if proj else e.rel_path
+                    action = menu.addAction(label)
+                    action.triggered.connect(
+                        lambda checked, p=abs_path, ln=e.line: editor_ref.goto_line(p, ln))
+                # Show at cursor position
+                line, col = self.getCursorPosition()
+                pos_x = self.SendScintilla(
+                    QsciScintillaBase.SCI_POINTXFROMPOSITION, 0,
+                    self.positionFromLineIndex(line, col))
+                pos_y = self.SendScintilla(
+                    QsciScintillaBase.SCI_POINTYFROMPOSITION, 0,
+                    self.positionFromLineIndex(line, col))
+                menu.exec(self.mapToGlobal(QPoint(pos_x, pos_y + 20)))
+
+        def mousePressEvent(self, event):
+            """Ctrl+Click → Go to Definition."""
+            if (event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                    and event.button() == Qt.MouseButton.LeftButton):
+                # Set cursor position at click, then go to definition
+                super().mousePressEvent(event)
+                self._goto_definition()
+                return
+            super().mousePressEvent(event)
+
+        def mouseMoveEvent(self, event):
+            """Ctrl+hover: underline word under mouse with indicator."""
+            ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            if ctrl != self._ctrl_held:
+                self._ctrl_held = ctrl
+                if ctrl:
+                    self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+                else:
+                    self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+                    # Clear all indicators
+                    length = self.length()
+                    self.SendScintilla(
+                        QsciScintillaBase.SCI_SETINDICATORCURRENT,
+                        self._ctrl_indicator)
+                    self.SendScintilla(
+                        QsciScintillaBase.SCI_INDICATORCLEARRANGE, 0, length)
+            if ctrl:
+                # Underline word under mouse
+                pos = self.SendScintilla(
+                    QsciScintillaBase.SCI_POSITIONFROMPOINT,
+                    int(event.position().x()), int(event.position().y()))
+                if pos >= 0:
+                    word_start = self.SendScintilla(
+                        QsciScintillaBase.SCI_WORDSTARTPOSITION, pos, True)
+                    word_end = self.SendScintilla(
+                        QsciScintillaBase.SCI_WORDENDPOSITION, pos, True)
+                    if word_end > word_start:
+                        length = self.length()
+                        self.SendScintilla(
+                            QsciScintillaBase.SCI_SETINDICATORCURRENT,
+                            self._ctrl_indicator)
+                        self.SendScintilla(
+                            QsciScintillaBase.SCI_INDICATORCLEARRANGE,
+                            0, length)
+                        self.SendScintilla(
+                            QsciScintillaBase.SCI_INDICATORFILLRANGE,
+                            word_start, word_end - word_start)
+            super().mouseMoveEvent(event)
 
         def _show_context_menu(self, pos):
             from PyQt6.QtWidgets import QMenu
@@ -1516,7 +1782,7 @@ else:
     class CodeEditor(QPlainTextEdit):
         ask_llm_requested = pyqtSignal()
 
-        def __init__(self, parent=None):
+        def __init__(self, parent=None, chat_panel=None):
             super().__init__(parent)
             self._current_file = None
             font = QFont("Menlo", 13)
@@ -1587,13 +1853,14 @@ class TabbedEditor(QWidget):
         layout.addWidget(self.tabs)
 
         self._editors = {}
+        self._chat_panel = None  # set by MainWindow after chat_panel is created
 
     def open_file(self, filepath):
         filepath = os.path.abspath(filepath)
         if filepath in self._editors:
             self.tabs.setCurrentWidget(self._editors[filepath])
             return True
-        editor = CodeEditor()
+        editor = CodeEditor(chat_panel=self._chat_panel)
         editor.ask_llm_requested.connect(self.ask_llm_requested.emit)
         if editor.load_file(filepath):
             self._editors[filepath] = editor
@@ -3209,6 +3476,7 @@ class ChatPanel(QWidget):
         self._last_prompt_stats = None            # dict: stats from the last actual prompt sent
         self._target_override = None              # str: rel_path of file detected in user message (per-prompt only)
         self._symbol_index = {}                   # {name: [SymbolEntry, ...]} across all project files
+        self._calltip_map = {}                    # {func_name: signature_string}
         self._last_work_result = None             # AIWorkResult from most recent AI turn
         self._selection_mode = False              # True when using selection-based edit flow
         self._selection_edit = None               # dict with selection coords for selection mode
@@ -4081,7 +4349,10 @@ class ChatPanel(QWidget):
                     name = m.group(1)
                     if name in ('if', 'for', 'while', 'switch', 'return', 'else'):
                         continue
-                    entry = SymbolEntry(name, rel_path, offset_to_line(m.start()), "function")
+                    # Capture signature: strip trailing { and whitespace
+                    sig = m.group(0).rstrip().rstrip('{').strip()
+                    entry = SymbolEntry(name, rel_path, offset_to_line(m.start()),
+                                        "function", signature=sig)
                     index.setdefault(name, []).append(entry)
 
                 for m in RE_TYPE.finditer(content):
@@ -4101,6 +4372,26 @@ class ChatPanel(QWidget):
                 continue  # silently skip files that fail to parse
 
         self._symbol_index = index
+
+        # Build calltip map: function name → signature string
+        calltip_map = {}
+        for name, entries in index.items():
+            sigs = [e.signature for e in entries
+                    if e.kind == "function" and e.signature]
+            if sigs:
+                calltip_map[name] = "\n".join(sigs)
+        self._calltip_map = calltip_map
+
+        # Refresh autocomplete API lists on all open editors
+        if self._editor_ref:
+            for ed in self._editor_ref._editors.values():
+                if HAS_QSCINTILLA and hasattr(ed, '_rebuild_api_list'):
+                    ed._rebuild_api_list()
+
+        # Refresh outline panel if MainWindow is available
+        mw = self.window()
+        if mw and hasattr(mw, '_refresh_outline'):
+            mw._refresh_outline()
 
     def _build_file_context(self):
         """Build file context string for AI prompts. Uses WorkingSet with token budget
@@ -8880,6 +9171,77 @@ class GitPanel(QWidget):
         self.refresh_status()
 
 
+# =============================================================================
+# Symbol Outline Panel — shows functions/types/globals for the current file
+# =============================================================================
+
+class OutlinePanel(QWidget):
+    """Compact tree listing symbols in the active editor file."""
+    navigate_requested = pyqtSignal(int)  # emits 1-based line number
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QLabel("OUTLINE")
+        header.setStyleSheet(SETTINGS_STITLE)
+        header.setContentsMargins(8, 6, 8, 4)
+        layout.addWidget(header)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(14)
+        self.tree.setStyleSheet(
+            f"QTreeWidget{{background:{C['bg_dark']};color:{C['fg']};"
+            f"border:none;{FONT_BODY}}}"
+            f"QTreeWidget::item{{padding:1px 0;}}"
+            f"QTreeWidget::item:selected{{background:{C['teal']};color:#fff;}}"
+            f"QTreeWidget::item:hover{{background:{C['bg_input']};}}")
+        self.tree.itemClicked.connect(self._on_item_clicked)
+        layout.addWidget(self.tree)
+
+        self.setStyleSheet(f"background:{C['bg_dark']};")
+
+    def refresh(self, symbol_index, current_rel_path):
+        """Rebuild tree for the given file from symbol_index."""
+        self.tree.clear()
+        if not symbol_index or not current_rel_path:
+            return
+
+        groups = {"function": [], "type": [], "global": []}
+        for name, entries in symbol_index.items():
+            for e in entries:
+                if e.rel_path == current_rel_path and e.kind in groups:
+                    groups[e.kind].append(e)
+
+        group_labels = [("Functions", "function"),
+                        ("Types", "type"),
+                        ("Globals", "global")]
+        for label, kind in group_labels:
+            items = sorted(groups[kind], key=lambda e: e.line)
+            if not items:
+                continue
+            parent = QTreeWidgetItem(self.tree, [label])
+            parent.setForeground(0, QColor(C["fg_muted"]))
+            parent.setExpanded(True)
+            for e in items:
+                child = QTreeWidgetItem(parent, [f"{e.name}  :{e.line}"])
+                child.setData(0, Qt.ItemDataRole.UserRole, e.line)
+                if kind == "function":
+                    child.setForeground(0, QColor(C["syn_fn"]))
+                elif kind == "type":
+                    child.setForeground(0, QColor(C["syn_type"]))
+                else:
+                    child.setForeground(0, QColor(C["fg"]))
+
+    def _on_item_clicked(self, item, column):
+        line = item.data(0, Qt.ItemDataRole.UserRole)
+        if line is not None:
+            self.navigate_requested.emit(line)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, project_path=None, config=None):
         super().__init__()
@@ -9061,10 +9423,22 @@ class MainWindow(QMainWindow):
 
         v_splitter = QSplitter(Qt.Orientation.Vertical)
 
+        # Horizontal splitter: editor + outline panel
+        h_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.editor = TabbedEditor()
         self.editor.file_changed.connect(self._on_editor_file_changed)
         self.editor.ask_llm_requested.connect(self._on_ask_llm)
-        v_splitter.addWidget(self.editor)
+        h_splitter.addWidget(self.editor)
+
+        self._outline_panel = OutlinePanel()
+        self._outline_panel.navigate_requested.connect(self._outline_navigate)
+        self._outline_panel.setMinimumWidth(120)
+        h_splitter.addWidget(self._outline_panel)
+        h_splitter.setSizes([800, 200])
+        h_splitter.setStretchFactor(0, 1)  # editor stretches
+        h_splitter.setStretchFactor(1, 0)  # outline stays fixed
+
+        v_splitter.addWidget(h_splitter)
 
         # Bottom panel
         self.bottom_tabs = QTabWidget()
@@ -9093,6 +9467,8 @@ class MainWindow(QMainWindow):
         # View 1: Chat view (full panel)
         self.chat_panel = ChatPanel()
         self.chat_panel.set_editor(self.editor)
+        # Wire chat_panel reference to TabbedEditor for code intelligence
+        self.editor._chat_panel = self.chat_panel
         self.chat_panel.generation_started.connect(lambda: self.ai_spinner.start())
         self.chat_panel.generation_finished.connect(lambda: self.ai_spinner.stop())
         self.chat_panel.edits_applied.connect(self._on_edits_applied)
@@ -9454,6 +9830,8 @@ class MainWindow(QMainWindow):
         em.addSeparator()
         em.addAction(self._make_action("Increase Font Size", self._zoom_in, "Ctrl+="))
         em.addAction(self._make_action("Decrease Font Size", self._zoom_out, "Ctrl+-"))
+        em.addSeparator()
+        em.addAction(self._make_action("Go to Line\u2026", self._goto_line, "Ctrl+G"))
 
         # ── Sketch ──
         sm = mb.addMenu("Sketch")
@@ -9785,6 +10163,39 @@ class MainWindow(QMainWindow):
     def _on_editor_file_changed(self, fp):
         self.setWindowTitle(f"{WINDOW_TITLE} — {os.path.basename(fp)}")
         self.chat_panel._update_context_bar()
+        self._refresh_outline()
+
+    def _refresh_outline(self):
+        """Refresh the symbol outline panel for the current editor file."""
+        if not hasattr(self, '_outline_panel'):
+            return
+        ed = self.editor.tabs.currentWidget()
+        if not ed or not hasattr(ed, 'current_file') or not ed.current_file:
+            self._outline_panel.refresh({}, "")
+            return
+        proj = getattr(self.chat_panel, '_project_path', None) or ""
+        sym_index = getattr(self.chat_panel, '_symbol_index', {})
+        if proj and ed.current_file.startswith(proj):
+            rel_path = os.path.relpath(ed.current_file, proj)
+        else:
+            rel_path = os.path.basename(ed.current_file)
+        self._outline_panel.refresh(sym_index, rel_path)
+
+    def _outline_navigate(self, line):
+        """Jump to a line from the outline panel."""
+        ed = self.editor.tabs.currentWidget()
+        if not ed:
+            return
+        if HAS_QSCINTILLA:
+            ed.setCursorPosition(line - 1, 0)
+            ed.ensureLineVisible(line - 1)
+        else:
+            cursor = ed.textCursor()
+            block = ed.document().findBlockByLineNumber(line - 1)
+            cursor.setPosition(block.position())
+            ed.setTextCursor(cursor)
+            ed.ensureCursorVisible()
+        ed.setFocus()
 
     def _save_file(self):
         self.editor.save_all()
@@ -9858,6 +10269,30 @@ class MainWindow(QMainWindow):
         ed = self.editor.tabs.currentWidget()
         if ed and hasattr(ed, 'zoomOut'):
             ed.zoomOut(1)
+
+    def _goto_line(self):
+        """Show Go-to-Line dialog and jump to the entered line number."""
+        ed = self.editor.tabs.currentWidget()
+        if not ed:
+            return
+        if HAS_QSCINTILLA:
+            max_line = ed.lines()
+        else:
+            max_line = ed.document().blockCount()
+        line, ok = QInputDialog.getInt(
+            self, "Go to Line", "Line number:", 1, 1, max_line)
+        if ok:
+            if HAS_QSCINTILLA:
+                ed.setCursorPosition(line - 1, 0)
+                ed.ensureLineVisible(line - 1)
+            else:
+                cursor = ed.textCursor()
+                block = ed.document().findBlockByLineNumber(line - 1)
+                cursor.setPosition(block.position())
+                ed.setTextCursor(cursor)
+                ed.ensureCursorVisible()
+            self._switch_view(0)
+            ed.setFocus()
 
     def _toggle_comment(self):
         """Toggle // comment on selected lines (or current line)."""
