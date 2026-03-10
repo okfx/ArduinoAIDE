@@ -1479,7 +1479,16 @@ class TabbedEditor(QWidget):
 
     def save_current(self):
         e = self.tabs.currentWidget()
-        return e.save_file() if e and hasattr(e, 'save_file') else False
+        if e and hasattr(e, 'save_file'):
+            result = e.save_file()
+            if result:
+                if hasattr(e, 'setModified'):
+                    e.setModified(False)
+                fp = e.current_file if hasattr(e, 'current_file') else None
+                if fp:
+                    self._mark_tab_clean(fp)
+            return result
+        return False
 
     def current_file(self):
         e = self.tabs.currentWidget()
@@ -1508,21 +1517,64 @@ class TabbedEditor(QWidget):
             result[fp] = ed.text() if hasattr(ed, 'text') else ed.toPlainText()
         return result
 
-    def set_file_content(self, filepath, content):
-        """Set content of an open file by path. Updates editor and saves to disk.
-        Returns True if found."""
+    def set_file_content(self, filepath, content, save_to_disk=True):
+        """Set content of an open file by path. Updates editor buffer.
+        Writes to disk only if save_to_disk=True.  Returns True if found."""
         if filepath in self._editors:
             ed = self._editors[filepath]
             if hasattr(ed, 'setText'): ed.setText(content)
             else: ed.setPlainText(content)
-            # Save to disk so changes persist
-            try:
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(content)
-            except OSError:
-                pass  # Editor updated even if disk write fails
+            if save_to_disk:
+                try:
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    if hasattr(ed, 'setModified'):
+                        ed.setModified(False)
+                except OSError:
+                    pass
+            else:
+                # Mark as modified so the dirty indicator shows
+                if hasattr(ed, 'setModified'):
+                    ed.setModified(True)
+                self._mark_tab_dirty(filepath)
             return True
         return False
+
+    def _mark_tab_dirty(self, filepath):
+        """Add a • dirty indicator to the tab title."""
+        if filepath not in self._editors:
+            return
+        ed = self._editors[filepath]
+        idx = self.tabs.indexOf(ed)
+        if idx < 0:
+            return
+        title = self.tabs.tabText(idx)
+        if not title.endswith(' •'):
+            self.tabs.setTabText(idx, title + ' •')
+
+    def _mark_tab_clean(self, filepath):
+        """Remove the • dirty indicator from the tab title."""
+        if filepath not in self._editors:
+            return
+        ed = self._editors[filepath]
+        idx = self.tabs.indexOf(ed)
+        if idx < 0:
+            return
+        title = self.tabs.tabText(idx)
+        if title.endswith(' •'):
+            self.tabs.setTabText(idx, title[:-2])
+
+    def save_all(self):
+        """Save all modified editor buffers to disk."""
+        for fp, ed in self._editors.items():
+            is_modified = (ed.isModified() if hasattr(ed, 'isModified')
+                           else False)
+            if is_modified:
+                if hasattr(ed, 'save_file'):
+                    ed.save_file()
+                if hasattr(ed, 'setModified'):
+                    ed.setModified(False)
+                self._mark_tab_clean(fp)
 
     def find_file_by_name(self, name):
         """Find full path of an open file by basename or relative path."""
@@ -4271,7 +4323,8 @@ class ChatPanel(QWidget):
                 continue
 
             if edit.operation == "replace_file":
-                if self._editor_ref.set_file_content(fp, edit.new_text):
+                if self._editor_ref.set_file_content(fp, edit.new_text,
+                                                      save_to_disk=False):
                     applied += 1
                     self._track_ai_edited_file(edit.filename)
                 else:
@@ -4294,7 +4347,8 @@ class ChatPanel(QWidget):
                 if anchor is not None:
                     line_num = content[:content.find(anchor)].count('\n') + 1
                     new_content = content.replace(anchor, edit.new_text, 1)
-                    if self._editor_ref.set_file_content(fp, new_content):
+                    if self._editor_ref.set_file_content(fp, new_content,
+                                                          save_to_disk=False):
                         applied += 1
                         self._track_ai_edited_file(edit.filename)
                     else:
@@ -4323,7 +4377,8 @@ class ChatPanel(QWidget):
                     else:
                         replacement = anchor + "\n" + edit.new_text
                     new_content = content.replace(anchor, replacement, 1)
-                    if self._editor_ref.set_file_content(fp, new_content):
+                    if self._editor_ref.set_file_content(fp, new_content,
+                                                          save_to_disk=False):
                         applied += 1
                         self._track_ai_edited_file(edit.filename)
                     else:
@@ -4356,9 +4411,10 @@ class ChatPanel(QWidget):
                             editor_w.replaceSelectedText(edit.new_text)
                             applied += 1
                             self._track_ai_edited_file(edit.filename)
-                            # Save to disk
-                            if hasattr(editor_w, 'save_file'):
-                                editor_w.save_file()
+                            # Mark buffer dirty (disk write on explicit Save)
+                            if hasattr(editor_w, 'setModified'):
+                                editor_w.setModified(True)
+                            self._editor_ref._mark_tab_dirty(fp)
                         else:
                             # Selection shifted — fall back to search_replace
                             files = self._editor_ref.get_all_files()
@@ -4367,7 +4423,8 @@ class ChatPanel(QWidget):
                                 new_content = content.replace(
                                     edit.old_text, edit.new_text, 1)
                                 if self._editor_ref.set_file_content(
-                                        fp, new_content):
+                                        fp, new_content,
+                                        save_to_disk=False):
                                     applied += 1
                                     self._track_ai_edited_file(edit.filename)
                                 else:
@@ -4384,7 +4441,8 @@ class ChatPanel(QWidget):
                         if edit.old_text and edit.old_text in content:
                             new_content = content.replace(
                                 edit.old_text, edit.new_text, 1)
-                            if self._editor_ref.set_file_content(fp, new_content):
+                            if self._editor_ref.set_file_content(fp, new_content,
+                                                                  save_to_disk=False):
                                 applied += 1
                                 self._track_ai_edited_file(edit.filename)
                             else:
@@ -4432,7 +4490,8 @@ class ChatPanel(QWidget):
             return
         restored = 0
         for fpath, original in self._apply_snapshot.items():
-            if self._editor_ref.set_file_content(fpath, original):
+            if self._editor_ref.set_file_content(fpath, original,
+                                                  save_to_disk=False):
                 restored += 1
         self._apply_snapshot.clear()
         self._undo_btn.hide()
@@ -8166,7 +8225,7 @@ class MainWindow(QMainWindow):
         self.chat_panel._update_context_bar()
 
     def _save_file(self):
-        self.editor.save_current()
+        self.editor.save_all()
 
     # ---- Build ----
     def _compile(self):
