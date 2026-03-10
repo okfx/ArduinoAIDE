@@ -127,7 +127,7 @@ After the AI finishes responding, the app scans for two block formats:
 ```
 
 If blocks are found:
-- The Apply bar appears below the chat with: "N changes in filename" + [Apply All Changes] + [Dismiss]
+- The Apply bar appears below the chat with: "N changes in filename" + [Replace] + [Dismiss]
 - A green info message appears in the chat
 
 If no EDIT/FILE blocks are found but fenced code blocks (```) exist:
@@ -135,7 +135,7 @@ If no EDIT/FILE blocks are found but fenced code blocks (```) exist:
 - This is a fallback and less precise than EDIT blocks
 
 ### Apply Bar
-- **Apply All Changes**: iterates through parsed edits, applies each to the editor
+- **Replace**: iterates through parsed edits, applies each to the editor
   - EDIT: finds the OLD text in the file, replaces with NEW (first match only)
   - FILE: replaces the entire file content
   - Reports success/failure count
@@ -338,7 +338,7 @@ User clicks Verify (Ctrl+B)
   → User clicks "Attach Errors" in Chat (or Ctrl+Shift+E)
   → Next chat message includes compiler errors
   → AI suggests fix with EDIT blocks
-  → User clicks "Apply All Changes"
+  → User clicks "Replace"
   → Edits applied to editor tabs
   → User re-compiles
 ```

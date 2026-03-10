@@ -69,7 +69,7 @@ The AI uses a structured format to suggest changes. When it responds with edit b
 >>>END
 ```
 
-An "Apply All Changes" bar appears so you can review and apply them in one click. Edits go to the editor buffer only — save to disk with Ctrl+S.
+An "Replace" bar appears so you can review and apply them in one click. Edits go to the editor buffer only — save to disk with Ctrl+S.
 
 For selection-based edits (via the workspace panel), the AI replaces only the selected region directly.
 

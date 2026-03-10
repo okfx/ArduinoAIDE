@@ -2820,7 +2820,7 @@ class ChatPanel(QWidget):
         # Button row
         ab_btns = QHBoxLayout()
         ab_btns.addStretch()
-        self.apply_all_btn = QPushButton("Apply All Changes")
+        self.apply_all_btn = QPushButton("Replace")
         self.apply_all_btn.setStyleSheet(BTN_PRIMARY)
         self.apply_all_btn.clicked.connect(self._apply_all_edits)
         ab_btns.addWidget(self.apply_all_btn)
@@ -5791,7 +5791,7 @@ class ChatPanel(QWidget):
         self.apply_label.setText(summary)
         # Update Apply button text with count
         self.apply_all_btn.setText(
-            f"Apply {n_accepted} of {n_total}" if n_excluded else "Apply All Changes")
+            f"Replace {n_accepted} of {n_total}" if n_excluded else "Replace")
         self.apply_all_btn.setEnabled(n_accepted > 0)
         self._apply_compile_btn.setEnabled(n_accepted > 0)
         if self._error_diagnostics:
@@ -7075,52 +7075,6 @@ class ModelsTab(QWidget):
         c11.addWidget(create_card)
         grid.addWidget(cell11, 1, 1, Qt.AlignmentFlag.AlignTop)
 
-        # ── Row 2 (spanning both columns): Reference Documents ─────────────
-        cell20 = QWidget()
-        c20 = QVBoxLayout(cell20); c20.setContentsMargins(0, 0, 0, 0); c20.setSpacing(8)
-
-        hdr20 = QHBoxLayout(); hdr20.setSpacing(6)
-        t20 = QLabel("REFERENCE DOCUMENTS"); t20.setStyleSheet(SETTINGS_STITLE)
-        hdr20.addWidget(t20); hdr20.addStretch()
-        hint20 = QLabel("Markdown/text files included in AI context for .ino projects")
-        hint20.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL}")
-        hdr20.addWidget(hint20)
-        c20.addLayout(hdr20)
-
-        self.ref_table = QTableWidget()
-        self.ref_table.setColumnCount(3)
-        self.ref_table.setHorizontalHeaderLabels(["File", "Size", "Path"])
-        self.ref_table.horizontalHeader().setStyleSheet(SETTINGS_TBL_HDR)
-        self.ref_table.setStyleSheet(SETTINGS_TABLE)
-        self.ref_table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows)
-        self.ref_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.ref_table.setMaximumHeight(150)
-        self.ref_table.verticalHeader().setVisible(False)
-        rhdr = self.ref_table.horizontalHeader()
-        rhdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        rhdr.resizeSection(0, 180)
-        rhdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        rhdr.resizeSection(1, 64)
-        rhdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        c20.addWidget(self.ref_table)
-
-        btn_row20 = QHBoxLayout(); btn_row20.setSpacing(6)
-        add_ref_btn = QPushButton("Add…"); add_ref_btn.setStyleSheet(BTN_SM_PRIMARY)
-        add_ref_btn.clicked.connect(self._add_ref_doc); btn_row20.addWidget(add_ref_btn)
-        rm_ref_btn = QPushButton("Remove"); rm_ref_btn.setStyleSheet(BTN_SM_DANGER)
-        rm_ref_btn.clicked.connect(self._remove_ref_doc); btn_row20.addWidget(rm_ref_btn)
-        prev_ref_btn = QPushButton("Preview"); prev_ref_btn.setStyleSheet(BTN_SM_GHOST)
-        prev_ref_btn.clicked.connect(self._preview_ref_doc); btn_row20.addWidget(prev_ref_btn)
-        btn_row20.addStretch()
-        c20.addLayout(btn_row20)
-
-        self.ref_status = QLabel("")
-        self.ref_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        c20.addWidget(self.ref_status)
-
-        grid.addWidget(cell20, 2, 0, 1, 2, Qt.AlignmentFlag.AlignTop)
-
         scroll_layout.addLayout(grid)
         scroll_layout.addStretch()
         scroll.setWidget(content)
@@ -7129,7 +7083,6 @@ class ModelsTab(QWidget):
         outer.addWidget(scroll)
 
         self._populate_curated_list()
-        self._populate_ref_docs_table()
 
     def _build_mf(self):
         lines = [f"FROM {self.base_cb.currentText().strip()}"]
@@ -7565,91 +7518,6 @@ class ModelsTab(QWidget):
             self.pull_status.setText(f"Pull failed: {name}")
             self.pull_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
 
-    # ── Reference Documents management ─────────────────────────────────────
-
-    def _populate_ref_docs_table(self):
-        docs = _load_ref_docs()
-        self.ref_table.setRowCount(len(docs))
-        for i, path in enumerate(docs):
-            name_item = QTableWidgetItem(os.path.basename(path))
-            name_item.setData(Qt.ItemDataRole.UserRole, path)
-            self.ref_table.setItem(i, 0, name_item)
-            try:
-                size = os.path.getsize(path)
-                if size < 1024:
-                    sz = f"{size} B"
-                else:
-                    sz = f"{size // 1024} KB"
-            except OSError:
-                sz = "missing"
-            self.ref_table.setItem(i, 1, QTableWidgetItem(sz))
-            self.ref_table.setItem(i, 2, QTableWidgetItem(path))
-        self.ref_status.setText(f"{len(docs)} reference document(s)")
-        self.ref_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-
-    def _add_ref_doc(self):
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "Add Reference Documents", "",
-            "Text/Markdown (*.md *.txt *.h *.c *.cpp *.ino);;All Files (*)")
-        if not paths:
-            return
-        docs = _load_ref_docs()
-        added = 0
-        for p in paths:
-            if p not in docs:
-                docs.append(p)
-                added += 1
-        _save_ref_docs(docs)
-        self._populate_ref_docs_table()
-        if added:
-            self.ref_status.setText(f"Added {added} document(s)")
-            self.ref_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-
-    def _remove_ref_doc(self):
-        row = self.ref_table.currentRow()
-        if row < 0:
-            self.ref_status.setText("Select a document to remove")
-            self.ref_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-            return
-        item = self.ref_table.item(row, 0)
-        path = item.data(Qt.ItemDataRole.UserRole)
-        docs = _load_ref_docs()
-        if path in docs:
-            docs.remove(path)
-        _save_ref_docs(docs)
-        self._populate_ref_docs_table()
-
-    def _preview_ref_doc(self):
-        row = self.ref_table.currentRow()
-        if row < 0:
-            self.ref_status.setText("Select a document to preview")
-            self.ref_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-            return
-        item = self.ref_table.item(row, 0)
-        path = item.data(Qt.ItemDataRole.UserRole)
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                content = f.read(8000)  # preview first 8KB
-        except OSError as e:
-            self.ref_status.setText(f"Cannot read: {e}")
-            self.ref_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-            return
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"Preview — {os.path.basename(path)}")
-        dlg.resize(600, 400)
-        lay = QVBoxLayout(dlg)
-        te = QPlainTextEdit()
-        te.setReadOnly(True)
-        te.setPlainText(content)
-        te.setStyleSheet(
-            f"background:{C['bg_input']};color:{C['fg']};"
-            f"border:1px solid {C['border_light']};{FONT_CODE}")
-        lay.addWidget(te)
-        close_btn = QPushButton("Close")
-        close_btn.setStyleSheet(BTN_SM_SECONDARY)
-        close_btn.clicked.connect(dlg.accept)
-        lay.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
-        dlg.exec()
 
 
 # =============================================================================
@@ -8184,7 +8052,53 @@ class RulesTab(QWidget):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
+        # ── Reference Documents section ────────────────────────────────────
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color:{C['border']};margin-top:8px;margin-bottom:4px;")
+        layout.addWidget(sep)
+
+        ref_hdr = QHBoxLayout(); ref_hdr.setSpacing(6)
+        ref_title = QLabel("REFERENCE DOCUMENTS"); ref_title.setStyleSheet(SETTINGS_STITLE)
+        ref_hdr.addWidget(ref_title); ref_hdr.addStretch()
+        ref_hint = QLabel("Markdown/text files included in AI context for .ino projects")
+        ref_hint.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL}")
+        ref_hdr.addWidget(ref_hint)
+        layout.addLayout(ref_hdr)
+
+        self.ref_table = QTableWidget()
+        self.ref_table.setColumnCount(3)
+        self.ref_table.setHorizontalHeaderLabels(["File", "Size", "Path"])
+        self.ref_table.horizontalHeader().setStyleSheet(SETTINGS_TBL_HDR)
+        self.ref_table.setStyleSheet(SETTINGS_TABLE)
+        self.ref_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.ref_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.ref_table.setMaximumHeight(150)
+        self.ref_table.verticalHeader().setVisible(False)
+        rhdr = self.ref_table.horizontalHeader()
+        rhdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        rhdr.resizeSection(0, 180)
+        rhdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        rhdr.resizeSection(1, 64)
+        rhdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.ref_table)
+
+        ref_btn_row = QHBoxLayout(); ref_btn_row.setSpacing(6)
+        add_ref_btn = QPushButton("Add…"); add_ref_btn.setStyleSheet(BTN_SM_PRIMARY)
+        add_ref_btn.clicked.connect(self._add_ref_doc); ref_btn_row.addWidget(add_ref_btn)
+        rm_ref_btn = QPushButton("Remove"); rm_ref_btn.setStyleSheet(BTN_SM_DANGER)
+        rm_ref_btn.clicked.connect(self._remove_ref_doc); ref_btn_row.addWidget(rm_ref_btn)
+        prev_ref_btn = QPushButton("Preview"); prev_ref_btn.setStyleSheet(BTN_SM_GHOST)
+        prev_ref_btn.clicked.connect(self._preview_ref_doc); ref_btn_row.addWidget(prev_ref_btn)
+        ref_btn_row.addStretch()
+        layout.addLayout(ref_btn_row)
+
+        self.ref_status = QLabel("")
+        self.ref_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        layout.addWidget(self.ref_status)
+
         self._load_initial()
+        self._populate_ref_docs_table()
 
     def _load_initial(self):
         """Load custom rules if they exist, otherwise show default."""
@@ -8255,6 +8169,92 @@ class RulesTab(QWidget):
             except OSError as e:
                 self._status.setText(f"Error: {e}")
                 self._status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+
+    # ── Reference Documents management ─────────────────────────────────────
+
+    def _populate_ref_docs_table(self):
+        docs = _load_ref_docs()
+        self.ref_table.setRowCount(len(docs))
+        for i, path in enumerate(docs):
+            name_item = QTableWidgetItem(os.path.basename(path))
+            name_item.setData(Qt.ItemDataRole.UserRole, path)
+            self.ref_table.setItem(i, 0, name_item)
+            try:
+                size = os.path.getsize(path)
+                if size < 1024:
+                    sz = f"{size} B"
+                else:
+                    sz = f"{size // 1024} KB"
+            except OSError:
+                sz = "missing"
+            self.ref_table.setItem(i, 1, QTableWidgetItem(sz))
+            self.ref_table.setItem(i, 2, QTableWidgetItem(path))
+        self.ref_status.setText(f"{len(docs)} reference document(s)")
+        self.ref_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+
+    def _add_ref_doc(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Add Reference Documents", "",
+            "Text/Markdown (*.md *.txt *.h *.c *.cpp *.ino);;All Files (*)")
+        if not paths:
+            return
+        docs = _load_ref_docs()
+        added = 0
+        for p in paths:
+            if p not in docs:
+                docs.append(p)
+                added += 1
+        _save_ref_docs(docs)
+        self._populate_ref_docs_table()
+        if added:
+            self.ref_status.setText(f"Added {added} document(s)")
+            self.ref_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+
+    def _remove_ref_doc(self):
+        row = self.ref_table.currentRow()
+        if row < 0:
+            self.ref_status.setText("Select a document to remove")
+            self.ref_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+            return
+        item = self.ref_table.item(row, 0)
+        path = item.data(Qt.ItemDataRole.UserRole)
+        docs = _load_ref_docs()
+        if path in docs:
+            docs.remove(path)
+        _save_ref_docs(docs)
+        self._populate_ref_docs_table()
+
+    def _preview_ref_doc(self):
+        row = self.ref_table.currentRow()
+        if row < 0:
+            self.ref_status.setText("Select a document to preview")
+            self.ref_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+            return
+        item = self.ref_table.item(row, 0)
+        path = item.data(Qt.ItemDataRole.UserRole)
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read(8000)
+        except OSError as e:
+            self.ref_status.setText(f"Cannot read: {e}")
+            self.ref_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Preview — {os.path.basename(path)}")
+        dlg.resize(600, 400)
+        lay = QVBoxLayout(dlg)
+        te = QPlainTextEdit()
+        te.setReadOnly(True)
+        te.setPlainText(content)
+        te.setStyleSheet(
+            f"background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};{FONT_CODE}")
+        lay.addWidget(te)
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet(BTN_SM_SECONDARY)
+        close_btn.clicked.connect(dlg.accept)
+        lay.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        dlg.exec()
 
 
 # =============================================================================

@@ -175,7 +175,7 @@ All colors live in the `C = {}` dict at the top of `ArduinoAIDE.py`.
 
 ### Apply Bar
 - Background: `#1e1e1e`, top border
-- "N changes in filename" label + "Apply All Changes" (teal btn) + "Dismiss" (dark btn)
+- "N changes in filename" label + "Replace" (teal btn) + "Dismiss" (dark btn)
 
 ### Input Area
 - Background: `#1e1e1e`, top border
