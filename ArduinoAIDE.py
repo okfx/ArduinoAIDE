@@ -3757,10 +3757,21 @@ class ChatPanel(QWidget):
                 f"— likely a truncated snippet. Dismiss and ask AI to use <<<EDIT blocks.")
 
     def _validate_create_file(self, edit):
-        """Validate a create_file edit — reclassify if file exists."""
+        """Validate a create_file edit — block path traversal, reclassify if file exists."""
+        # Path traversal guard
+        proj = getattr(self, '_project_path', None) or ""
+        if proj and edit.resolved_path:
+            real_resolved = os.path.realpath(edit.resolved_path)
+            real_project = os.path.realpath(proj)
+            if not real_resolved.startswith(real_project + os.sep) and real_resolved != real_project:
+                edit.blocked = True
+                edit.warnings.append("BLOCKED: path escapes project directory")
+                return
         if os.path.isfile(edit.resolved_path):
             edit.operation = "replace_file"
-            edit.warnings.append("file already exists, will overwrite")
+            edit.warnings.append("file already exists — treating as replace")
+            self._validate_replace_file(edit)
+            return
 
     def _validate_filename_ambiguity(self, edit):
         """Block if the edit's filename matches multiple open files — applying to
@@ -3826,6 +3837,14 @@ class ChatPanel(QWidget):
             fp = self._editor_ref.find_file_by_name(edit.filename)
 
             if not fp and edit.operation == "create_file":
+                # Safety net: block writes outside project directory
+                proj = getattr(self, '_project_path', None) or ""
+                if proj:
+                    real_abs = os.path.realpath(abs_path)
+                    real_proj = os.path.realpath(proj)
+                    if not real_abs.startswith(real_proj + os.sep) and real_abs != real_proj:
+                        errors.append(f"Blocked: {edit.filename} is outside project directory")
+                        continue
                 parent_dir = os.path.dirname(abs_path)
                 try:
                     os.makedirs(parent_dir, exist_ok=True)
