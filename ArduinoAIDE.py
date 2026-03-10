@@ -4437,7 +4437,6 @@ class ChatPanel(QWidget):
         row.setContentsMargins(0, 0, 12, 0)
         row.addStretch()
         bubble = QFrame()
-        bubble.setMaximumWidth(500)
         bubble.setStyleSheet(
             f"QFrame {{ background-color:{C['bg_input']}; border-radius:14px; }}")
         bl = QVBoxLayout(bubble)
@@ -4455,7 +4454,7 @@ class ChatPanel(QWidget):
         if code:
             # Code block inside the bubble
             code_label = QLabel(code)
-            code_label.setWordWrap(True)
+            code_label.setWordWrap(False)
             code_label.setStyleSheet(
                 f"background-color:{C['bg']};color:{C['fg']};{FONT_CODE}"
                 f"border-radius:8px;padding:8px;")
@@ -4470,7 +4469,6 @@ class ChatPanel(QWidget):
     def _add_ai_msg(self):
         """Add a left-aligned AI message area with model name label."""
         wrapper = QWidget()
-        wrapper.setMaximumWidth(700)
         wrapper.setStyleSheet("background: transparent;")
         vl = QVBoxLayout(wrapper)
         vl.setContentsMargins(0, 0, 0, 0)
