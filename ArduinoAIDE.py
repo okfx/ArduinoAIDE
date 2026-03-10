@@ -8011,12 +8011,29 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.model_desc_label)
         self._update_model_desc()
 
-        # Load model button — pre-loads model into memory
+        # Load / Unload buttons — manage model in Ollama memory
+        tb_secondary = (f"QPushButton {{ {BTN_SM_SECONDARY} }}"
+                        f"QPushButton:hover {{ background:{C['bg_hover']}; }}")
+
         self.load_model_btn = QPushButton("Load")
-        self.load_model_btn.setToolTip("Pre-load model into memory")
+        self.load_model_btn.setToolTip("Load model into memory")
         self.load_model_btn.setStyleSheet(tb_primary)
         self.load_model_btn.clicked.connect(self._load_model)
         toolbar.addWidget(self.load_model_btn)
+
+        self.unload_model_btn = QPushButton("Unload")
+        self.unload_model_btn.setToolTip("Unload model from memory to free VRAM")
+        self.unload_model_btn.setStyleSheet(tb_secondary)
+        self.unload_model_btn.clicked.connect(self._unload_model)
+        self.unload_model_btn.setEnabled(False)
+        toolbar.addWidget(self.unload_model_btn)
+
+        self._loaded_model = None  # track which model is currently in memory
+        self.model_status_label = QLabel("No model loaded")
+        self.model_status_label.setStyleSheet(
+            f"color:{C['fg_dim']};{FONT_SMALL}"
+            f"background:transparent;border:none;margin-left:4px;")
+        toolbar.addWidget(self.model_status_label)
 
         # Spacer to push spinner to the right
         spacer = QWidget()
@@ -8240,7 +8257,16 @@ class MainWindow(QMainWindow):
             self._status_model.setText(model_name)
         # Unload the previous model to free VRAM/RAM
         if old_model and old_model != model_name:
-            self._unload_model_async(old_model)
+            if old_model == getattr(self, '_loaded_model', None):
+                self._unload_model_async(old_model)
+                self._loaded_model = None
+                if hasattr(self, 'unload_model_btn'):
+                    self.unload_model_btn.setEnabled(False)
+                if hasattr(self, 'model_status_label'):
+                    self.model_status_label.setText("No model loaded")
+                    self.model_status_label.setStyleSheet(
+                        f"color:{C['fg_dim']};{FONT_SMALL}"
+                        f"background:transparent;border:none;margin-left:4px;")
 
     def _on_editor_file_changed(self, fp):
         self.setWindowTitle(f"{WINDOW_TITLE} — {os.path.basename(fp)}")
@@ -8354,8 +8380,16 @@ class MainWindow(QMainWindow):
             if hasattr(self, '_status_model'):
                 self._status_model.setText(name)
             # Unload the previous model to free VRAM/RAM
-            if old_model:
+            if old_model and old_model == getattr(self, '_loaded_model', None):
                 self._unload_model_async(old_model)
+                self._loaded_model = None
+                if hasattr(self, 'unload_model_btn'):
+                    self.unload_model_btn.setEnabled(False)
+                if hasattr(self, 'model_status_label'):
+                    self.model_status_label.setText("No model loaded")
+                    self.model_status_label.setStyleSheet(
+                        f"color:{C['fg_dim']};{FONT_SMALL}"
+                        f"background:transparent;border:none;margin-left:4px;")
 
     def _unload_model_async(self, model_name):
         """Send keep_alive=0 to Ollama to unload a model from memory."""
@@ -8370,14 +8404,22 @@ class MainWindow(QMainWindow):
         threading.Thread(target=do_unload, daemon=True).start()
 
     def _load_model(self):
-        """Pre-load the selected model into Ollama memory."""
+        """Load the selected model into Ollama memory."""
         model = OLLAMA_MODEL
         if not model:
             return
+        # If a different model is already loaded, unload it first
+        if self._loaded_model and self._loaded_model != model:
+            self._unload_model_async(self._loaded_model)
         self.load_model_btn.setEnabled(False)
+        self.unload_model_btn.setEnabled(False)
         self.load_model_btn.setText("Loading...")
         self.ai_spinner.active = True
         self.ai_spinner.update()
+        self.model_status_label.setText(f"Loading {model}...")
+        self.model_status_label.setStyleSheet(
+            f"color:{C['fg_dim']};{FONT_SMALL}"
+            f"background:transparent;border:none;margin-left:4px;")
         if hasattr(self, '_status_model'):
             self._status_model.setText(f"Loading {model}...")
 
@@ -8399,11 +8441,63 @@ class MainWindow(QMainWindow):
         self.ai_spinner.active = False
         self.ai_spinner.update()
         if success:
+            self._loaded_model = model
+            self.unload_model_btn.setEnabled(True)
+            self.model_status_label.setText(f"{model} loaded")
+            self.model_status_label.setStyleSheet(
+                f"color:{C['fg_ok']};{FONT_SMALL}"
+                f"background:transparent;border:none;margin-left:4px;")
             if hasattr(self, '_status_model'):
                 self._status_model.setText(f"{model} (loaded)")
         else:
+            self.unload_model_btn.setEnabled(False)
+            self.model_status_label.setText(f"Load failed")
+            self.model_status_label.setStyleSheet(
+                f"color:{C['fg_err']};{FONT_SMALL}"
+                f"background:transparent;border:none;margin-left:4px;")
             if hasattr(self, '_status_model'):
                 self._status_model.setText(f"{model} (failed)")
+
+    def _unload_model(self):
+        """Unload the currently loaded model from Ollama memory."""
+        if not self._loaded_model:
+            return
+        model = self._loaded_model
+        self.unload_model_btn.setEnabled(False)
+        self.model_status_label.setText(f"Unloading {model}...")
+        self.model_status_label.setStyleSheet(
+            f"color:{C['fg_dim']};{FONT_SMALL}"
+            f"background:transparent;border:none;margin-left:4px;")
+        if hasattr(self, '_status_model'):
+            self._status_model.setText(f"Unloading {model}...")
+
+        def do_unload():
+            try:
+                requests.post("http://localhost:11434/api/generate",
+                    json={"model": model, "prompt": "", "keep_alive": "0"},
+                    timeout=10)
+                QTimer.singleShot(0, lambda: self._on_model_unloaded(model, True))
+            except Exception:
+                QTimer.singleShot(0, lambda: self._on_model_unloaded(model, False))
+        threading.Thread(target=do_unload, daemon=True).start()
+
+    def _on_model_unloaded(self, model, success):
+        """Callback when model unloading completes."""
+        if success:
+            self._loaded_model = None
+            self.unload_model_btn.setEnabled(False)
+            self.model_status_label.setText("No model loaded")
+            self.model_status_label.setStyleSheet(
+                f"color:{C['fg_dim']};{FONT_SMALL}"
+                f"background:transparent;border:none;margin-left:4px;")
+            if hasattr(self, '_status_model'):
+                self._status_model.setText(OLLAMA_MODEL)
+        else:
+            self.unload_model_btn.setEnabled(True)
+            self.model_status_label.setText(f"Unload failed")
+            self.model_status_label.setStyleSheet(
+                f"color:{C['fg_err']};{FONT_SMALL}"
+                f"background:transparent;border:none;margin-left:4px;")
 
     def _send_errors_to_ai(self):
         if self._compiler_errors:
@@ -8647,8 +8741,6 @@ def main():
     OLLAMA_MODEL = config.get("ollama_model", "teensy-coder")
     w = MainWindow(project_path, config=config)
     w.show()
-    # Auto-preload the AI model after UI is visible
-    QTimer.singleShot(500, w._load_model)
     sys.exit(app.exec())
 
 if __name__ == "__main__":
