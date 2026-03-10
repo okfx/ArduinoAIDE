@@ -3672,11 +3672,13 @@ class ChatPanel(QWidget):
         ]
         self._selection_prefilled = True
 
-        # Show user bubble
+        # Show user bubble with multi-line code preview (up to 3 lines)
         show = display_text or user_text
-        sel_preview = selected_text[:80].replace('\n', ' ')
-        if len(selected_text) > 80:
-            sel_preview += '…'
+        preview_lines = selected_text.split('\n')[:3]
+        preview_lines = [l[:60] + ('…' if len(l) > 60 else '') for l in preview_lines]
+        if len(selected_text.split('\n')) > 3:
+            preview_lines.append('…')
+        sel_preview = '\n'.join(preview_lines)
         self._add_user_msg(show, code=sel_preview if display_code is None else display_code)
 
         # Prepare UI for streaming (same as _send_prompt)
@@ -3993,6 +3995,11 @@ class ChatPanel(QWidget):
         t = self._strip_latex(t)
         if not t:
             return
+        # In selection mode, strip replacement delimiters before display
+        if self._selection_mode:
+            t = t.replace('<<<REPLACEMENT>>>', '').replace('>>>REPLACEMENT>>>', '')
+            if not t:
+                return
         self._current_response += t  # keep tags for _render_formatted_response
         # Handle <think> blocks — strip tags from display text, track state
         display_t = t
@@ -6501,6 +6508,7 @@ class ModelsTab(QWidget):
             try:
                 requests.post(f"{self.BASE}/api/generate",
                     json={"model": name, "prompt": " ", "keep_alive": "10m",
+                          "stream": False,
                           "options": {"num_predict": 1}},
                     timeout=120)
                 QTimer.singleShot(0, lambda: self._on_load_done(name, True))
@@ -8472,6 +8480,7 @@ class MainWindow(QMainWindow):
             try:
                 requests.post("http://localhost:11434/api/generate",
                     json={"model": model, "prompt": " ", "keep_alive": "10m",
+                          "stream": False,
                           "options": {"num_predict": 1}},
                     timeout=120)
                 QTimer.singleShot(0, lambda: self._on_model_loaded(model, True))
