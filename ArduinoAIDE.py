@@ -3439,7 +3439,15 @@ class ChatPanel(QWidget):
         "- Do NOT repeat the rest of the file — ONLY the replacement.\n"
         "- If the user asks to explain or analyze (not change) the code, "
         "respond with a plain text explanation instead.\n"
-        "- Match the indentation style of the surrounding code.\n"
+        "- PRESERVE the syntactic role of the selected code. If the selection "
+        "is a comment, your replacement must also be a comment (keep the // or "
+        "/* */ prefix). If it is a string literal, keep the quotes. If it is a "
+        "function body, keep it as a function body.\n"
+        "- Be VERBATIM with the user's replacement text. If the user says to "
+        "replace with 'wowser', output exactly 'wowser' — do not capitalize, "
+        "add punctuation, or rephrase it.\n"
+        "- Match the indentation of the original selection exactly. Count the "
+        "leading spaces or tabs and reproduce them.\n"
     )
 
     def _send_selection_prompt(self, user_text, selected_text,
