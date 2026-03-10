@@ -508,6 +508,9 @@ BEHAVIOR RULES:
 - Prefer action over explanation. If the intent is clear, produce the edit.
 - If genuinely ambiguous, ask ONE short clarifying question — never multiple.
 - If you need a file not in your context, name it and the IDE will add it.
+- A Teensy quick reference is appended below. A comprehensive API reference may also be in your file context — consult it for pin mappings, peripheral APIs, and library usage.
+- Be CONCISE. Give the shortest useful response. When the user asks for a code change, produce the edit with at most one sentence of explanation. Do not lecture, do not provide tutorials, do not show alternative approaches unless asked.
+- If the user wants more detail, they will ask. Default to brevity.
 
 EDIT FORMAT — output this exact syntax to modify files:
 
@@ -588,6 +591,21 @@ Use INSERT_BEFORE/INSERT_AFTER when:
 - You don't need to modify the anchor code, just add code next to it
 - The anchor is a short, unique snippet (e.g., a function signature, #include line)
 Use <<<EDIT when you need to REPLACE existing code."""
+
+# Load Teensy quick reference (appended to system prompt at startup)
+_quick_ref_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'docs', 'TEENSY_QUICK_REF.md')
+try:
+    with open(_quick_ref_path, 'r', encoding='utf-8') as _f:
+        _TEENSY_QUICK_REF = _f.read().strip()
+except (FileNotFoundError, OSError):
+    _TEENSY_QUICK_REF = ""
+if _TEENSY_QUICK_REF:
+    SYSTEM_PROMPT += "\n\n--- TEENSY QUICK REFERENCE ---\n" + _TEENSY_QUICK_REF
+
+# Path to full Teensy API reference (included in WorkingSet for .ino projects)
+_TEENSY_API_REF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'docs', 'TEENSY_API_REFERENCE.md')
 
 # =============================================================================
 # Stylesheet
@@ -1082,75 +1100,6 @@ class OllamaWorker(QObject):
 
 
 # =============================================================================
-# AI Context Menu Actions
-# =============================================================================
-
-DEFAULT_AI_ACTIONS = [
-    ("Explain This Code",
-     "Explain what the following code does in clear, concise terms. "
-     "Mention any Teensy/Arduino-specific details:\n\n```cpp\n{code}\n```"),
-    ("Fix / Improve",
-     "Review the following code for bugs, issues, or improvements. "
-     "Suggest fixes using the <<<EDIT format:\n\n```cpp\n{code}\n```"),
-    ("Refactor",
-     "Refactor the following code to be cleaner, more readable, and more efficient "
-     "while preserving exact behavior. Use the <<<EDIT format:\n\n```cpp\n{code}\n```"),
-    ("Add Comments",
-     "Add clear, useful inline comments to the following code. "
-     "Use the <<<EDIT format to show the commented version:\n\n```cpp\n{code}\n```"),
-    ("Find Bugs",
-     "Carefully analyze the following code for potential bugs, memory issues, "
-     "race conditions, undefined behavior, or Teensy-specific pitfalls:\n\n```cpp\n{code}\n```"),
-    ("Optimize for Teensy",
-     "Optimize the following code specifically for Teensy performance: "
-     "minimize memory usage, use DMA/hardware features where possible, "
-     "reduce latency. Use the <<<EDIT format:\n\n```cpp\n{code}\n```"),
-    ("Generate Test",
-     "Write a simple test or validation sketch that exercises the following code. "
-     "Include Serial output to verify correct behavior:\n\n```cpp\n{code}\n```"),
-    None,  # separator
-    ("Ask AI About This...",  None),  # special: opens a prompt dialog
-]
-
-AI_ACTIONS = list(DEFAULT_AI_ACTIONS)
-AI_ACTIONS_FILE = os.path.expanduser("~/.teensy_ide_ai_actions.json")
-
-def _load_ai_actions():
-    """Load AI actions from config file, or use defaults."""
-    global AI_ACTIONS
-    try:
-        with open(AI_ACTIONS_FILE, "r") as f:
-            data = json.load(f)
-        actions = []
-        for entry in data.get("actions", []):
-            if entry is None:
-                actions.append(None)
-            else:
-                actions.append((entry["label"], entry.get("template")))
-        # Ensure "Ask AI About This..." is always last
-        has_ask = any(e is not None and e[0] == "Ask AI About This..." for e in actions)
-        if not has_ask:
-            actions.append(("Ask AI About This...", None))
-        AI_ACTIONS[:] = actions
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        AI_ACTIONS[:] = list(DEFAULT_AI_ACTIONS)
-
-def _save_ai_actions():
-    """Persist current AI_ACTIONS to config file."""
-    entries = []
-    for entry in AI_ACTIONS:
-        if entry is None:
-            entries.append(None)
-        else:
-            entries.append({"label": entry[0], "template": entry[1]})
-    try:
-        with open(AI_ACTIONS_FILE, "w") as f:
-            json.dump({"version": 1, "actions": entries}, f, indent=2)
-    except Exception:
-        pass
-
-
-# =============================================================================
 # Curated Models for Pull Model browser
 # =============================================================================
 
@@ -1180,33 +1129,13 @@ CURATED_MODELS = [
 # Code Editor
 # =============================================================================
 
-def _build_ai_context_menu(editor_widget, menu, selected_text):
-    """Add AI actions to a context menu. Returns list of (action, prompt_template) pairs."""
-    from PyQt6.QtWidgets import QMenu
-    if not selected_text.strip():
-        return []
-    ai_menu = QMenu("  AI Tools", menu)
-    pairs = []
-    for entry in AI_ACTIONS:
-        if entry is None:
-            ai_menu.addSeparator()
-            continue
-        label, template = entry
-        a = QAction(label, editor_widget)
-        ai_menu.addAction(a)
-        pairs.append((a, template))
-    menu.addSeparator()
-    menu.addMenu(ai_menu)
-    return pairs
-
-
 if HAS_QSCINTILLA:
     # Marker numbers for QScintilla gutter (0-31 available)
     _MARKER_ERROR = 8
     _MARKER_WARNING = 9
 
     class CodeEditor(QsciScintilla):
-        ai_action_requested = pyqtSignal(str)  # emits the full prompt
+        ask_llm_requested = pyqtSignal()
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -1274,8 +1203,15 @@ if HAS_QSCINTILLA:
             self.setLexer(lexer)
 
         def _show_context_menu(self, pos):
-            from PyQt6.QtWidgets import QMenu, QInputDialog
+            from PyQt6.QtWidgets import QMenu
             menu = QMenu(self)
+            menu.setStyleSheet(
+                f"QMenu{{background:{C['bg_input']};color:{C['fg']};"
+                f"border:1px solid {C['border_light']};border-radius:4px;padding:4px;}}"
+                f"QMenu::item{{padding:4px 20px;border-radius:2px;}}"
+                f"QMenu::item:selected{{background:{C['teal']};color:#fff;}}"
+                f"QMenu::separator{{height:1px;background:{C['border_light']};"
+                f"margin:4px 8px;}}")
             # Standard editing actions with keyboard shortcuts
             if self.hasSelectedText():
                 a_cut = QAction("Cut", self)
@@ -1295,25 +1231,12 @@ if HAS_QSCINTILLA:
             a_all.setShortcut(QKeySequence("Ctrl+A"))
             a_all.triggered.connect(self.selectAll)
             menu.addAction(a_all)
-
-            sel = self.selectedText()
-            pairs = _build_ai_context_menu(self, menu, sel)
-
-            chosen = menu.exec(self.mapToGlobal(pos))
-            if not chosen:
-                return
-            for a, template in pairs:
-                if chosen == a:
-                    if template is None:
-                        # "Ask AI About This..." — show input dialog
-                        question, ok = QInputDialog.getText(
-                            self, "Ask AI", "What do you want to know about this code?")
-                        if ok and question.strip():
-                            prompt = f"{question.strip()}\n\n```cpp\n{sel}\n```"
-                            self.ai_action_requested.emit(prompt)
-                    else:
-                        self.ai_action_requested.emit(template.format(code=sel))
-                    break
+            if self.hasSelectedText():
+                menu.addSeparator()
+                a_llm = QAction("Ask LLM", self)
+                a_llm.triggered.connect(self.ask_llm_requested.emit)
+                menu.addAction(a_llm)
+            menu.exec(self.mapToGlobal(pos))
 
         def clear_diagnostics(self):
             """Remove all error/warning markers and tooltip data."""
@@ -1367,7 +1290,7 @@ if HAS_QSCINTILLA:
         def current_file(self): return self._current_file
 else:
     class CodeEditor(QPlainTextEdit):
-        ai_action_requested = pyqtSignal(str)
+        ask_llm_requested = pyqtSignal()
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -1379,24 +1302,21 @@ else:
             self.customContextMenuRequested.connect(self._show_context_menu)
 
         def _show_context_menu(self, pos):
-            from PyQt6.QtWidgets import QMenu, QInputDialog
+            from PyQt6.QtWidgets import QMenu
             menu = self.createStandardContextMenu()
-            sel = self.textCursor().selectedText()
-            pairs = _build_ai_context_menu(self, menu, sel)
-            chosen = menu.exec(self.mapToGlobal(pos))
-            if not chosen:
-                return
-            for a, template in pairs:
-                if chosen == a:
-                    if template is None:
-                        question, ok = QInputDialog.getText(
-                            self, "Ask AI", "What do you want to know about this code?")
-                        if ok and question.strip():
-                            prompt = f"{question.strip()}\n\n```cpp\n{sel}\n```"
-                            self.ai_action_requested.emit(prompt)
-                    else:
-                        self.ai_action_requested.emit(template.format(code=sel))
-                    break
+            menu.setStyleSheet(
+                f"QMenu{{background:{C['bg_input']};color:{C['fg']};"
+                f"border:1px solid {C['border_light']};border-radius:4px;padding:4px;}}"
+                f"QMenu::item{{padding:4px 20px;border-radius:2px;}}"
+                f"QMenu::item:selected{{background:{C['teal']};color:#fff;}}"
+                f"QMenu::separator{{height:1px;background:{C['border_light']};"
+                f"margin:4px 8px;}}")
+            if self.textCursor().hasSelection():
+                menu.addSeparator()
+                a_llm = QAction("Ask LLM", self)
+                a_llm.triggered.connect(self.ask_llm_requested.emit)
+                menu.addAction(a_llm)
+            menu.exec(self.mapToGlobal(pos))
 
         def clear_diagnostics(self): pass  # No gutter in QPlainTextEdit
         def set_diagnostics(self, diags): pass
@@ -1424,7 +1344,8 @@ else:
 
 class TabbedEditor(QWidget):
     file_changed = pyqtSignal(str)
-    ai_action_requested = pyqtSignal(str)  # propagated from CodeEditor
+    ask_llm_requested = pyqtSignal()        # propagated from CodeEditor
+    editor_opened = pyqtSignal(object)      # emits CodeEditor widget when a new tab is created
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1449,12 +1370,13 @@ class TabbedEditor(QWidget):
             self.tabs.setCurrentWidget(self._editors[filepath])
             return True
         editor = CodeEditor()
-        editor.ai_action_requested.connect(self.ai_action_requested.emit)
+        editor.ask_llm_requested.connect(self.ask_llm_requested.emit)
         if editor.load_file(filepath):
             self._editors[filepath] = editor
             idx = self.tabs.addTab(editor, os.path.basename(filepath))
             self.tabs.setCurrentIndex(idx)
             self.file_changed.emit(filepath)
+            self.editor_opened.emit(editor)
             return True
         return False
 
@@ -1479,7 +1401,16 @@ class TabbedEditor(QWidget):
 
     def save_current(self):
         e = self.tabs.currentWidget()
-        return e.save_file() if e and hasattr(e, 'save_file') else False
+        if e and hasattr(e, 'save_file'):
+            result = e.save_file()
+            if result:
+                if hasattr(e, 'setModified'):
+                    e.setModified(False)
+                fp = e.current_file if hasattr(e, 'current_file') else None
+                if fp:
+                    self._mark_tab_clean(fp)
+            return result
+        return False
 
     def current_file(self):
         e = self.tabs.currentWidget()
@@ -1508,21 +1439,64 @@ class TabbedEditor(QWidget):
             result[fp] = ed.text() if hasattr(ed, 'text') else ed.toPlainText()
         return result
 
-    def set_file_content(self, filepath, content):
-        """Set content of an open file by path. Updates editor and saves to disk.
-        Returns True if found."""
+    def set_file_content(self, filepath, content, save_to_disk=True):
+        """Set content of an open file by path. Updates editor buffer.
+        Writes to disk only if save_to_disk=True.  Returns True if found."""
         if filepath in self._editors:
             ed = self._editors[filepath]
             if hasattr(ed, 'setText'): ed.setText(content)
             else: ed.setPlainText(content)
-            # Save to disk so changes persist
-            try:
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(content)
-            except OSError:
-                pass  # Editor updated even if disk write fails
+            if save_to_disk:
+                try:
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    if hasattr(ed, 'setModified'):
+                        ed.setModified(False)
+                except OSError:
+                    pass
+            else:
+                # Mark as modified so the dirty indicator shows
+                if hasattr(ed, 'setModified'):
+                    ed.setModified(True)
+                self._mark_tab_dirty(filepath)
             return True
         return False
+
+    def _mark_tab_dirty(self, filepath):
+        """Add a • dirty indicator to the tab title."""
+        if filepath not in self._editors:
+            return
+        ed = self._editors[filepath]
+        idx = self.tabs.indexOf(ed)
+        if idx < 0:
+            return
+        title = self.tabs.tabText(idx)
+        if not title.endswith(' •'):
+            self.tabs.setTabText(idx, title + ' •')
+
+    def _mark_tab_clean(self, filepath):
+        """Remove the • dirty indicator from the tab title."""
+        if filepath not in self._editors:
+            return
+        ed = self._editors[filepath]
+        idx = self.tabs.indexOf(ed)
+        if idx < 0:
+            return
+        title = self.tabs.tabText(idx)
+        if title.endswith(' •'):
+            self.tabs.setTabText(idx, title[:-2])
+
+    def save_all(self):
+        """Save all modified editor buffers to disk."""
+        for fp, ed in self._editors.items():
+            is_modified = (ed.isModified() if hasattr(ed, 'isModified')
+                           else False)
+            if is_modified:
+                if hasattr(ed, 'save_file'):
+                    ed.save_file()
+                if hasattr(ed, 'setModified'):
+                    ed.setModified(False)
+                self._mark_tab_clean(fp)
 
     def find_file_by_name(self, name):
         """Find full path of an open file by basename or relative path."""
@@ -1948,6 +1922,8 @@ class ChatPanel(QWidget):
         self._last_work_result = None             # AIWorkResult from most recent AI turn
         self._selection_mode = False              # True when using selection-based edit flow
         self._selection_edit = None               # dict with selection coords for selection mode
+        self._selection_prefilled = False         # True when pre-fill was used for selection prompt
+        self._captured_selection = None            # snapshot of editor selection (survives focus loss)
         self._gen_start_time = None               # time.time() when generation started
         self._gen_token_count = 0                  # token count during streaming
         self._stats_widget = None                  # stats row widget during streaming
@@ -1957,6 +1933,15 @@ class ChatPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        # Style right-click context menus (QTextEdit default menus inherit this)
+        self.setStyleSheet(
+            f"ChatPanel QMenu{{background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};border-radius:4px;padding:4px;}}"
+            f"ChatPanel QMenu::item{{padding:4px 20px;border-radius:2px;}}"
+            f"ChatPanel QMenu::item:selected{{background:{C['teal']};color:#fff;}}"
+            f"ChatPanel QMenu::separator{{height:1px;background:{C['border_light']};"
+            f"margin:4px 8px;}}")
 
         # Context header — standardized panel header with project info
         ctx_panel, self._chat_title, ctx_hdr = _make_panel_header("AI Chat")
@@ -2147,6 +2132,77 @@ class ChatPanel(QWidget):
         self.fix_continuation_bar.hide()
         layout.addWidget(self.fix_continuation_bar)
 
+        # Code workspace panel — shows full captured selection with actions
+        self._workspace_panel = QFrame()
+        self._workspace_panel.setStyleSheet(
+            f"QFrame#workspacePanel{{"
+            f"background:{C['bg_dark']};border:1px solid {C['teal']};"
+            f"border-radius:8px;margin:4px 16px;}}")
+        self._workspace_panel.setObjectName("workspacePanel")
+        self._workspace_panel.setMaximumHeight(200)
+        wp_layout = QVBoxLayout(self._workspace_panel)
+        wp_layout.setContentsMargins(0, 0, 0, 0)
+        wp_layout.setSpacing(0)
+
+        # Header row
+        ws_header = QWidget()
+        ws_header.setStyleSheet(
+            f"background:{C['bg']};border-top-left-radius:8px;"
+            f"border-top-right-radius:8px;")
+        wsh_layout = QHBoxLayout(ws_header)
+        wsh_layout.setContentsMargins(12, 6, 8, 6)
+        wsh_layout.setSpacing(6)
+        self._workspace_header = QLabel("")
+        self._workspace_header.setStyleSheet(
+            f"color:{C['fg_dim']};{FONT_SMALL}background:transparent;border:none;")
+        wsh_layout.addWidget(self._workspace_header)
+        wsh_layout.addStretch()
+        ws_close = QPushButton("✕")
+        ws_close.setFixedSize(20, 20)
+        ws_close.setStyleSheet(
+            f"QPushButton{{color:{C['fg_dim']};background:transparent;"
+            f"border:none;{FONT_SMALL}font-weight:bold;}}"
+            f"QPushButton:hover{{color:{C['fg']};}}")
+        ws_close.clicked.connect(self._clear_captured_selection)
+        wsh_layout.addWidget(ws_close)
+        wp_layout.addWidget(ws_header)
+
+        # Code display
+        self._workspace_code = QPlainTextEdit()
+        self._workspace_code.setReadOnly(True)
+        self._workspace_code.setMaximumHeight(120)
+        self._workspace_code.setStyleSheet(
+            f"QPlainTextEdit{{background:#111111;color:{C['fg']};"
+            f"border:none;padding:6px 12px;"
+            f"font-family:Menlo,Monaco,Consolas,monospace;font-size:12px;}}")
+        self._workspace_code.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        wp_layout.addWidget(self._workspace_code)
+
+        # Quick action buttons row
+        ws_actions = QWidget()
+        ws_actions.setStyleSheet(
+            f"background:{C['bg_dark']};border-bottom-left-radius:8px;"
+            f"border-bottom-right-radius:8px;")
+        wsa_layout = QHBoxLayout(ws_actions)
+        wsa_layout.setContentsMargins(12, 4, 12, 4)
+        wsa_layout.setSpacing(6)
+        _WS_BTN = (
+            f"QPushButton{{color:{C['teal']};background:transparent;"
+            f"border:none;{FONT_SMALL}padding:3px 8px;}}"
+            f"QPushButton:hover{{color:{C['fg']};background:{C['bg_hover']};"
+            f"border-radius:4px;}}")
+        for label, key in [("Explain", "explain"), ("Fix / Improve", "fix"),
+                           ("Refactor", "refactor"), ("Optimize", "optimize")]:
+            btn = QPushButton(label)
+            btn.setStyleSheet(_WS_BTN)
+            btn.clicked.connect(lambda checked, k=key: self._on_workspace_action(k))
+            wsa_layout.addWidget(btn)
+        wsa_layout.addStretch()
+        wp_layout.addWidget(ws_actions)
+
+        self._workspace_panel.hide()
+        layout.addWidget(self._workspace_panel)
+
         # Input area
         inp = QWidget()
         inp.setStyleSheet(f"background:{C['bg']};border-top:1px solid {C['border']};")
@@ -2231,6 +2287,108 @@ class ChatPanel(QWidget):
     def set_editor(self, editor):
         """Link to the TabbedEditor so we can read/write project files."""
         self._editor_ref = editor
+        # Connect tab changes to clear captured selection
+        editor.tabs.currentChanged.connect(self._on_editor_tab_changed)
+        # Connect selectionChanged for all existing editors
+        for fp, ed in editor._editors.items():
+            self._connect_editor_signals(ed)
+        # Auto-connect future editors
+        editor.editor_opened.connect(self._connect_editor_signals)
+
+    def _connect_editor_signals(self, editor_widget):
+        """Connect selectionChanged and textChanged for selection capture."""
+        if hasattr(editor_widget, 'selectionChanged'):
+            editor_widget.selectionChanged.connect(
+                self._on_editor_selection_changed)
+        sig = 'textChanged' if hasattr(editor_widget, 'textChanged') else None
+        if sig:
+            getattr(editor_widget, sig).connect(
+                self._on_editor_text_changed)
+
+    def _on_editor_selection_changed(self):
+        """Snapshot the editor selection when it changes (survives focus loss)."""
+        editor_widget = self.sender()
+        if not editor_widget or not hasattr(editor_widget, 'hasSelectedText'):
+            return
+        if editor_widget.hasSelectedText():
+            sel_text = editor_widget.selectedText()
+            lf, cf, lt, ct = editor_widget.getSelection()
+            # Resolve file path for this editor widget
+            file_path = None
+            if self._editor_ref:
+                for fp, ed in self._editor_ref._editors.items():
+                    if ed is editor_widget:
+                        file_path = fp
+                        break
+            if sel_text.strip() and file_path:
+                self._captured_selection = {
+                    'text': sel_text,
+                    'line_from': lf, 'col_from': cf,
+                    'line_to': lt, 'col_to': ct,
+                    'file_path': file_path,
+                }
+                self._update_workspace()
+        # Do NOT clear when selection is empty — might just be focus loss
+
+    def _on_editor_tab_changed(self, index):
+        """Clear captured selection when the user switches to a different file tab."""
+        self._clear_captured_selection()
+
+    def _on_editor_text_changed(self):
+        """Clear captured selection if the editor text changed and no selection remains."""
+        editor_widget = self.sender()
+        if not editor_widget:
+            return
+        if hasattr(editor_widget, 'hasSelectedText') and not editor_widget.hasSelectedText():
+            self._clear_captured_selection()
+
+    def _clear_captured_selection(self):
+        """Clear the captured selection and hide the workspace panel."""
+        self._captured_selection = None
+        self._update_workspace()
+
+    def _update_workspace(self):
+        """Show or hide the workspace panel based on _captured_selection."""
+        if self._captured_selection:
+            sel = self._captured_selection
+            basename = os.path.basename(sel['file_path'])
+            line_range = f"lines {sel['line_from'] + 1}\u2013{sel['line_to'] + 1}"
+            self._workspace_header.setText(f"{basename} : {line_range}")
+            self._workspace_code.setPlainText(sel['text'])
+            self._workspace_panel.show()
+        else:
+            self._workspace_panel.hide()
+
+    def _on_workspace_action(self, action_name):
+        """Send a quick action prompt through the selection flow (or chat for explain)."""
+        prompts = {
+            'explain': 'Explain this code briefly. Mention any Teensy/Arduino-specific details.',
+            'fix': 'Review this code for bugs and improvements. Fix any issues found.',
+            'refactor': 'Refactor this code to be cleaner and more readable.',
+            'optimize': ('Optimize this code for Teensy performance. '
+                         'Minimize memory, use hardware features where possible.'),
+        }
+        prompt = prompts.get(action_name, action_name)
+        if self._captured_selection:
+            sel = self._captured_selection
+            if action_name == 'explain':
+                # Explain uses regular chat path — no selection-edit flow
+                basename = os.path.basename(sel['file_path'])
+                line_range = f"lines {sel['line_from']+1}\u2013{sel['line_to']+1}"
+                explain_prompt = (
+                    f"Explain this code from {basename} ({line_range}):\n"
+                    f"```\n{sel['text']}\n```\n{prompt}")
+                self._captured_selection = None
+                self._update_workspace()
+                self._send_prompt(explain_prompt, display_text="Explain")
+            else:
+                self._send_selection_prompt(
+                    prompt, sel['text'],
+                    sel['line_from'], sel['col_from'],
+                    sel['line_to'], sel['col_to'],
+                    sel['file_path'],
+                    display_text=action_name.replace('_', ' ').title(),
+                )
 
     def set_project_path(self, path):
         """Set the project directory path for context."""
@@ -2734,6 +2892,18 @@ class ChatPanel(QWidget):
                     rel = os.path.relpath(active_file, proj)
                     all_files[rel] = content
                     self._working_set.add(active_file, rel, 0, content)
+
+        # Include full Teensy API reference at lowest priority for .ino projects
+        if (os.path.exists(_TEENSY_API_REF_PATH)
+                and any(f.endswith('.ino') for f in all_files)):
+            try:
+                with open(_TEENSY_API_REF_PATH, 'r', encoding='utf-8') as _f:
+                    api_content = _f.read()
+                self._working_set.add(
+                    _TEENSY_API_REF_PATH,
+                    'docs/TEENSY_API_REFERENCE.md', 3, api_content)
+            except OSError:
+                pass
 
         self._update_context_display(proj_name, proj, sorted(all_files.keys()))
 
@@ -3285,22 +3455,6 @@ class ChatPanel(QWidget):
                 f"Usage: /debug-use-ws on | off",
                 C['fg_dim'])
 
-    def send_ai_action(self, prompt):
-        """Called from the right-click AI context menu in the code editor."""
-        # Parse tool name and code block from the formatted prompt
-        lines = prompt.split("\n")
-        tool_name = lines[0].rstrip(":").strip()
-        code_lines, in_code = [], False
-        for line in lines[1:]:
-            if line.startswith("```") and not in_code:
-                in_code = True; continue
-            if line.startswith("```") and in_code:
-                break
-            if in_code:
-                code_lines.append(line)
-        code = "\n".join(code_lines).rstrip()
-        self._send_prompt(prompt, display_text=tool_name, display_code=code)
-
     def _send_prompt(self, text, display_text=None, display_code=None):
         """Core send method used by both manual chat and AI actions."""
         # Guard: reject if a generation is already in progress
@@ -3326,21 +3480,19 @@ class ChatPanel(QWidget):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        # Selection-based edit flow: if the active editor has selected text,
-        # use a simpler prompt/response format that bypasses the <<<EDIT parser
-        if self._editor_ref:
-            editor_widget = self._editor_ref.tabs.currentWidget()
-            if (editor_widget and hasattr(editor_widget, 'hasSelectedText')
-                    and editor_widget.hasSelectedText()):
-                sel_text = editor_widget.selectedText()
-                l_from, c_from, l_to, c_to = editor_widget.getSelection()
-                file_path = self._editor_ref.current_file()
-                if sel_text.strip() and file_path:
-                    self._send_selection_prompt(
-                        text, sel_text, l_from, c_from, l_to, c_to,
-                        file_path, display_text=display_text,
-                        display_code=display_code)
-                    return
+        # Selection-based edit flow: use captured selection snapshot
+        # (survives focus loss when user clicks chat input)
+        if self._captured_selection:
+            sel = self._captured_selection
+            self._captured_selection = None
+            self._update_workspace()
+            self._send_selection_prompt(
+                text, sel['text'],
+                sel['line_from'], sel['col_from'],
+                sel['line_to'], sel['col_to'],
+                sel['file_path'], display_text=display_text,
+                display_code=display_code)
+            return
 
         # Detect named files in user message for per-prompt targeting override
         self._target_override = self._detect_named_files(text)
@@ -3431,6 +3583,8 @@ class ChatPanel(QWidget):
     _SELECTION_SYSTEM_PROMPT = (
         "You are a code editor. The user's file is shown below with a selected "
         "region marked between <<<SELECTED>>> and >>>SELECTED>>>.\n\n"
+        "Your response will be inserted directly as code. "
+        "Output ONLY the replacement code — nothing else.\n\n"
         "RULES:\n"
         "- Respond with ONLY the replacement text for the selected region.\n"
         "- Do NOT include <<<SELECTED>>> or >>>SELECTED>>> markers.\n"
@@ -3448,6 +3602,38 @@ class ChatPanel(QWidget):
         "add punctuation, or rephrase it.\n"
         "- Match the indentation of the original selection exactly. Count the "
         "leading spaces or tabs and reproduce them.\n"
+        "- Be extremely concise. No explanation, no alternatives, no commentary. "
+        "If the user asks to 'explain', give a brief explanation (2-3 sentences "
+        "max) — not a tutorial.\n"
+        "\nEXAMPLES:\n\n"
+        "Example 1:\n"
+        "User selected: // This is the old comment\n"
+        "User request: replace this with hello world\n"
+        "Your response:\n"
+        "// hello world\n\n"
+        "Example 2:\n"
+        "User selected: int delay_ms = 100;\n"
+        "User request: change the delay to 250\n"
+        "Your response:\n"
+        "int delay_ms = 250;\n\n"
+        "Example 3:\n"
+        "User selected:\n"
+        "void setup() {\n"
+        "  Serial.begin(9600);\n"
+        "}\n"
+        "User request: add a pin mode setup for pin 13\n"
+        "Your response:\n"
+        "void setup() {\n"
+        "  Serial.begin(9600);\n"
+        "  pinMode(13, OUTPUT);\n"
+        "}\n\n"
+        "Example 4:\n"
+        "User selected: // FIRMWARE_VERSION auto-generated from compile date\n"
+        "User request: replace this with wowser\n"
+        "Your response:\n"
+        "// wowser\n\n"
+        "Notice: every response is ONLY the replacement code. "
+        "No explanation. No markdown fences. No preamble.\n"
     )
 
     def _send_selection_prompt(self, user_text, selected_text,
@@ -3481,14 +3667,18 @@ class ChatPanel(QWidget):
         marked_content = '\n'.join(marked)
 
         basename = os.path.basename(file_path)
-        user_msg = (f"File: {basename}\n\n{marked_content}\n\n"
+        user_msg = (f"=== WORKING ON: {basename} (lines {line_from+1}\u2013{line_to+1}) ===\n"
+                    f"The selected code is marked with <<<SELECTED>>> / >>>SELECTED>>>.\n\n"
+                    f"{marked_content}\n\n"
                     f"User request: {user_text}")
 
-        # One-shot conversation: system + single user message (no history)
+        # One-shot conversation with assistant pre-fill to force code output
         messages = [
             {"role": "system", "content": self._SELECTION_SYSTEM_PROMPT},
             {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": "<<<REPLACEMENT>>>\n"},
         ]
+        self._selection_prefilled = True
 
         # Show user bubble
         show = display_text or user_text
@@ -3548,52 +3738,234 @@ class ChatPanel(QWidget):
 
     def _handle_selection_response(self, response_text):
         """Process the LLM response in selection mode.
-        Strip code fences, detect explanations, or create selection edit."""
-        text = response_text.strip()
-
-        # Strip markdown code fences if LLM wrapped its response
-        if text.startswith('```'):
-            first_nl = text.find('\n')
-            if first_nl != -1:
-                text = text[first_nl + 1:]
-        if text.endswith('```'):
-            text = text[:text.rfind('```')].rstrip()
-
-        # Detect explanation responses (no apply bar needed)
+        Uses pre-fill extraction first, then multi-strategy fallbacks."""
+        import re as _re
+        text = self._clean_model_artifacts(response_text).strip()
         original = self._selection_edit['original_text']
-        code_starters = ('//', '#', '/*', 'void', 'int', 'float', 'char',
-                         'bool', 'const', 'static', 'class', 'struct', 'enum',
-                         'if', 'for', 'while', 'return', '#include', 'unsigned',
-                         'long', 'short', 'double', 'auto', 'extern', 'typedef',
-                         'namespace', 'template', 'using', 'public', 'private',
-                         'protected', 'virtual', 'inline', 'volatile', 'register',
-                         'switch', 'case', 'break', 'continue', 'do', 'else',
-                         'try', 'catch', 'throw', 'delete', 'new', 'sizeof',
-                         '{', '}', '(', ')', '[', ']')
-        first_word = text.split()[0] if text.split() else ''
-        is_explanation = (
-            len(text) > len(original) * 3
-            and '. ' in text
-            and not any(text.lstrip().startswith(c) for c in code_starters)
-            and not first_word.endswith(';')
-        )
-        if is_explanation:
-            # Already rendered in chat as streaming text — nothing more to do
+        prefilled = self._selection_prefilled
+        self._selection_prefilled = False
+
+        # ── Pre-fill path ──────────────────────────────────────────────
+        # When we pre-filled with "<<<REPLACEMENT>>>\n", the streamed
+        # response IS the replacement content (possibly followed by the
+        # closing >>>REPLACEMENT>>> marker).
+        if prefilled:
+            # Strip closing delimiter if the model added it
+            if '>>>REPLACEMENT>>>' in text:
+                text = text[:text.index('>>>REPLACEMENT>>>')].strip()
+            # Strip opening delimiter if the model echoed it
+            if text.startswith('<<<REPLACEMENT>>>'):
+                text = text[len('<<<REPLACEMENT>>>'):].lstrip('\n')
+            # Strip trailing code fences
+            if text.endswith('```'):
+                text = text[:text.rfind('```')].strip()
+            # Strip wrapping code fences
+            if text.startswith('```'):
+                first_nl = text.find('\n')
+                if first_nl != -1:
+                    text = text[first_nl + 1:]
+                if text.endswith('```'):
+                    text = text[:text.rfind('```')].strip()
+
+            if text:
+                # Run safety filters before creating edit
+                if self._selection_is_refusal(text):
+                    return
+                if self._selection_is_prose(text, original):
+                    return
+                self._create_selection_edit(text)
+                return
+
+        # ── Non-pre-fill fallback path ─────────────────────────────────
+        # Strategy 1: Delimiter extraction
+        start_marker = '<<<REPLACEMENT>>>'
+        end_marker = '>>>REPLACEMENT>>>'
+        if start_marker in text and end_marker in text:
+            s = text.index(start_marker) + len(start_marker)
+            e = text.index(end_marker)
+            extracted = text[s:e].strip()
+            if extracted:
+                self._create_selection_edit(extracted)
+                return
+
+        # Strategy 2: Refusal detection
+        if self._selection_is_refusal(text):
             return
 
-        # Preserve trailing newline from original selection
-        if original.endswith('\r\n') and not text.endswith('\r\n'):
-            text = text.rstrip('\n') + '\r\n'
-        elif original.endswith('\n') and not text.endswith('\n'):
-            text += '\n'
+        # Strategy 3: Single code fence extraction
+        fence_matches = _re.findall(r'```(?:\w*)\n(.*?)```', text, _re.DOTALL)
+        if len(fence_matches) == 1:
+            candidate = fence_matches[0].strip()
+            if candidate and len(candidate) < len(original) * 3:
+                self._create_selection_edit(candidate)
+                return
 
-        # Create a ProposedEdit for the selection replacement
+        # Strategy 4: Strip wrapping code fences
+        stripped = text
+        if stripped.startswith('```'):
+            first_nl = stripped.find('\n')
+            if first_nl != -1:
+                stripped = stripped[first_nl + 1:]
+        if stripped.endswith('```'):
+            stripped = stripped[:stripped.rfind('```')].rstrip()
+        if stripped != text:
+            text = stripped
+
+        # Safety filters on remaining text
+        if self._selection_is_prose(text, original):
+            return
+
+        # Strategy 5: Short response — probably just the replacement
+        original_len = len(original)
+        sentence_count = len(_re.findall(r'\.\s+[A-Z]', text))
+        has_paragraphs = '\n\n' in text
+        is_long = len(text) > original_len * 2
+        if not is_long and not has_paragraphs and sentence_count < 2:
+            self._create_selection_edit(text)
+            return
+
+        # Strategy 6: Conservative code check
+        first_line = text.strip().split('\n')[0].strip() if text.strip() else ''
+        starts_with_code = any(
+            first_line.lower().startswith(s.lower()) for s in self._CODE_STARTERS)
+        if starts_with_code and sentence_count < 2 and not has_paragraphs:
+            self._create_selection_edit(text)
+            return
+
+        # Default: no edit — treat as explanation/prose
+        self._add_info_msg(
+            "AI responded with an explanation instead of a code edit. "
+            "Try rephrasing your request.", C['fg_warn'])
+
+    # Code token prefixes for detecting code vs prose in selection responses
+    _CODE_STARTERS = (
+        '//', '/*', '#include', '#define', '#pragma', '#if', '#else',
+        '#endif', 'void', 'int', 'float', 'char', 'bool', 'const',
+        'constexpr', 'static', 'class', 'struct', 'enum', 'if', 'for',
+        'while', 'return', 'typedef', 'unsigned', 'signed', 'long',
+        'short', 'double', 'auto', 'extern', 'volatile', 'namespace',
+        'using', 'template', 'virtual', 'public', 'private', 'protected',
+        'switch', 'case', 'break', 'continue', 'do', 'else', 'try',
+        'catch', 'throw', '{', '}', '(', '[', 'Serial', 'digital',
+        'analog', 'delay', 'pinMode', 'String', 'byte', 'uint',
+        'int8', 'int16', 'int32',
+    )
+
+    # -- Response cleaning: strip model artifacts and LaTeX ----------------
+
+    import re as _re_cls
+    _MODEL_ARTIFACT_RE = _re_cls.compile(
+        r'<\|(?:im_start|im_end|endoftext|begin_of_sentence|end_of_sentence)\|>'
+        r'|<\uff5c[^\uff5c]*\uff5c>'          # fullwidth bar delimiters (deepseek)
+        r'|^(?:Question|Answer|Human|Assistant|User)\s*:\s*'  # role prefixes
+        r'|<\|(?:user|assistant|system)\|>',   # chat role markers
+        _re_cls.MULTILINE | _re_cls.IGNORECASE
+    )
+    _LATEX_RE = _re_cls.compile(
+        r'\\\(|\\\)'                                          # inline math \( \)
+        r'|\\\[|\\\]'                                         # display math \[ \]
+        r'|\\frac\{([^}]*)\}\{([^}]*)\}'                     # \frac{a}{b} → a/b
+        r'|\\boxed\{([^}]*)\}'                                # \boxed{x} → x
+        r'|\\text\{([^}]*)\}'                                 # \text{x} → x
+        r'|\\(?:mathbb|mathrm|textbf|textit)\{([^}]*)\}'     # math fonts → content
+        r'|\\(?:cdot|times)'                                  # operators
+        r'|\\(?:left|right|Big|big)[|()\\\[\]{}]?'            # sizing
+        r'|\$\$?'                                             # dollar-sign math
+    )
+    del _re_cls  # clean up the temporary import
+
+    def _clean_model_artifacts(self, text):
+        """Strip special tokens and role markers that leak from various LLMs."""
+        return self._MODEL_ARTIFACT_RE.sub('', text)
+
+    def _strip_latex(self, text):
+        """Convert common LaTeX formatting to plain text."""
+        def _repl(m):
+            if m.group(1) is not None and m.group(2) is not None:
+                return f"{m.group(1)}/{m.group(2)}"
+            for g in (3, 4, 5):
+                if m.group(g) is not None:
+                    return m.group(g)
+            s = m.group(0)
+            if s == '\\cdot': return '\u00b7'
+            if s == '\\times': return '\u00d7'
+            return ''
+        return self._LATEX_RE.sub(_repl, text)
+
+    def _selection_is_refusal(self, text):
+        """Check if text is an LLM refusal. If so, show info and return True."""
+        _refusal_phrases = (
+            "i'm sorry", "i can't assist", "i cannot assist",
+            "i can't help", "i cannot help", "i apologize",
+            "i'm unable to", "i am unable to",
+            "as an ai", "as a language model",
+            "it seems like you're asking", "it seems like you",
+            "without more context", "could you clarify",
+            "if you have any other questions", "please provide more",
+        )
+        text_lower = text.lower()
+        if any(phrase in text_lower for phrase in _refusal_phrases):
+            self._add_info_msg(
+                "AI declined to make the edit.", C['fg_warn'])
+            return True
+        return False
+
+    def _selection_is_prose(self, text, original):
+        """Check if text looks like prose/explanation. If so, show info and return True."""
+        import re as _re
+        original_len = len(original)
+        sentence_count = len(_re.findall(r'\.\s+[A-Z]', text))
+        has_list_markers = bool(
+            _re.search(r'^\d+[\.\)]\s', text, _re.MULTILINE))
+        has_paragraphs = '\n\n' in text
+        is_long = len(text) > original_len * 2
+        prose_signals = sum([
+            sentence_count >= 2,
+            is_long,
+            has_list_markers,
+            has_paragraphs,
+        ])
+        if prose_signals >= 2:
+            self._add_info_msg(
+                "AI responded with an explanation instead of a code edit. "
+                "Try rephrasing your request.", C['fg_warn'])
+            return True
+        return False
+
+    def _create_selection_edit(self, replacement_text):
+        """Create a ProposedEdit for a selection replacement and show apply bar."""
+        # Safety net: reject refusal/prose that slipped through extraction
+        rt_lower = replacement_text.lower()
+        if any(p in rt_lower for p in (
+                "i'm sorry", "i can't", "i cannot",
+                "i apologize", "it seems like")):
+            self._add_info_msg(
+                "AI declined to make the edit.", C['fg_warn'])
+            return
+
+        original = self._selection_edit['original_text']
+
+        # Strip markdown fences if still wrapped
+        if replacement_text.strip().startswith('```'):
+            lines = replacement_text.strip().split('\n')
+            if lines[0].strip().startswith('```'):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == '```':
+                lines = lines[:-1]
+            replacement_text = '\n'.join(lines)
+
+        # Preserve trailing newline from original selection
+        if original.endswith('\r\n') and not replacement_text.endswith('\r\n'):
+            replacement_text = replacement_text.rstrip('\n') + '\r\n'
+        elif original.endswith('\n') and not replacement_text.endswith('\n'):
+            replacement_text += '\n'
+
         file_path = self._selection_edit['file_path']
         edit = ProposedEdit(
             edit_type="selection",
             filename=os.path.basename(file_path),
             old_text=original,
-            new_text=text,
+            new_text=replacement_text,
             operation="selection_replace",
             resolved_path=file_path,
         )
@@ -3606,6 +3978,7 @@ class ChatPanel(QWidget):
     def stop_generation(self):
         self.worker.stop()
         self._selection_mode = False
+        self._selection_prefilled = False
         if self.thread.isRunning():
             self.thread.quit()
             if not self.thread.wait(2000):
@@ -3620,6 +3993,10 @@ class ChatPanel(QWidget):
         self.generation_finished.emit()
 
     def _on_token(self, t):
+        t = self._clean_model_artifacts(t)
+        t = self._strip_latex(t)
+        if not t:
+            return
         self._current_response += t
         if self._current_ai_widget:
             cur = self._current_ai_widget.textCursor()
@@ -3636,10 +4013,15 @@ class ChatPanel(QWidget):
 
     # Styles for code blocks and edit blocks in AI responses (QTextEdit HTML)
     _CODE_BLOCK_STYLE = (
-        f'background:{C["bg_input"]};'
-        f'border:1px solid {C["border_light"]};'
-        f'padding:10px;margin:12px 0;'
-        f'font-family:Menlo,Monaco,Courier New,monospace;font-size:13px;')
+        f'background:{C["bg_dark"]};'
+        f'border:1px solid #333;'
+        f'border-radius:6px;'
+        f'padding:10px 12px;margin:8px 0;'
+        f'font-family:Menlo,Monaco,Consolas,monospace;font-size:12px;')
+    _INLINE_CODE_STYLE = (
+        f'background:#252525;padding:1px 5px;border-radius:3px;'
+        f'font-family:Menlo,Monaco,Consolas,monospace;font-size:12px;'
+        f'color:{C["fg_warn"]};')
     _EDIT_BLOCK_STYLE = (
         f'background:{C["bg_input"]};'
         f'border:1px solid {C["border_light"]};'
@@ -3651,11 +4033,12 @@ class ChatPanel(QWidget):
 
     def _render_formatted_response(self):
         """Re-render the completed AI response with styled code blocks and edit blocks."""
+        import re
         if not self._current_ai_widget or not self._current_response:
             return
         text = self._current_response
-        # Only render if there are code fences or edit blocks
-        if "```" not in text and "<<<" not in text:
+        # Only render if there are code fences, edit blocks, or inline code
+        if "```" not in text and "<<<" not in text and "`" not in text:
             return
         html_parts = []
         in_code = False
@@ -3723,18 +4106,29 @@ class ChatPanel(QWidget):
                 html_parts.append(html.escape(line) + "\n")
                 i += 1
                 continue
-            # Regular text
-            html_parts.append(html.escape(line) + "<br>")
+            # Regular text — strip LaTeX and render inline `code` spans
+            line = self._strip_latex(line)
+            escaped_line = html.escape(line)
+            escaped_line = re.sub(
+                r'`([^`]+)`',
+                rf'<code style="{self._INLINE_CODE_STYLE}">\1</code>',
+                escaped_line)
+            html_parts.append(escaped_line + "<br>")
             i += 1
         # Close any unclosed blocks
         if in_code or in_edit:
             html_parts.append("</pre></div>")
         self._current_ai_widget.setHtml("".join(html_parts))
+        self._current_ai_widget.document().adjustSize()
+        self._scroll_to_bottom()
 
     def _on_complete(self):
         if self.thread.isRunning():
             self.thread.quit()
         if self._current_response:
+            # Final pass: strip any remaining model artifacts
+            self._current_response = self._clean_model_artifacts(
+                self._current_response).strip()
             # Selection mode: bypass <<<EDIT parser, handle replacement directly
             if self._selection_mode:
                 self._handle_selection_response(self._current_response)
@@ -3777,6 +4171,7 @@ class ChatPanel(QWidget):
 
     def _on_error(self, m):
         self._selection_mode = False
+        self._selection_prefilled = False
         self._finalize_stats(suffix=" (error)")
         # Show error with "Error" speaker label
         wrapper = QWidget()
@@ -4271,7 +4666,8 @@ class ChatPanel(QWidget):
                 continue
 
             if edit.operation == "replace_file":
-                if self._editor_ref.set_file_content(fp, edit.new_text):
+                if self._editor_ref.set_file_content(fp, edit.new_text,
+                                                      save_to_disk=False):
                     applied += 1
                     self._track_ai_edited_file(edit.filename)
                 else:
@@ -4294,7 +4690,8 @@ class ChatPanel(QWidget):
                 if anchor is not None:
                     line_num = content[:content.find(anchor)].count('\n') + 1
                     new_content = content.replace(anchor, edit.new_text, 1)
-                    if self._editor_ref.set_file_content(fp, new_content):
+                    if self._editor_ref.set_file_content(fp, new_content,
+                                                          save_to_disk=False):
                         applied += 1
                         self._track_ai_edited_file(edit.filename)
                     else:
@@ -4323,7 +4720,8 @@ class ChatPanel(QWidget):
                     else:
                         replacement = anchor + "\n" + edit.new_text
                     new_content = content.replace(anchor, replacement, 1)
-                    if self._editor_ref.set_file_content(fp, new_content):
+                    if self._editor_ref.set_file_content(fp, new_content,
+                                                          save_to_disk=False):
                         applied += 1
                         self._track_ai_edited_file(edit.filename)
                     else:
@@ -4356,9 +4754,10 @@ class ChatPanel(QWidget):
                             editor_w.replaceSelectedText(edit.new_text)
                             applied += 1
                             self._track_ai_edited_file(edit.filename)
-                            # Save to disk
-                            if hasattr(editor_w, 'save_file'):
-                                editor_w.save_file()
+                            # Mark buffer dirty (disk write on explicit Save)
+                            if hasattr(editor_w, 'setModified'):
+                                editor_w.setModified(True)
+                            self._editor_ref._mark_tab_dirty(fp)
                         else:
                             # Selection shifted — fall back to search_replace
                             files = self._editor_ref.get_all_files()
@@ -4367,7 +4766,8 @@ class ChatPanel(QWidget):
                                 new_content = content.replace(
                                     edit.old_text, edit.new_text, 1)
                                 if self._editor_ref.set_file_content(
-                                        fp, new_content):
+                                        fp, new_content,
+                                        save_to_disk=False):
                                     applied += 1
                                     self._track_ai_edited_file(edit.filename)
                                 else:
@@ -4384,7 +4784,8 @@ class ChatPanel(QWidget):
                         if edit.old_text and edit.old_text in content:
                             new_content = content.replace(
                                 edit.old_text, edit.new_text, 1)
-                            if self._editor_ref.set_file_content(fp, new_content):
+                            if self._editor_ref.set_file_content(fp, new_content,
+                                                                  save_to_disk=False):
                                 applied += 1
                                 self._track_ai_edited_file(edit.filename)
                             else:
@@ -4432,7 +4833,8 @@ class ChatPanel(QWidget):
             return
         restored = 0
         for fpath, original in self._apply_snapshot.items():
-            if self._editor_ref.set_file_content(fpath, original):
+            if self._editor_ref.set_file_content(fpath, original,
+                                                  save_to_disk=False):
                 restored += 1
         self._apply_snapshot.clear()
         self._undo_btn.hide()
@@ -4753,6 +5155,7 @@ class ChatPanel(QWidget):
         self._pending_edits = []
         self._file_acceptance = {}
         self._selection_mode = False
+        self._selection_prefilled = False
         self._selection_edit = None
         self._ai_edited_files.clear()
         self._working_set.clear()
@@ -5524,329 +5927,6 @@ class SerialMonitor(QWidget):
         if self._reader:
             self._reader.stop()
             self._reader = None
-
-
-# =============================================================================
-# Settings Panel — AI Tools Tab
-# =============================================================================
-
-class AIToolsTab(QWidget):
-    """CRUD editor for the right-click AI context menu actions — 2-column layout."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 16)
-        outer.setSpacing(20)
-
-        # ====== LEFT column: Right-Click Actions list ======
-        left = QVBoxLayout()
-        left.setSpacing(0)
-
-        hdr_left = QHBoxLayout()
-        hdr_left.setContentsMargins(0, 0, 0, 10)
-        hdr_left.setSpacing(6)
-        left_title = QLabel("RIGHT-CLICK ACTIONS")
-        left_title.setStyleSheet(SETTINGS_STITLE)
-        hdr_left.addWidget(left_title)
-        hdr_left.addStretch()
-        add_btn = QPushButton("+ Add"); add_btn.setStyleSheet(BTN_SM_PRIMARY)
-        add_btn.clicked.connect(self._add_action); hdr_left.addWidget(add_btn)
-        sep_btn = QPushButton("+ Separator"); sep_btn.setStyleSheet(BTN_SM_GHOST)
-        sep_btn.clicked.connect(self._add_separator); hdr_left.addWidget(sep_btn)
-        reset_btn = QPushButton("Reset"); reset_btn.setStyleSheet(BTN_SM_GHOST)
-        reset_btn.clicked.connect(self._reset_defaults); hdr_left.addWidget(reset_btn)
-        left.addLayout(hdr_left)
-
-        list_card = QFrame()
-        list_card.setStyleSheet(SETTINGS_CARD)
-        list_card_layout = QVBoxLayout(list_card)
-        list_card_layout.setContentsMargins(0, 0, 0, 0)
-        list_card_layout.setSpacing(0)
-
-        self.action_list = QListWidget()
-        self.action_list.setStyleSheet(
-            f"QListWidget{{background:transparent;border:none;{FONT_BODY}}}"
-            f"QListWidget::item{{border-bottom:1px solid {C['border']};padding:0px;}}"
-            f"QListWidget::item:selected{{background:{C['bg_hover']};"
-            f"border-left:2px solid {C['teal']};}}"
-            f"QListWidget::item:hover:!selected{{background:{C['bg_hover']};}}")
-        self.action_list.currentRowChanged.connect(self._on_row_changed)
-        list_card_layout.addWidget(self.action_list)
-        left.addWidget(list_card, stretch=1)
-
-        self.list_status = QLabel("")
-        self.list_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        self.list_status.setContentsMargins(0, 4, 0, 0)
-        left.addWidget(self.list_status)
-
-        left_w = QWidget(); left_w.setLayout(left)
-        outer.addWidget(left_w, stretch=1)
-
-        # ====== RIGHT column: Edit Action pane (always visible) ======
-        right = QVBoxLayout()
-        right.setSpacing(0)
-
-        hdr_right = QHBoxLayout()
-        hdr_right.setContentsMargins(0, 0, 0, 10)
-        right_title = QLabel("EDIT ACTION")
-        right_title.setStyleSheet(SETTINGS_STITLE)
-        hdr_right.addWidget(right_title)
-        hdr_right.addStretch()
-        right.addLayout(hdr_right)
-
-        edit_card = QFrame()
-        edit_card.setStyleSheet(SETTINGS_CARD)
-        ecl = QVBoxLayout(edit_card)
-        ecl.setContentsMargins(16, 16, 16, 16)
-        ecl.setSpacing(10)
-
-        lbl_row = QHBoxLayout()
-        lbl_row.setSpacing(8)
-        lbl_lbl = QLabel("Label")
-        lbl_lbl.setMinimumWidth(56)
-        lbl_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        lbl_row.addWidget(lbl_lbl)
-        self.label_edit = QLineEdit()
-        self.label_edit.setStyleSheet(SETTINGS_INPUT)
-        self.label_edit.setPlaceholderText("Action name…")
-        lbl_row.addWidget(self.label_edit)
-        ecl.addLayout(lbl_row)
-
-        prompt_row = QHBoxLayout()
-        prompt_row.setSpacing(8)
-        prompt_row.setAlignment(Qt.AlignmentFlag.AlignTop)
-        prompt_lbl = QLabel("Prompt")
-        prompt_lbl.setMinimumWidth(56)
-        prompt_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        prompt_row.addWidget(prompt_lbl)
-        prompt_col = QVBoxLayout()
-        self.template_edit = QPlainTextEdit()
-        self.template_edit.setStyleSheet(
-            f"background:{C['bg_input']};color:{C['fg']};"
-            f"border:1px solid {C['border_light']};border-radius:6px;"
-            f"padding:6px 10px;{FONT_CODE}")
-        self.template_edit.setMinimumHeight(200)
-        self.template_edit.setPlaceholderText(
-            'e.g. "Explain what the following code does:\\n\\n```cpp\\n{code}\\n```"')
-        prompt_col.addWidget(self.template_edit)
-        hint_lbl = QLabel("Use {code} where the selected code should be inserted.")
-        hint_lbl.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL}")
-        prompt_col.addWidget(hint_lbl)
-        prompt_row.addLayout(prompt_col)
-        ecl.addLayout(prompt_row)
-
-        btns_row = QHBoxLayout()
-        btns_row.addStretch()
-        cancel_btn = QPushButton("Cancel"); cancel_btn.setStyleSheet(BTN_SM_GHOST)
-        cancel_btn.clicked.connect(self._cancel_edit); btns_row.addWidget(cancel_btn)
-        self.save_edit_btn = QPushButton("Save Changes")
-        self.save_edit_btn.setStyleSheet(BTN_SM_PRIMARY)
-        self.save_edit_btn.clicked.connect(self._save_current_edit)
-        btns_row.addWidget(self.save_edit_btn)
-        ecl.addLayout(btns_row)
-
-        self.edit_status = QLabel("")
-        self.edit_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        ecl.addWidget(self.edit_status)
-
-        right.addWidget(edit_card, stretch=1)
-        right_w = QWidget(); right_w.setLayout(right)
-        outer.addWidget(right_w, stretch=1)
-
-        self._editing_index = -1
-        self._populate_list()
-
-    # -- Custom item widget helpers --
-
-    def _make_action_widget(self, label, template):
-        w = QWidget()
-        w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        rl = QHBoxLayout(w); rl.setContentsMargins(8, 6, 8, 6); rl.setSpacing(8)
-        drag = QLabel("\u28bf")
-        drag.setStyleSheet(f"color:{C['fg_muted']};{FONT_BODY}")
-        drag.setFixedWidth(16)
-        rl.addWidget(drag)
-        name_lbl = QLabel(label)
-        name_lbl.setStyleSheet(f"color:{C['fg']};{FONT_BODY}")
-        rl.addWidget(name_lbl, stretch=1)
-        preview = (template[:48].replace("\n", " ") + "…") if len(template) > 48 else template.replace("\n", " ")
-        prev_lbl = QLabel(preview)
-        prev_lbl.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL}")
-        prev_lbl.setMaximumWidth(160)
-        rl.addWidget(prev_lbl)
-        return w
-
-    def _make_builtin_widget(self, label):
-        w = QWidget()
-        w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        rl = QHBoxLayout(w); rl.setContentsMargins(8, 6, 8, 6); rl.setSpacing(8)
-        spacer = QLabel(""); spacer.setFixedWidth(16); rl.addWidget(spacer)
-        name_lbl = QLabel(label)
-        name_lbl.setStyleSheet(f"color:{C['fg']};{FONT_BODY}")
-        rl.addWidget(name_lbl, stretch=1)
-        tag = QLabel("built-in")
-        tag.setStyleSheet(
-            f"color:{C['fg_dim']};background:{C['bg_hover']};"
-            f"{FONT_SMALL};border-radius:3px;padding:1px 5px;")
-        rl.addWidget(tag)
-        return w
-
-    def _populate_list(self):
-        self.action_list.clear()
-        for entry in AI_ACTIONS:
-            if entry is None:
-                item = QListWidgetItem()
-                item.setSizeHint(QSize(0, 18))
-                item.setFlags(Qt.ItemFlag.NoItemFlags)
-                item.setData(Qt.ItemDataRole.UserRole, "separator")
-                sep_w = QWidget()
-                sl = QHBoxLayout(sep_w); sl.setContentsMargins(12, 0, 12, 0)
-                line = QFrame(); line.setFrameShape(QFrame.Shape.HLine)
-                line.setStyleSheet(f"color:{C['border_light']};")
-                sl.addWidget(line)
-                self.action_list.addItem(item)
-                self.action_list.setItemWidget(item, sep_w)
-            else:
-                label, template = entry
-                item = QListWidgetItem()
-                item.setSizeHint(QSize(0, 36))
-                item.setData(Qt.ItemDataRole.UserRole,
-                             "builtin" if template is None else "action")
-                w = self._make_builtin_widget(label) if template is None \
-                    else self._make_action_widget(label, template)
-                self.action_list.addItem(item)
-                self.action_list.setItemWidget(item, w)
-        # Restore or default selection
-        sel = max(0, min(self._editing_index, self.action_list.count() - 1))
-        self.action_list.setCurrentRow(sel)
-
-    def _on_row_changed(self, row):
-        """Populate the always-visible edit pane from the selected row."""
-        if row < 0 or row >= len(AI_ACTIONS):
-            self._editing_index = -1
-            self.label_edit.setEnabled(False); self.template_edit.setEnabled(False)
-            self.save_edit_btn.setEnabled(False)
-            return
-        entry = AI_ACTIONS[row]
-        if entry is None:
-            self._editing_index = -1
-            self.label_edit.setEnabled(False); self.template_edit.setEnabled(False)
-            self.save_edit_btn.setEnabled(False)
-            self.label_edit.clear(); self.template_edit.clear()
-            self.edit_status.setText("Separators cannot be edited.")
-            self.edit_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-            return
-        label, template = entry
-        if template is None:
-            self._editing_index = -1
-            self.label_edit.setEnabled(False); self.template_edit.setEnabled(False)
-            self.save_edit_btn.setEnabled(False)
-            self.label_edit.setText(label)
-            self.template_edit.setPlainText("(Built-in action — cannot be edited)")
-            self.edit_status.setText("Built-in actions cannot be edited.")
-            self.edit_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-            return
-        self._editing_index = row
-        self.label_edit.setEnabled(True); self.template_edit.setEnabled(True)
-        self.save_edit_btn.setEnabled(True)
-        self.label_edit.setText(label)
-        self.template_edit.setPlainText(template)
-        self.edit_status.setText("")
-
-    def _add_action(self):
-        insert_idx = len(AI_ACTIONS) - 1
-        for i in range(len(AI_ACTIONS) - 1, -1, -1):
-            if AI_ACTIONS[i] is not None and AI_ACTIONS[i][1] is None:
-                insert_idx = i; break
-        AI_ACTIONS.insert(insert_idx, (
-            "New Action",
-            "Your prompt here. Use {code} for selected code.\n\n```cpp\n{code}\n```"))
-        self._persist()
-        self._editing_index = insert_idx
-        self._populate_list()
-        self.action_list.setCurrentRow(insert_idx)
-
-    def _edit_action(self):
-        self._on_row_changed(self.action_list.currentRow())
-
-    def _save_current_edit(self):
-        if self._editing_index < 0:
-            return
-        label = self.label_edit.text().strip()
-        template = self.template_edit.toPlainText()
-        if not label:
-            self.edit_status.setText("Label cannot be empty.")
-            self.edit_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-            return
-        AI_ACTIONS[self._editing_index] = (label, template)
-        self._persist()
-        row = self._editing_index
-        self._populate_list()
-        self.action_list.setCurrentRow(row)
-        self.edit_status.setText("Action saved.")
-        self.edit_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-
-    def _cancel_edit(self):
-        row = self._editing_index if self._editing_index >= 0 \
-            else self.action_list.currentRow()
-        self._on_row_changed(row)
-
-    def _delete_action(self):
-        row = self.action_list.currentRow()
-        if row < 0 or row >= len(AI_ACTIONS):
-            return
-        entry = AI_ACTIONS[row]
-        if entry is not None and entry[1] is None:
-            self.list_status.setText("Cannot delete 'Ask AI About This...'")
-            self.list_status.setStyleSheet(f"color:{C['fg_warn']};{FONT_SMALL}")
-            return
-        del AI_ACTIONS[row]
-        self._persist()
-        self._editing_index = -1
-        self._populate_list()
-        self.list_status.setText("Action deleted.")
-        self.list_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-
-    def _add_separator(self):
-        row = self.action_list.currentRow()
-        insert_at = row + 1 if row >= 0 else len(AI_ACTIONS) - 1
-        if insert_at >= len(AI_ACTIONS):
-            insert_at = len(AI_ACTIONS) - 1
-        AI_ACTIONS.insert(insert_at, None)
-        self._persist()
-        self._populate_list()
-
-    def _move_up(self):
-        row = self.action_list.currentRow()
-        if row <= 0: return
-        AI_ACTIONS[row], AI_ACTIONS[row - 1] = AI_ACTIONS[row - 1], AI_ACTIONS[row]
-        self._persist(); self._editing_index = row - 1
-        self._populate_list(); self.action_list.setCurrentRow(row - 1)
-
-    def _move_down(self):
-        row = self.action_list.currentRow()
-        if row < 0 or row >= len(AI_ACTIONS) - 2: return
-        AI_ACTIONS[row], AI_ACTIONS[row + 1] = AI_ACTIONS[row + 1], AI_ACTIONS[row]
-        self._persist(); self._editing_index = row + 1
-        self._populate_list(); self.action_list.setCurrentRow(row + 1)
-
-    def _reset_defaults(self):
-        if QMessageBox.question(
-            self, "Reset AI Tools",
-            "Reset all AI actions to defaults?\n\nThis cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        ) != QMessageBox.StandardButton.Yes:
-            return
-        AI_ACTIONS[:] = list(DEFAULT_AI_ACTIONS)
-        self._persist()
-        self._editing_index = -1
-        self._populate_list()
-        self.list_status.setText("Reset to defaults.")
-        self.list_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-
-    def _persist(self):
-        _save_ai_actions()
 
 
 # =============================================================================
@@ -7024,7 +7104,7 @@ class GitTab(QWidget):
 # =============================================================================
 
 class SettingsPanel(QWidget):
-    """Settings panel with Models, AI Tools, and Git tabs."""
+    """Settings panel with Models and Git tabs."""
     model_changed = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -7045,9 +7125,6 @@ class SettingsPanel(QWidget):
         self.models_tab.model_changed.connect(self.model_changed.emit)
         self.tabs.addTab(self.models_tab, "Models")
 
-        self.ai_tools_tab = AIToolsTab()
-        self.tabs.addTab(self.ai_tools_tab, "AI Tools")
-
         self.git_tab = GitTab()
         self.tabs.addTab(self.git_tab, "Git")
 
@@ -7055,7 +7132,7 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.tabs)
 
     def _on_tab_changed(self, index):
-        if index == 2:  # Git tab
+        if index == 1:  # Git tab
             self.git_tab._refresh()
 
     def set_project_path(self, path):
@@ -7721,7 +7798,7 @@ class MainWindow(QMainWindow):
 
         self.editor = TabbedEditor()
         self.editor.file_changed.connect(self._on_editor_file_changed)
-        self.editor.ai_action_requested.connect(self._on_ai_action)
+        self.editor.ask_llm_requested.connect(self._on_ask_llm)
         v_splitter.addWidget(self.editor)
 
         # Bottom panel
@@ -8122,10 +8199,10 @@ class MainWindow(QMainWindow):
         self.editor.open_all_project_files(self.project_path)
         self.chat_panel._update_context_bar()
 
-    def _on_ai_action(self, prompt):
-        """Handle AI right-click action from the code editor."""
+    def _on_ask_llm(self):
+        """Switch to chat view and focus input when Ask LLM is clicked in editor."""
         self._switch_view(1)
-        self.chat_panel.send_ai_action(prompt)
+        self.chat_panel.input_field.setFocus()
 
     def _on_edits_applied(self):
         """Refresh file browser and context after AI creates/edits files."""
@@ -8166,7 +8243,7 @@ class MainWindow(QMainWindow):
         self.chat_panel._update_context_bar()
 
     def _save_file(self):
-        self.editor.save_current()
+        self.editor.save_all()
 
     # ---- Build ----
     def _compile(self):
@@ -8538,7 +8615,6 @@ def main():
     # Ensure Ollama is running
     _ensure_ollama()
     # Load persisted configs
-    _load_ai_actions()
     config = _load_config()
     # CLI arg takes precedence over saved project path
     project_path = None
