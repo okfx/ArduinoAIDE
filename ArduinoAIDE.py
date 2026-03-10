@@ -7731,6 +7731,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._config = config or {}
         self.setWindowTitle(WINDOW_TITLE)
+        # Set window/dock icon from icon.svg next to ArduinoAIDE.py
+        _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.svg')
+        if os.path.exists(_icon_path):
+            self.setWindowIcon(QIcon(_icon_path))
         # Size to 75% of screen so it fits any display; fully resizable
         screen = QApplication.primaryScreen()
         if screen:

@@ -48,6 +48,8 @@ cat > "${SCRIPT_DIR}/${CONTENTS}/Info.plist" << 'PLIST'
     <string>1.0</string>
     <key>CFBundleExecutable</key>
     <string>ArduinoAIDE</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
@@ -117,6 +119,15 @@ exec "\$PYTHON" "\$IDE_SCRIPT"
 LAUNCHER
 
 chmod +x "${SCRIPT_DIR}/${MACOS}/${APP_NAME}"
+
+# Copy app icon if present
+ICON_FILE="${SCRIPT_DIR}/AppIcon.icns"
+if [ -f "$ICON_FILE" ]; then
+    cp "$ICON_FILE" "${SCRIPT_DIR}/${RESOURCES}/AppIcon.icns"
+    echo "Included app icon"
+else
+    echo "Warning: AppIcon.icns not found — app will use generic icon"
+fi
 
 echo "Created ${APP_DIR} in ${SCRIPT_DIR}"
 echo ""
