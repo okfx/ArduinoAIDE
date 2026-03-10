@@ -508,6 +508,7 @@ BEHAVIOR RULES:
 - Prefer action over explanation. If the intent is clear, produce the edit.
 - If genuinely ambiguous, ask ONE short clarifying question — never multiple.
 - If you need a file not in your context, name it and the IDE will add it.
+- A Teensy quick reference is appended below. A comprehensive API reference may also be in your file context — consult it for pin mappings, peripheral APIs, and library usage.
 - Be CONCISE. Give the shortest useful response. When the user asks for a code change, produce the edit with at most one sentence of explanation. Do not lecture, do not provide tutorials, do not show alternative approaches unless asked.
 - If the user wants more detail, they will ask. Default to brevity.
 
@@ -590,6 +591,21 @@ Use INSERT_BEFORE/INSERT_AFTER when:
 - You don't need to modify the anchor code, just add code next to it
 - The anchor is a short, unique snippet (e.g., a function signature, #include line)
 Use <<<EDIT when you need to REPLACE existing code."""
+
+# Load Teensy quick reference (appended to system prompt at startup)
+_quick_ref_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'docs', 'TEENSY_QUICK_REF.md')
+try:
+    with open(_quick_ref_path, 'r', encoding='utf-8') as _f:
+        _TEENSY_QUICK_REF = _f.read().strip()
+except (FileNotFoundError, OSError):
+    _TEENSY_QUICK_REF = ""
+if _TEENSY_QUICK_REF:
+    SYSTEM_PROMPT += "\n\n--- TEENSY QUICK REFERENCE ---\n" + _TEENSY_QUICK_REF
+
+# Path to full Teensy API reference (included in WorkingSet for .ino projects)
+_TEENSY_API_REF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'docs', 'TEENSY_API_REFERENCE.md')
 
 # =============================================================================
 # Stylesheet
@@ -2205,32 +2221,76 @@ class ChatPanel(QWidget):
         self.fix_continuation_bar.hide()
         layout.addWidget(self.fix_continuation_bar)
 
-        # Selection badge — shows captured editor selection
-        sel_badge_row = QWidget()
-        sel_badge_row.setStyleSheet(f"background:{C['bg']};")
-        sbl = QHBoxLayout(sel_badge_row)
-        sbl.setContentsMargins(16, 4, 16, 0)
-        sbl.setSpacing(4)
-        self._selection_badge = QLabel()
-        self._selection_badge.setStyleSheet(
-            f"{FONT_SMALL}color:{C['teal']};background:#1e2a2a;"
-            f"border-radius:4px;padding:2px 8px;")
-        self._selection_badge.hide()
-        sbl.addWidget(self._selection_badge)
-        sel_clear = QPushButton("✕")
-        sel_clear.setFixedSize(20, 20)
-        sel_clear.setStyleSheet(
+        # Code workspace panel — shows full captured selection with actions
+        self._workspace_panel = QFrame()
+        self._workspace_panel.setStyleSheet(
+            f"QFrame#workspacePanel{{"
+            f"background:{C['bg_dark']};border:1px solid {C['teal']};"
+            f"border-radius:8px;margin:4px 16px;}}")
+        self._workspace_panel.setObjectName("workspacePanel")
+        self._workspace_panel.setMaximumHeight(200)
+        wp_layout = QVBoxLayout(self._workspace_panel)
+        wp_layout.setContentsMargins(0, 0, 0, 0)
+        wp_layout.setSpacing(0)
+
+        # Header row
+        ws_header = QWidget()
+        ws_header.setStyleSheet(
+            f"background:{C['bg']};border-top-left-radius:8px;"
+            f"border-top-right-radius:8px;")
+        wsh_layout = QHBoxLayout(ws_header)
+        wsh_layout.setContentsMargins(12, 6, 8, 6)
+        wsh_layout.setSpacing(6)
+        self._workspace_header = QLabel("")
+        self._workspace_header.setStyleSheet(
+            f"color:{C['fg_dim']};{FONT_SMALL}background:transparent;border:none;")
+        wsh_layout.addWidget(self._workspace_header)
+        wsh_layout.addStretch()
+        ws_close = QPushButton("✕")
+        ws_close.setFixedSize(20, 20)
+        ws_close.setStyleSheet(
             f"QPushButton{{color:{C['fg_dim']};background:transparent;"
             f"border:none;{FONT_SMALL}font-weight:bold;}}"
             f"QPushButton:hover{{color:{C['fg']};}}")
-        sel_clear.clicked.connect(self._clear_captured_selection)
-        sel_clear.hide()
-        self._selection_clear_btn = sel_clear
-        sbl.addWidget(sel_clear)
-        sbl.addStretch()
-        sel_badge_row.hide()
-        self._selection_badge_row = sel_badge_row
-        layout.addWidget(sel_badge_row)
+        ws_close.clicked.connect(self._clear_captured_selection)
+        wsh_layout.addWidget(ws_close)
+        wp_layout.addWidget(ws_header)
+
+        # Code display
+        self._workspace_code = QPlainTextEdit()
+        self._workspace_code.setReadOnly(True)
+        self._workspace_code.setMaximumHeight(120)
+        self._workspace_code.setStyleSheet(
+            f"QPlainTextEdit{{background:#111111;color:{C['fg']};"
+            f"border:none;padding:6px 12px;"
+            f"font-family:Menlo,Monaco,Consolas,monospace;font-size:12px;}}")
+        self._workspace_code.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        wp_layout.addWidget(self._workspace_code)
+
+        # Quick action buttons row
+        ws_actions = QWidget()
+        ws_actions.setStyleSheet(
+            f"background:{C['bg_dark']};border-bottom-left-radius:8px;"
+            f"border-bottom-right-radius:8px;")
+        wsa_layout = QHBoxLayout(ws_actions)
+        wsa_layout.setContentsMargins(12, 4, 12, 4)
+        wsa_layout.setSpacing(6)
+        _WS_BTN = (
+            f"QPushButton{{color:{C['teal']};background:transparent;"
+            f"border:none;{FONT_SMALL}padding:3px 8px;}}"
+            f"QPushButton:hover{{color:{C['fg']};background:{C['bg_hover']};"
+            f"border-radius:4px;}}")
+        for label, key in [("Explain", "explain"), ("Fix / Improve", "fix"),
+                           ("Refactor", "refactor"), ("Optimize", "optimize")]:
+            btn = QPushButton(label)
+            btn.setStyleSheet(_WS_BTN)
+            btn.clicked.connect(lambda checked, k=key: self._on_workspace_action(k))
+            wsa_layout.addWidget(btn)
+        wsa_layout.addStretch()
+        wp_layout.addWidget(ws_actions)
+
+        self._workspace_panel.hide()
+        layout.addWidget(self._workspace_panel)
 
         # Input area
         inp = QWidget()
@@ -2356,7 +2416,7 @@ class ChatPanel(QWidget):
                     'line_to': lt, 'col_to': ct,
                     'file_path': file_path,
                 }
-                self._update_selection_badge()
+                self._update_workspace()
         # Do NOT clear when selection is empty — might just be focus loss
 
     def _on_editor_tab_changed(self, index):
@@ -2372,25 +2432,41 @@ class ChatPanel(QWidget):
             self._clear_captured_selection()
 
     def _clear_captured_selection(self):
-        """Clear the captured selection and hide the badge."""
+        """Clear the captured selection and hide the workspace panel."""
         self._captured_selection = None
-        self._update_selection_badge()
+        self._update_workspace()
 
-    def _update_selection_badge(self):
-        """Show or hide the selection badge based on _captured_selection."""
+    def _update_workspace(self):
+        """Show or hide the workspace panel based on _captured_selection."""
         if self._captured_selection:
-            text = self._captured_selection['text']
-            preview = text.replace('\n', ' ').strip()
-            if len(preview) > 60:
-                preview = preview[:57] + '...'
-            self._selection_badge.setText(f'Selection: {preview}')
-            self._selection_badge.show()
-            self._selection_clear_btn.show()
-            self._selection_badge_row.show()
+            sel = self._captured_selection
+            basename = os.path.basename(sel['file_path'])
+            line_range = f"lines {sel['line_from'] + 1}\u2013{sel['line_to'] + 1}"
+            self._workspace_header.setText(f"{basename} : {line_range}")
+            self._workspace_code.setPlainText(sel['text'])
+            self._workspace_panel.show()
         else:
-            self._selection_badge.hide()
-            self._selection_clear_btn.hide()
-            self._selection_badge_row.hide()
+            self._workspace_panel.hide()
+
+    def _on_workspace_action(self, action_name):
+        """Send a quick action prompt through the selection flow."""
+        prompts = {
+            'explain': 'Explain this code. Mention any Teensy/Arduino-specific details.',
+            'fix': 'Review this code for bugs and improvements. Fix any issues found.',
+            'refactor': 'Refactor this code to be cleaner and more readable.',
+            'optimize': ('Optimize this code for Teensy performance. '
+                         'Minimize memory, use hardware features where possible.'),
+        }
+        prompt = prompts.get(action_name, action_name)
+        if self._captured_selection:
+            sel = self._captured_selection
+            self._send_selection_prompt(
+                prompt, sel['text'],
+                sel['line_from'], sel['col_from'],
+                sel['line_to'], sel['col_to'],
+                sel['file_path'],
+                display_text=action_name.replace('_', ' ').title(),
+            )
 
     def set_project_path(self, path):
         """Set the project directory path for context."""
@@ -2894,6 +2970,18 @@ class ChatPanel(QWidget):
                     rel = os.path.relpath(active_file, proj)
                     all_files[rel] = content
                     self._working_set.add(active_file, rel, 0, content)
+
+        # Include full Teensy API reference at lowest priority for .ino projects
+        if (os.path.exists(_TEENSY_API_REF_PATH)
+                and any(f.endswith('.ino') for f in all_files)):
+            try:
+                with open(_TEENSY_API_REF_PATH, 'r', encoding='utf-8') as _f:
+                    api_content = _f.read()
+                self._working_set.add(
+                    _TEENSY_API_REF_PATH,
+                    'docs/TEENSY_API_REFERENCE.md', 3, api_content)
+            except OSError:
+                pass
 
         self._update_context_display(proj_name, proj, sorted(all_files.keys()))
 
@@ -3491,7 +3579,7 @@ class ChatPanel(QWidget):
         if self._captured_selection:
             sel = self._captured_selection
             self._captured_selection = None
-            self._update_selection_badge()
+            self._update_workspace()
             self._send_selection_prompt(
                 text, sel['text'],
                 sel['line_from'], sel['col_from'],
@@ -3673,7 +3761,9 @@ class ChatPanel(QWidget):
         marked_content = '\n'.join(marked)
 
         basename = os.path.basename(file_path)
-        user_msg = (f"File: {basename}\n\n{marked_content}\n\n"
+        user_msg = (f"=== WORKING ON: {basename} (lines {line_from+1}\u2013{line_to+1}) ===\n"
+                    f"The selected code is marked with <<<SELECTED>>> / >>>SELECTED>>>.\n\n"
+                    f"{marked_content}\n\n"
                     f"User request: {user_text}")
 
         # One-shot conversation with assistant pre-fill to force code output
