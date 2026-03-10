@@ -1929,6 +1929,7 @@ class ChatPanel(QWidget):
         self._stats_widget = None                  # stats row widget during streaming
         self._stats_label = None                   # QLabel showing token/time stats
         self._stats_spinner = None                 # SpinnerWidget in stats row
+        self._in_think_block = False              # True while streaming inside <think>...</think>
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2846,11 +2847,18 @@ class ChatPanel(QWidget):
         tree = self._build_directory_tree(proj)
         all_files = self._scan_project_files(proj)
 
+        # Overlay editor buffer content onto scanned files.
+        # Buffer-only edits (save_to_disk=False) are only in the editor widget,
+        # not on disk — the editor buffer is the authoritative source for open files.
+        active_file = self._editor_ref.current_file() if self._editor_ref else None
+        open_files = self._editor_ref.get_all_files() if self._editor_ref else {}
+        for fp, content in open_files.items():
+            rel = os.path.relpath(fp, proj)
+            all_files[rel] = content  # override disk content with buffer content
+
         # Populate working set with priorities
         # 0=active tab, 1=AI-edited, 2=open-but-not-active, 3=other project file
         self._working_set.clear()
-        active_file = self._editor_ref.current_file() if self._editor_ref else None
-        open_files = self._editor_ref.get_all_files() if self._editor_ref else {}
         open_paths = {os.path.normpath(fp) for fp in open_files}
         for rel_path, content in all_files.items():
             abs_path = os.path.join(proj, rel_path)
@@ -2875,23 +2883,6 @@ class ChatPanel(QWidget):
                     if e.priority == 0 and e.rel_path != self._target_override:
                         e.priority = 2
                 target_entry.priority = 0
-
-        # Safety net: if active file wasn't found by scanner (wrong extension,
-        # too large, etc.), inject it directly from the editor content
-        if active_file:
-            active_norm = os.path.normpath(active_file)
-            found_active = False
-            for rel_path in all_files:
-                if os.path.normpath(os.path.join(proj, rel_path)) == active_norm:
-                    found_active = True
-                    break
-            if not found_active:
-                # Read directly from editor
-                content = self._editor_ref.current_text() if self._editor_ref else ""
-                if content:
-                    rel = os.path.relpath(active_file, proj)
-                    all_files[rel] = content
-                    self._working_set.add(active_file, rel, 0, content)
 
         # Include full Teensy API reference at lowest priority for .ino projects
         if (os.path.exists(_TEENSY_API_REF_PATH)
@@ -3534,6 +3525,7 @@ class ChatPanel(QWidget):
         self.send_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self._current_response = ""
+        self._in_think_block = False
         self.apply_bar.hide()
         self._pending_edits = []
         self._apply_snapshot.clear()
@@ -3693,6 +3685,7 @@ class ChatPanel(QWidget):
         self.send_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self._current_response = ""
+        self._in_think_block = False
         self.apply_bar.hide()
         self._pending_edits = []
         self._apply_snapshot.clear()
@@ -3741,6 +3734,8 @@ class ChatPanel(QWidget):
         Uses pre-fill extraction first, then multi-strategy fallbacks."""
         import re as _re
         text = self._clean_model_artifacts(response_text).strip()
+        # Strip thinking blocks — not useful as code replacement
+        text = _re.sub(r'<think>.*?</think>', '', text, flags=_re.DOTALL).strip()
         original = self._selection_edit['original_text']
         prefilled = self._selection_prefilled
         self._selection_prefilled = False
@@ -3979,6 +3974,7 @@ class ChatPanel(QWidget):
         self.worker.stop()
         self._selection_mode = False
         self._selection_prefilled = False
+        self._in_think_block = False
         if self.thread.isRunning():
             self.thread.quit()
             if not self.thread.wait(2000):
@@ -3997,11 +3993,27 @@ class ChatPanel(QWidget):
         t = self._strip_latex(t)
         if not t:
             return
-        self._current_response += t
-        if self._current_ai_widget:
+        self._current_response += t  # keep tags for _render_formatted_response
+        # Handle <think> blocks — strip tags from display text, track state
+        display_t = t
+        if '<think>' in display_t:
+            display_t = display_t.replace('<think>', '')
+            self._in_think_block = True
+        if '</think>' in display_t:
+            display_t = display_t.replace('</think>', '')
+            self._in_think_block = False
+        if self._current_ai_widget and display_t:
             cur = self._current_ai_widget.textCursor()
             cur.movePosition(QTextCursor.MoveOperation.End)
-            cur.insertText(t)
+            if self._in_think_block:
+                # Style thinking tokens as dim italic
+                fmt = QTextCharFormat()
+                fmt.setForeground(QColor(C['fg_dim']))
+                fmt.setFontItalic(True)
+                fmt.setFontPointSize(11)
+                cur.insertText(display_t, fmt)
+            else:
+                cur.insertText(display_t)
             self._current_ai_widget.setTextCursor(cur)
         # Update live stats
         self._gen_token_count += 1
@@ -4037,16 +4049,44 @@ class ChatPanel(QWidget):
         if not self._current_ai_widget or not self._current_response:
             return
         text = self._current_response
-        # Only render if there are code fences, edit blocks, or inline code
-        if "```" not in text and "<<<" not in text and "`" not in text:
+        # Only render if there are code fences, edit blocks, inline code, or think blocks
+        if ("```" not in text and "<<<" not in text
+                and "`" not in text and "<think>" not in text):
             return
         html_parts = []
         in_code = False
         in_edit = False
+        in_think = False
         lines = text.split("\n")
         i = 0
         while i < len(lines):
             line = lines[i]
+            # <think> block start
+            if '<think>' in line and not in_code and not in_edit:
+                line = line.replace('<think>', '')
+                in_think = True
+                if not line.strip():
+                    i += 1
+                    continue
+            # </think> block end
+            if '</think>' in line:
+                line = line.replace('</think>', '')
+                in_think = False
+                if line.strip():
+                    escaped_line = html.escape(line)
+                    html_parts.append(
+                        f'<span style="color:{C["fg_dim"]};font-style:italic;'
+                        f'font-size:11px;">{escaped_line}</span><br>')
+                i += 1
+                continue
+            # Inside think block — render as dim italic
+            if in_think:
+                escaped_line = html.escape(line)
+                html_parts.append(
+                    f'<span style="color:{C["fg_dim"]};font-style:italic;'
+                    f'font-size:11px;">{escaped_line}</span><br>')
+                i += 1
+                continue
             # <<<EDIT or <<<FILE block start
             if not in_code and not in_edit and (
                     line.startswith("<<<EDIT ") or line.startswith("<<<FILE ")):
@@ -4172,6 +4212,7 @@ class ChatPanel(QWidget):
     def _on_error(self, m):
         self._selection_mode = False
         self._selection_prefilled = False
+        self._in_think_block = False
         self._finalize_stats(suffix=" (error)")
         # Show error with "Error" speaker label
         wrapper = QWidget()
