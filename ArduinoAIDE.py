@@ -2023,6 +2023,12 @@ class ChatPanel(QWidget):
         self.apply_all_btn.setStyleSheet(BTN_PRIMARY)
         self.apply_all_btn.clicked.connect(self._apply_all_edits)
         ab_btns.addWidget(self.apply_all_btn)
+        self._apply_compile_btn = QPushButton("\u25b6 Apply \u0026 Compile")
+        self._apply_compile_btn.setStyleSheet(
+            f"background:#007a7f;color:white;border:none;border-radius:4px;"
+            f"padding:4px 12px;{FONT_BODY}")
+        self._apply_compile_btn.clicked.connect(self._apply_and_compile)
+        ab_btns.addWidget(self._apply_compile_btn)
         self.dismiss_btn = QPushButton("Dismiss")
         self.dismiss_btn.setStyleSheet(BTN_SECONDARY)
         self.dismiss_btn.clicked.connect(self._dismiss_edits)
@@ -3964,6 +3970,13 @@ class ChatPanel(QWidget):
             if self._error_diagnostics:
                 self.recompile_bar.show()
 
+    def _apply_and_compile(self):
+        """Apply all edits then trigger a compile."""
+        self._apply_all_edits()
+        # Defer compile so editor content updates propagate first
+        self.recompile_bar.hide()
+        QTimer.singleShot(100, self.recompile_requested.emit)
+
     def _on_recompile_clicked(self):
         """Handle Recompile button click."""
         self.recompile_bar.hide()
@@ -4038,6 +4051,7 @@ class ChatPanel(QWidget):
         self.apply_all_btn.setText(
             f"Apply {n_accepted} of {n_total}" if n_excluded else "Apply All Changes")
         self.apply_all_btn.setEnabled(n_accepted > 0)
+        self._apply_compile_btn.setEnabled(n_accepted > 0)
         if self._error_diagnostics:
             self._intent_badge.show()
         else:
