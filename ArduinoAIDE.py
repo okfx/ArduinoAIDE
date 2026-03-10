@@ -1100,75 +1100,6 @@ class OllamaWorker(QObject):
 
 
 # =============================================================================
-# AI Context Menu Actions
-# =============================================================================
-
-DEFAULT_AI_ACTIONS = [
-    ("Explain This Code",
-     "Explain what the following code does in clear, concise terms. "
-     "Mention any Teensy/Arduino-specific details:\n\n```cpp\n{code}\n```"),
-    ("Fix / Improve",
-     "Review the following code for bugs, issues, or improvements. "
-     "Suggest fixes using the <<<EDIT format:\n\n```cpp\n{code}\n```"),
-    ("Refactor",
-     "Refactor the following code to be cleaner, more readable, and more efficient "
-     "while preserving exact behavior. Use the <<<EDIT format:\n\n```cpp\n{code}\n```"),
-    ("Add Comments",
-     "Add clear, useful inline comments to the following code. "
-     "Use the <<<EDIT format to show the commented version:\n\n```cpp\n{code}\n```"),
-    ("Find Bugs",
-     "Carefully analyze the following code for potential bugs, memory issues, "
-     "race conditions, undefined behavior, or Teensy-specific pitfalls:\n\n```cpp\n{code}\n```"),
-    ("Optimize for Teensy",
-     "Optimize the following code specifically for Teensy performance: "
-     "minimize memory usage, use DMA/hardware features where possible, "
-     "reduce latency. Use the <<<EDIT format:\n\n```cpp\n{code}\n```"),
-    ("Generate Test",
-     "Write a simple test or validation sketch that exercises the following code. "
-     "Include Serial output to verify correct behavior:\n\n```cpp\n{code}\n```"),
-    None,  # separator
-    ("Ask AI About This...",  None),  # special: opens a prompt dialog
-]
-
-AI_ACTIONS = list(DEFAULT_AI_ACTIONS)
-AI_ACTIONS_FILE = os.path.expanduser("~/.teensy_ide_ai_actions.json")
-
-def _load_ai_actions():
-    """Load AI actions from config file, or use defaults."""
-    global AI_ACTIONS
-    try:
-        with open(AI_ACTIONS_FILE, "r") as f:
-            data = json.load(f)
-        actions = []
-        for entry in data.get("actions", []):
-            if entry is None:
-                actions.append(None)
-            else:
-                actions.append((entry["label"], entry.get("template")))
-        # Ensure "Ask AI About This..." is always last
-        has_ask = any(e is not None and e[0] == "Ask AI About This..." for e in actions)
-        if not has_ask:
-            actions.append(("Ask AI About This...", None))
-        AI_ACTIONS[:] = actions
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        AI_ACTIONS[:] = list(DEFAULT_AI_ACTIONS)
-
-def _save_ai_actions():
-    """Persist current AI_ACTIONS to config file."""
-    entries = []
-    for entry in AI_ACTIONS:
-        if entry is None:
-            entries.append(None)
-        else:
-            entries.append({"label": entry[0], "template": entry[1]})
-    try:
-        with open(AI_ACTIONS_FILE, "w") as f:
-            json.dump({"version": 1, "actions": entries}, f, indent=2)
-    except Exception:
-        pass
-
-
-# =============================================================================
 # Curated Models for Pull Model browser
 # =============================================================================
 
@@ -1198,33 +1129,12 @@ CURATED_MODELS = [
 # Code Editor
 # =============================================================================
 
-def _build_ai_context_menu(editor_widget, menu, selected_text):
-    """Add AI actions to a context menu. Returns list of (action, prompt_template) pairs."""
-    from PyQt6.QtWidgets import QMenu
-    if not selected_text.strip():
-        return []
-    ai_menu = QMenu("  AI Tools", menu)
-    pairs = []
-    for entry in AI_ACTIONS:
-        if entry is None:
-            ai_menu.addSeparator()
-            continue
-        label, template = entry
-        a = QAction(label, editor_widget)
-        ai_menu.addAction(a)
-        pairs.append((a, template))
-    menu.addSeparator()
-    menu.addMenu(ai_menu)
-    return pairs
-
-
 if HAS_QSCINTILLA:
     # Marker numbers for QScintilla gutter (0-31 available)
     _MARKER_ERROR = 8
     _MARKER_WARNING = 9
 
     class CodeEditor(QsciScintilla):
-        ai_action_requested = pyqtSignal(str)  # emits the full prompt
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -1292,7 +1202,7 @@ if HAS_QSCINTILLA:
             self.setLexer(lexer)
 
         def _show_context_menu(self, pos):
-            from PyQt6.QtWidgets import QMenu, QInputDialog
+            from PyQt6.QtWidgets import QMenu
             menu = QMenu(self)
             # Standard editing actions with keyboard shortcuts
             if self.hasSelectedText():
@@ -1313,25 +1223,7 @@ if HAS_QSCINTILLA:
             a_all.setShortcut(QKeySequence("Ctrl+A"))
             a_all.triggered.connect(self.selectAll)
             menu.addAction(a_all)
-
-            sel = self.selectedText()
-            pairs = _build_ai_context_menu(self, menu, sel)
-
-            chosen = menu.exec(self.mapToGlobal(pos))
-            if not chosen:
-                return
-            for a, template in pairs:
-                if chosen == a:
-                    if template is None:
-                        # "Ask AI About This..." — show input dialog
-                        question, ok = QInputDialog.getText(
-                            self, "Ask AI", "What do you want to know about this code?")
-                        if ok and question.strip():
-                            prompt = f"{question.strip()}\n\n```cpp\n{sel}\n```"
-                            self.ai_action_requested.emit(prompt)
-                    else:
-                        self.ai_action_requested.emit(template.format(code=sel))
-                    break
+            menu.exec(self.mapToGlobal(pos))
 
         def clear_diagnostics(self):
             """Remove all error/warning markers and tooltip data."""
@@ -1385,7 +1277,6 @@ if HAS_QSCINTILLA:
         def current_file(self): return self._current_file
 else:
     class CodeEditor(QPlainTextEdit):
-        ai_action_requested = pyqtSignal(str)
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -1393,28 +1284,6 @@ else:
             font = QFont("Menlo", 13)
             self.setFont(font)
             self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-            self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            self.customContextMenuRequested.connect(self._show_context_menu)
-
-        def _show_context_menu(self, pos):
-            from PyQt6.QtWidgets import QMenu, QInputDialog
-            menu = self.createStandardContextMenu()
-            sel = self.textCursor().selectedText()
-            pairs = _build_ai_context_menu(self, menu, sel)
-            chosen = menu.exec(self.mapToGlobal(pos))
-            if not chosen:
-                return
-            for a, template in pairs:
-                if chosen == a:
-                    if template is None:
-                        question, ok = QInputDialog.getText(
-                            self, "Ask AI", "What do you want to know about this code?")
-                        if ok and question.strip():
-                            prompt = f"{question.strip()}\n\n```cpp\n{sel}\n```"
-                            self.ai_action_requested.emit(prompt)
-                    else:
-                        self.ai_action_requested.emit(template.format(code=sel))
-                    break
 
         def clear_diagnostics(self): pass  # No gutter in QPlainTextEdit
         def set_diagnostics(self, diags): pass
@@ -1442,7 +1311,6 @@ else:
 
 class TabbedEditor(QWidget):
     file_changed = pyqtSignal(str)
-    ai_action_requested = pyqtSignal(str)  # propagated from CodeEditor
     editor_opened = pyqtSignal(object)      # emits CodeEditor widget when a new tab is created
 
     def __init__(self, parent=None):
@@ -1468,7 +1336,6 @@ class TabbedEditor(QWidget):
             self.tabs.setCurrentWidget(self._editors[filepath])
             return True
         editor = CodeEditor()
-        editor.ai_action_requested.connect(self.ai_action_requested.emit)
         if editor.load_file(filepath):
             self._editors[filepath] = editor
             idx = self.tabs.addTab(editor, os.path.basename(filepath))
@@ -3532,22 +3399,6 @@ class ChatPanel(QWidget):
                 f"[debug] Current live context mode: {mode}\n"
                 f"Usage: /debug-use-ws on | off",
                 C['fg_dim'])
-
-    def send_ai_action(self, prompt):
-        """Called from the right-click AI context menu in the code editor."""
-        # Parse tool name and code block from the formatted prompt
-        lines = prompt.split("\n")
-        tool_name = lines[0].rstrip(":").strip()
-        code_lines, in_code = [], False
-        for line in lines[1:]:
-            if line.startswith("```") and not in_code:
-                in_code = True; continue
-            if line.startswith("```") and in_code:
-                break
-            if in_code:
-                code_lines.append(line)
-        code = "\n".join(code_lines).rstrip()
-        self._send_prompt(prompt, display_text=tool_name, display_code=code)
 
     def _send_prompt(self, text, display_text=None, display_code=None):
         """Core send method used by both manual chat and AI actions."""
@@ -5975,329 +5826,6 @@ class SerialMonitor(QWidget):
 
 
 # =============================================================================
-# Settings Panel — AI Tools Tab
-# =============================================================================
-
-class AIToolsTab(QWidget):
-    """CRUD editor for the right-click AI context menu actions — 2-column layout."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 16)
-        outer.setSpacing(20)
-
-        # ====== LEFT column: Right-Click Actions list ======
-        left = QVBoxLayout()
-        left.setSpacing(0)
-
-        hdr_left = QHBoxLayout()
-        hdr_left.setContentsMargins(0, 0, 0, 10)
-        hdr_left.setSpacing(6)
-        left_title = QLabel("RIGHT-CLICK ACTIONS")
-        left_title.setStyleSheet(SETTINGS_STITLE)
-        hdr_left.addWidget(left_title)
-        hdr_left.addStretch()
-        add_btn = QPushButton("+ Add"); add_btn.setStyleSheet(BTN_SM_PRIMARY)
-        add_btn.clicked.connect(self._add_action); hdr_left.addWidget(add_btn)
-        sep_btn = QPushButton("+ Separator"); sep_btn.setStyleSheet(BTN_SM_GHOST)
-        sep_btn.clicked.connect(self._add_separator); hdr_left.addWidget(sep_btn)
-        reset_btn = QPushButton("Reset"); reset_btn.setStyleSheet(BTN_SM_GHOST)
-        reset_btn.clicked.connect(self._reset_defaults); hdr_left.addWidget(reset_btn)
-        left.addLayout(hdr_left)
-
-        list_card = QFrame()
-        list_card.setStyleSheet(SETTINGS_CARD)
-        list_card_layout = QVBoxLayout(list_card)
-        list_card_layout.setContentsMargins(0, 0, 0, 0)
-        list_card_layout.setSpacing(0)
-
-        self.action_list = QListWidget()
-        self.action_list.setStyleSheet(
-            f"QListWidget{{background:transparent;border:none;{FONT_BODY}}}"
-            f"QListWidget::item{{border-bottom:1px solid {C['border']};padding:0px;}}"
-            f"QListWidget::item:selected{{background:{C['bg_hover']};"
-            f"border-left:2px solid {C['teal']};}}"
-            f"QListWidget::item:hover:!selected{{background:{C['bg_hover']};}}")
-        self.action_list.currentRowChanged.connect(self._on_row_changed)
-        list_card_layout.addWidget(self.action_list)
-        left.addWidget(list_card, stretch=1)
-
-        self.list_status = QLabel("")
-        self.list_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        self.list_status.setContentsMargins(0, 4, 0, 0)
-        left.addWidget(self.list_status)
-
-        left_w = QWidget(); left_w.setLayout(left)
-        outer.addWidget(left_w, stretch=1)
-
-        # ====== RIGHT column: Edit Action pane (always visible) ======
-        right = QVBoxLayout()
-        right.setSpacing(0)
-
-        hdr_right = QHBoxLayout()
-        hdr_right.setContentsMargins(0, 0, 0, 10)
-        right_title = QLabel("EDIT ACTION")
-        right_title.setStyleSheet(SETTINGS_STITLE)
-        hdr_right.addWidget(right_title)
-        hdr_right.addStretch()
-        right.addLayout(hdr_right)
-
-        edit_card = QFrame()
-        edit_card.setStyleSheet(SETTINGS_CARD)
-        ecl = QVBoxLayout(edit_card)
-        ecl.setContentsMargins(16, 16, 16, 16)
-        ecl.setSpacing(10)
-
-        lbl_row = QHBoxLayout()
-        lbl_row.setSpacing(8)
-        lbl_lbl = QLabel("Label")
-        lbl_lbl.setMinimumWidth(56)
-        lbl_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        lbl_row.addWidget(lbl_lbl)
-        self.label_edit = QLineEdit()
-        self.label_edit.setStyleSheet(SETTINGS_INPUT)
-        self.label_edit.setPlaceholderText("Action name…")
-        lbl_row.addWidget(self.label_edit)
-        ecl.addLayout(lbl_row)
-
-        prompt_row = QHBoxLayout()
-        prompt_row.setSpacing(8)
-        prompt_row.setAlignment(Qt.AlignmentFlag.AlignTop)
-        prompt_lbl = QLabel("Prompt")
-        prompt_lbl.setMinimumWidth(56)
-        prompt_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        prompt_row.addWidget(prompt_lbl)
-        prompt_col = QVBoxLayout()
-        self.template_edit = QPlainTextEdit()
-        self.template_edit.setStyleSheet(
-            f"background:{C['bg_input']};color:{C['fg']};"
-            f"border:1px solid {C['border_light']};border-radius:6px;"
-            f"padding:6px 10px;{FONT_CODE}")
-        self.template_edit.setMinimumHeight(200)
-        self.template_edit.setPlaceholderText(
-            'e.g. "Explain what the following code does:\\n\\n```cpp\\n{code}\\n```"')
-        prompt_col.addWidget(self.template_edit)
-        hint_lbl = QLabel("Use {code} where the selected code should be inserted.")
-        hint_lbl.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL}")
-        prompt_col.addWidget(hint_lbl)
-        prompt_row.addLayout(prompt_col)
-        ecl.addLayout(prompt_row)
-
-        btns_row = QHBoxLayout()
-        btns_row.addStretch()
-        cancel_btn = QPushButton("Cancel"); cancel_btn.setStyleSheet(BTN_SM_GHOST)
-        cancel_btn.clicked.connect(self._cancel_edit); btns_row.addWidget(cancel_btn)
-        self.save_edit_btn = QPushButton("Save Changes")
-        self.save_edit_btn.setStyleSheet(BTN_SM_PRIMARY)
-        self.save_edit_btn.clicked.connect(self._save_current_edit)
-        btns_row.addWidget(self.save_edit_btn)
-        ecl.addLayout(btns_row)
-
-        self.edit_status = QLabel("")
-        self.edit_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        ecl.addWidget(self.edit_status)
-
-        right.addWidget(edit_card, stretch=1)
-        right_w = QWidget(); right_w.setLayout(right)
-        outer.addWidget(right_w, stretch=1)
-
-        self._editing_index = -1
-        self._populate_list()
-
-    # -- Custom item widget helpers --
-
-    def _make_action_widget(self, label, template):
-        w = QWidget()
-        w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        rl = QHBoxLayout(w); rl.setContentsMargins(8, 6, 8, 6); rl.setSpacing(8)
-        drag = QLabel("\u28bf")
-        drag.setStyleSheet(f"color:{C['fg_muted']};{FONT_BODY}")
-        drag.setFixedWidth(16)
-        rl.addWidget(drag)
-        name_lbl = QLabel(label)
-        name_lbl.setStyleSheet(f"color:{C['fg']};{FONT_BODY}")
-        rl.addWidget(name_lbl, stretch=1)
-        preview = (template[:48].replace("\n", " ") + "…") if len(template) > 48 else template.replace("\n", " ")
-        prev_lbl = QLabel(preview)
-        prev_lbl.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL}")
-        prev_lbl.setMaximumWidth(160)
-        rl.addWidget(prev_lbl)
-        return w
-
-    def _make_builtin_widget(self, label):
-        w = QWidget()
-        w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        rl = QHBoxLayout(w); rl.setContentsMargins(8, 6, 8, 6); rl.setSpacing(8)
-        spacer = QLabel(""); spacer.setFixedWidth(16); rl.addWidget(spacer)
-        name_lbl = QLabel(label)
-        name_lbl.setStyleSheet(f"color:{C['fg']};{FONT_BODY}")
-        rl.addWidget(name_lbl, stretch=1)
-        tag = QLabel("built-in")
-        tag.setStyleSheet(
-            f"color:{C['fg_dim']};background:{C['bg_hover']};"
-            f"{FONT_SMALL};border-radius:3px;padding:1px 5px;")
-        rl.addWidget(tag)
-        return w
-
-    def _populate_list(self):
-        self.action_list.clear()
-        for entry in AI_ACTIONS:
-            if entry is None:
-                item = QListWidgetItem()
-                item.setSizeHint(QSize(0, 18))
-                item.setFlags(Qt.ItemFlag.NoItemFlags)
-                item.setData(Qt.ItemDataRole.UserRole, "separator")
-                sep_w = QWidget()
-                sl = QHBoxLayout(sep_w); sl.setContentsMargins(12, 0, 12, 0)
-                line = QFrame(); line.setFrameShape(QFrame.Shape.HLine)
-                line.setStyleSheet(f"color:{C['border_light']};")
-                sl.addWidget(line)
-                self.action_list.addItem(item)
-                self.action_list.setItemWidget(item, sep_w)
-            else:
-                label, template = entry
-                item = QListWidgetItem()
-                item.setSizeHint(QSize(0, 36))
-                item.setData(Qt.ItemDataRole.UserRole,
-                             "builtin" if template is None else "action")
-                w = self._make_builtin_widget(label) if template is None \
-                    else self._make_action_widget(label, template)
-                self.action_list.addItem(item)
-                self.action_list.setItemWidget(item, w)
-        # Restore or default selection
-        sel = max(0, min(self._editing_index, self.action_list.count() - 1))
-        self.action_list.setCurrentRow(sel)
-
-    def _on_row_changed(self, row):
-        """Populate the always-visible edit pane from the selected row."""
-        if row < 0 or row >= len(AI_ACTIONS):
-            self._editing_index = -1
-            self.label_edit.setEnabled(False); self.template_edit.setEnabled(False)
-            self.save_edit_btn.setEnabled(False)
-            return
-        entry = AI_ACTIONS[row]
-        if entry is None:
-            self._editing_index = -1
-            self.label_edit.setEnabled(False); self.template_edit.setEnabled(False)
-            self.save_edit_btn.setEnabled(False)
-            self.label_edit.clear(); self.template_edit.clear()
-            self.edit_status.setText("Separators cannot be edited.")
-            self.edit_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-            return
-        label, template = entry
-        if template is None:
-            self._editing_index = -1
-            self.label_edit.setEnabled(False); self.template_edit.setEnabled(False)
-            self.save_edit_btn.setEnabled(False)
-            self.label_edit.setText(label)
-            self.template_edit.setPlainText("(Built-in action — cannot be edited)")
-            self.edit_status.setText("Built-in actions cannot be edited.")
-            self.edit_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-            return
-        self._editing_index = row
-        self.label_edit.setEnabled(True); self.template_edit.setEnabled(True)
-        self.save_edit_btn.setEnabled(True)
-        self.label_edit.setText(label)
-        self.template_edit.setPlainText(template)
-        self.edit_status.setText("")
-
-    def _add_action(self):
-        insert_idx = len(AI_ACTIONS) - 1
-        for i in range(len(AI_ACTIONS) - 1, -1, -1):
-            if AI_ACTIONS[i] is not None and AI_ACTIONS[i][1] is None:
-                insert_idx = i; break
-        AI_ACTIONS.insert(insert_idx, (
-            "New Action",
-            "Your prompt here. Use {code} for selected code.\n\n```cpp\n{code}\n```"))
-        self._persist()
-        self._editing_index = insert_idx
-        self._populate_list()
-        self.action_list.setCurrentRow(insert_idx)
-
-    def _edit_action(self):
-        self._on_row_changed(self.action_list.currentRow())
-
-    def _save_current_edit(self):
-        if self._editing_index < 0:
-            return
-        label = self.label_edit.text().strip()
-        template = self.template_edit.toPlainText()
-        if not label:
-            self.edit_status.setText("Label cannot be empty.")
-            self.edit_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-            return
-        AI_ACTIONS[self._editing_index] = (label, template)
-        self._persist()
-        row = self._editing_index
-        self._populate_list()
-        self.action_list.setCurrentRow(row)
-        self.edit_status.setText("Action saved.")
-        self.edit_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-
-    def _cancel_edit(self):
-        row = self._editing_index if self._editing_index >= 0 \
-            else self.action_list.currentRow()
-        self._on_row_changed(row)
-
-    def _delete_action(self):
-        row = self.action_list.currentRow()
-        if row < 0 or row >= len(AI_ACTIONS):
-            return
-        entry = AI_ACTIONS[row]
-        if entry is not None and entry[1] is None:
-            self.list_status.setText("Cannot delete 'Ask AI About This...'")
-            self.list_status.setStyleSheet(f"color:{C['fg_warn']};{FONT_SMALL}")
-            return
-        del AI_ACTIONS[row]
-        self._persist()
-        self._editing_index = -1
-        self._populate_list()
-        self.list_status.setText("Action deleted.")
-        self.list_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-
-    def _add_separator(self):
-        row = self.action_list.currentRow()
-        insert_at = row + 1 if row >= 0 else len(AI_ACTIONS) - 1
-        if insert_at >= len(AI_ACTIONS):
-            insert_at = len(AI_ACTIONS) - 1
-        AI_ACTIONS.insert(insert_at, None)
-        self._persist()
-        self._populate_list()
-
-    def _move_up(self):
-        row = self.action_list.currentRow()
-        if row <= 0: return
-        AI_ACTIONS[row], AI_ACTIONS[row - 1] = AI_ACTIONS[row - 1], AI_ACTIONS[row]
-        self._persist(); self._editing_index = row - 1
-        self._populate_list(); self.action_list.setCurrentRow(row - 1)
-
-    def _move_down(self):
-        row = self.action_list.currentRow()
-        if row < 0 or row >= len(AI_ACTIONS) - 2: return
-        AI_ACTIONS[row], AI_ACTIONS[row + 1] = AI_ACTIONS[row + 1], AI_ACTIONS[row]
-        self._persist(); self._editing_index = row + 1
-        self._populate_list(); self.action_list.setCurrentRow(row + 1)
-
-    def _reset_defaults(self):
-        if QMessageBox.question(
-            self, "Reset AI Tools",
-            "Reset all AI actions to defaults?\n\nThis cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        ) != QMessageBox.StandardButton.Yes:
-            return
-        AI_ACTIONS[:] = list(DEFAULT_AI_ACTIONS)
-        self._persist()
-        self._editing_index = -1
-        self._populate_list()
-        self.list_status.setText("Reset to defaults.")
-        self.list_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-
-    def _persist(self):
-        _save_ai_actions()
-
-
-# =============================================================================
 # Settings Panel — Models Tab
 # =============================================================================
 
@@ -7472,7 +7000,7 @@ class GitTab(QWidget):
 # =============================================================================
 
 class SettingsPanel(QWidget):
-    """Settings panel with Models, AI Tools, and Git tabs."""
+    """Settings panel with Models and Git tabs."""
     model_changed = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -7493,9 +7021,6 @@ class SettingsPanel(QWidget):
         self.models_tab.model_changed.connect(self.model_changed.emit)
         self.tabs.addTab(self.models_tab, "Models")
 
-        self.ai_tools_tab = AIToolsTab()
-        self.tabs.addTab(self.ai_tools_tab, "AI Tools")
-
         self.git_tab = GitTab()
         self.tabs.addTab(self.git_tab, "Git")
 
@@ -7503,7 +7028,7 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.tabs)
 
     def _on_tab_changed(self, index):
-        if index == 2:  # Git tab
+        if index == 1:  # Git tab
             self.git_tab._refresh()
 
     def set_project_path(self, path):
@@ -8169,7 +7694,6 @@ class MainWindow(QMainWindow):
 
         self.editor = TabbedEditor()
         self.editor.file_changed.connect(self._on_editor_file_changed)
-        self.editor.ai_action_requested.connect(self._on_ai_action)
         v_splitter.addWidget(self.editor)
 
         # Bottom panel
@@ -8569,11 +8093,6 @@ class MainWindow(QMainWindow):
         self.editor.close_all()
         self.editor.open_all_project_files(self.project_path)
         self.chat_panel._update_context_bar()
-
-    def _on_ai_action(self, prompt):
-        """Handle AI right-click action from the code editor."""
-        self._switch_view(1)
-        self.chat_panel.send_ai_action(prompt)
 
     def _on_edits_applied(self):
         """Refresh file browser and context after AI creates/edits files."""
@@ -8986,7 +8505,6 @@ def main():
     # Ensure Ollama is running
     _ensure_ollama()
     # Load persisted configs
-    _load_ai_actions()
     config = _load_config()
     # CLI arg takes precedence over saved project path
     project_path = None
