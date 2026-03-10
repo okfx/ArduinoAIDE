@@ -1135,6 +1135,7 @@ if HAS_QSCINTILLA:
     _MARKER_WARNING = 9
 
     class CodeEditor(QsciScintilla):
+        ask_llm_requested = pyqtSignal()
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -1204,6 +1205,12 @@ if HAS_QSCINTILLA:
         def _show_context_menu(self, pos):
             from PyQt6.QtWidgets import QMenu
             menu = QMenu(self)
+            menu.setStyleSheet(
+                f"QMenu{{background:{C['bg_input']};color:{C['fg']};"
+                f"border:1px solid {C['border_light']};padding:4px;}}"
+                f"QMenu::item:selected{{background:{C['bg_hover']};}}"
+                f"QMenu::separator{{height:1px;background:{C['border_light']};"
+                f"margin:4px 8px;}}")
             # Standard editing actions with keyboard shortcuts
             if self.hasSelectedText():
                 a_cut = QAction("Cut", self)
@@ -1223,6 +1230,11 @@ if HAS_QSCINTILLA:
             a_all.setShortcut(QKeySequence("Ctrl+A"))
             a_all.triggered.connect(self.selectAll)
             menu.addAction(a_all)
+            if self.hasSelectedText():
+                menu.addSeparator()
+                a_llm = QAction("Ask LLM", self)
+                a_llm.triggered.connect(self.ask_llm_requested.emit)
+                menu.addAction(a_llm)
             menu.exec(self.mapToGlobal(pos))
 
         def clear_diagnostics(self):
@@ -1277,6 +1289,7 @@ if HAS_QSCINTILLA:
         def current_file(self): return self._current_file
 else:
     class CodeEditor(QPlainTextEdit):
+        ask_llm_requested = pyqtSignal()
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -1284,6 +1297,24 @@ else:
             font = QFont("Menlo", 13)
             self.setFont(font)
             self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self.customContextMenuRequested.connect(self._show_context_menu)
+
+        def _show_context_menu(self, pos):
+            from PyQt6.QtWidgets import QMenu
+            menu = self.createStandardContextMenu()
+            menu.setStyleSheet(
+                f"QMenu{{background:{C['bg_input']};color:{C['fg']};"
+                f"border:1px solid {C['border_light']};padding:4px;}}"
+                f"QMenu::item:selected{{background:{C['bg_hover']};}}"
+                f"QMenu::separator{{height:1px;background:{C['border_light']};"
+                f"margin:4px 8px;}}")
+            if self.textCursor().hasSelection():
+                menu.addSeparator()
+                a_llm = QAction("Ask LLM", self)
+                a_llm.triggered.connect(self.ask_llm_requested.emit)
+                menu.addAction(a_llm)
+            menu.exec(self.mapToGlobal(pos))
 
         def clear_diagnostics(self): pass  # No gutter in QPlainTextEdit
         def set_diagnostics(self, diags): pass
@@ -1311,6 +1342,7 @@ else:
 
 class TabbedEditor(QWidget):
     file_changed = pyqtSignal(str)
+    ask_llm_requested = pyqtSignal()        # propagated from CodeEditor
     editor_opened = pyqtSignal(object)      # emits CodeEditor widget when a new tab is created
 
     def __init__(self, parent=None):
@@ -1336,6 +1368,7 @@ class TabbedEditor(QWidget):
             self.tabs.setCurrentWidget(self._editors[filepath])
             return True
         editor = CodeEditor()
+        editor.ask_llm_requested.connect(self.ask_llm_requested.emit)
         if editor.load_file(filepath):
             self._editors[filepath] = editor
             idx = self.tabs.addTab(editor, os.path.basename(filepath))
@@ -1899,6 +1932,14 @@ class ChatPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # Style right-click context menus (QTextEdit default menus inherit this)
+        self.setStyleSheet(
+            f"ChatPanel QMenu{{background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};padding:4px;}}"
+            f"ChatPanel QMenu::item:selected{{background:{C['bg_hover']};}}"
+            f"ChatPanel QMenu::separator{{height:1px;background:{C['border_light']};"
+            f"margin:4px 8px;}}")
+
         # Context header — standardized panel header with project info
         ctx_panel, self._chat_title, ctx_hdr = _make_panel_header("AI Chat")
         self._ctx_info = QLabel("")
@@ -2316,9 +2357,9 @@ class ChatPanel(QWidget):
             self._workspace_panel.hide()
 
     def _on_workspace_action(self, action_name):
-        """Send a quick action prompt through the selection flow."""
+        """Send a quick action prompt through the selection flow (or chat for explain)."""
         prompts = {
-            'explain': 'Explain this code. Mention any Teensy/Arduino-specific details.',
+            'explain': 'Explain this code briefly. Mention any Teensy/Arduino-specific details.',
             'fix': 'Review this code for bugs and improvements. Fix any issues found.',
             'refactor': 'Refactor this code to be cleaner and more readable.',
             'optimize': ('Optimize this code for Teensy performance. '
@@ -2327,13 +2368,24 @@ class ChatPanel(QWidget):
         prompt = prompts.get(action_name, action_name)
         if self._captured_selection:
             sel = self._captured_selection
-            self._send_selection_prompt(
-                prompt, sel['text'],
-                sel['line_from'], sel['col_from'],
-                sel['line_to'], sel['col_to'],
-                sel['file_path'],
-                display_text=action_name.replace('_', ' ').title(),
-            )
+            if action_name == 'explain':
+                # Explain uses regular chat path — no selection-edit flow
+                basename = os.path.basename(sel['file_path'])
+                line_range = f"lines {sel['line_from']+1}\u2013{sel['line_to']+1}"
+                explain_prompt = (
+                    f"Explain this code from {basename} ({line_range}):\n"
+                    f"```\n{sel['text']}\n```\n{prompt}")
+                self._captured_selection = None
+                self._update_workspace()
+                self._send_prompt(explain_prompt, display_text="Explain")
+            else:
+                self._send_selection_prompt(
+                    prompt, sel['text'],
+                    sel['line_from'], sel['col_from'],
+                    sel['line_to'], sel['col_to'],
+                    sel['file_path'],
+                    display_text=action_name.replace('_', ' ').title(),
+                )
 
     def set_project_path(self, path):
         """Set the project directory path for context."""
@@ -3796,6 +3848,47 @@ class ChatPanel(QWidget):
         'int8', 'int16', 'int32',
     )
 
+    # -- Response cleaning: strip model artifacts and LaTeX ----------------
+
+    import re as _re_cls
+    _MODEL_ARTIFACT_RE = _re_cls.compile(
+        r'<\|(?:im_start|im_end|endoftext|begin_of_sentence|end_of_sentence)\|>'
+        r'|<\uff5c[^\uff5c]*\uff5c>'          # fullwidth bar delimiters (deepseek)
+        r'|^(?:Question|Answer|Human|Assistant|User)\s*:\s*'  # role prefixes
+        r'|<\|(?:user|assistant|system)\|>',   # chat role markers
+        _re_cls.MULTILINE | _re_cls.IGNORECASE
+    )
+    _LATEX_RE = _re_cls.compile(
+        r'\\\(|\\\)'                                          # inline math \( \)
+        r'|\\\[|\\\]'                                         # display math \[ \]
+        r'|\\frac\{([^}]*)\}\{([^}]*)\}'                     # \frac{a}{b} → a/b
+        r'|\\boxed\{([^}]*)\}'                                # \boxed{x} → x
+        r'|\\text\{([^}]*)\}'                                 # \text{x} → x
+        r'|\\(?:mathbb|mathrm|textbf|textit)\{([^}]*)\}'     # math fonts → content
+        r'|\\(?:cdot|times)'                                  # operators
+        r'|\\(?:left|right|Big|big)[|()\\\[\]{}]?'            # sizing
+        r'|\$\$?'                                             # dollar-sign math
+    )
+    del _re_cls  # clean up the temporary import
+
+    def _clean_model_artifacts(self, text):
+        """Strip special tokens and role markers that leak from various LLMs."""
+        return self._MODEL_ARTIFACT_RE.sub('', text)
+
+    def _strip_latex(self, text):
+        """Convert common LaTeX formatting to plain text."""
+        def _repl(m):
+            if m.group(1) is not None and m.group(2) is not None:
+                return f"{m.group(1)}/{m.group(2)}"
+            for g in (3, 4, 5):
+                if m.group(g) is not None:
+                    return m.group(g)
+            s = m.group(0)
+            if s == '\\cdot': return '\u00b7'
+            if s == '\\times': return '\u00d7'
+            return ''
+        return self._LATEX_RE.sub(_repl, text)
+
     def _selection_is_refusal(self, text):
         """Check if text is an LLM refusal. If so, show info and return True."""
         _refusal_phrases = (
@@ -3897,6 +3990,10 @@ class ChatPanel(QWidget):
         self.generation_finished.emit()
 
     def _on_token(self, t):
+        t = self._clean_model_artifacts(t)
+        t = self._strip_latex(t)
+        if not t:
+            return
         self._current_response += t
         if self._current_ai_widget:
             cur = self._current_ai_widget.textCursor()
@@ -4006,7 +4103,8 @@ class ChatPanel(QWidget):
                 html_parts.append(html.escape(line) + "\n")
                 i += 1
                 continue
-            # Regular text — render inline `code` spans
+            # Regular text — strip LaTeX and render inline `code` spans
+            line = self._strip_latex(line)
             escaped_line = html.escape(line)
             escaped_line = re.sub(
                 r'`([^`]+)`',
@@ -4025,6 +4123,9 @@ class ChatPanel(QWidget):
         if self.thread.isRunning():
             self.thread.quit()
         if self._current_response:
+            # Final pass: strip any remaining model artifacts
+            self._current_response = self._clean_model_artifacts(
+                self._current_response).strip()
             # Selection mode: bypass <<<EDIT parser, handle replacement directly
             if self._selection_mode:
                 self._handle_selection_response(self._current_response)
@@ -7694,6 +7795,7 @@ class MainWindow(QMainWindow):
 
         self.editor = TabbedEditor()
         self.editor.file_changed.connect(self._on_editor_file_changed)
+        self.editor.ask_llm_requested.connect(self._on_ask_llm)
         v_splitter.addWidget(self.editor)
 
         # Bottom panel
@@ -8093,6 +8195,11 @@ class MainWindow(QMainWindow):
         self.editor.close_all()
         self.editor.open_all_project_files(self.project_path)
         self.chat_panel._update_context_bar()
+
+    def _on_ask_llm(self):
+        """Switch to chat view and focus input when Ask LLM is clicked in editor."""
+        self._switch_view(1)
+        self.chat_panel.input_field.setFocus()
 
     def _on_edits_applied(self):
         """Refresh file browser and context after AI creates/edits files."""
