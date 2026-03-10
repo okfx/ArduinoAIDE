@@ -469,6 +469,7 @@ def _load_config():
         "lmstudio_url": "http://localhost:1234",
         "arduino_cli_path": "arduino-cli",
         "additional_board_urls": [],
+        "context_budget": 12000,
     }
     try:
         with open(CONFIG_FILE, "r") as f:
@@ -1346,32 +1347,6 @@ class OllamaWorker(QObject):
                     break
             except json.JSONDecodeError:
                 continue
-
-
-# =============================================================================
-# Curated Models for Pull Model browser
-# =============================================================================
-
-CURATED_MODELS = [
-    {"name": "llama3.2:latest",       "size": "2.0 GB",  "desc": "Meta Llama 3.2 — fast, general purpose"},
-    {"name": "llama3.2:1b",           "size": "1.3 GB",  "desc": "Llama 3.2 1B — ultra-lightweight"},
-    {"name": "llama3.1:8b",           "size": "4.7 GB",  "desc": "Meta Llama 3.1 8B — strong all-rounder"},
-    {"name": "codellama:7b",          "size": "3.8 GB",  "desc": "Code-specialized Llama for programming"},
-    {"name": "codellama:13b",         "size": "7.4 GB",  "desc": "Larger Code Llama — better code quality"},
-    {"name": "deepseek-coder-v2:16b", "size": "8.9 GB",  "desc": "DeepSeek Coder V2 — strong coding model"},
-    {"name": "qwen2.5-coder:7b",     "size": "4.7 GB",  "desc": "Alibaba Qwen 2.5 — excellent at code"},
-    {"name": "qwen2.5-coder:1.5b",   "size": "1.0 GB",  "desc": "Qwen 2.5 Coder tiny — fast code assistant"},
-    {"name": "mistral:7b",            "size": "4.1 GB",  "desc": "Mistral 7B — efficient general model"},
-    {"name": "mixtral:8x7b",          "size": "26 GB",   "desc": "Mixtral MoE — mixture of experts"},
-    {"name": "phi3:mini",             "size": "2.3 GB",  "desc": "Microsoft Phi-3 Mini — small but capable"},
-    {"name": "phi3:medium",           "size": "7.9 GB",  "desc": "Microsoft Phi-3 Medium — balanced"},
-    {"name": "gemma2:2b",             "size": "1.6 GB",  "desc": "Google Gemma 2 2B — compact"},
-    {"name": "gemma2:9b",             "size": "5.4 GB",  "desc": "Google Gemma 2 9B — strong mid-size"},
-    {"name": "starcoder2:3b",         "size": "1.7 GB",  "desc": "StarCoder2 3B — code completion"},
-    {"name": "starcoder2:7b",         "size": "4.0 GB",  "desc": "StarCoder2 7B — better code generation"},
-    {"name": "nomic-embed-text",      "size": "274 MB",  "desc": "Nomic text embeddings model"},
-    {"name": "tinyllama:1.1b",        "size": "638 MB",  "desc": "TinyLlama — extremely lightweight"},
-]
 
 
 # =============================================================================
@@ -3228,7 +3203,8 @@ class ChatPanel(QWidget):
         self._pending_edits = []         # list[ProposedEdit]
         self._file_acceptance = {}       # {filename: True (accepted) | False (rejected)}
         self._apply_snapshot = {}        # {abs_path: original_content} for undo
-        self._working_set = WorkingSet()          # shadow context tracker (Step 2)
+        budget = _load_config().get("context_budget", 12000)
+        self._working_set = WorkingSet(budget=budget)
         self._ai_edited_files = set()             # rel_paths of files the AI has edited
         self._use_working_set_context = True      # WorkingSet is default; /debug-use-ws off for old path
         self._last_prompt_stats = None            # dict: stats from the last actual prompt sent
@@ -4658,7 +4634,8 @@ class ChatPanel(QWidget):
         # Count files
         file_count = total.count("========== FILE:")
         size_chars = len(total)
-        summary = f"Context: {file_count} files, {size_chars:,} chars"
+        budget = self._working_set.budget
+        summary = f"Context: {file_count} files, {size_chars:,} chars (budget: {budget:,} tokens)"
         if git_ctx:
             # Extract branch from git context
             for line in git_ctx.split("\n"):
@@ -7370,25 +7347,21 @@ class SerialMonitor(QWidget):
 class ModelsTab(QWidget):
     model_changed = pyqtSignal()
 
-    @property
-    def BASE(self):
-        return OLLAMA_URL
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self._setup_ui()
         QTimer.singleShot(500, self.refresh_models)
 
     def _setup_ui(self):
-        # Outer scroll area wrapping the 2×2 grid
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet(f"QScrollArea{{border:none;background:{C['bg_dark']};}}")
 
         content = QWidget()
         content.setStyleSheet(f"background:{C['bg_dark']};")
-        scroll_layout = QVBoxLayout(content)
-        scroll_layout.setContentsMargins(16, 16, 16, 16)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
 
         # ── Backend Selector Row ──────────────────────────────────────────────
         backend_row = QHBoxLayout()
@@ -7420,257 +7393,43 @@ class ModelsTab(QWidget):
         self._conn_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
         backend_row.addWidget(self._conn_status)
 
-        scroll_layout.addLayout(backend_row)
-        scroll_layout.addSpacing(8)
+        layout.addLayout(backend_row)
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(20)
-        grid.setVerticalSpacing(16)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-
-        # ── Cell (0,0): Installed Models ──────────────────────────────────────
-        cell00 = QWidget()
-        c00 = QVBoxLayout(cell00); c00.setContentsMargins(0,0,0,0); c00.setSpacing(8)
-
-        hdr00 = QHBoxLayout(); hdr00.setSpacing(6)
-        t00 = QLabel("INSTALLED MODELS"); t00.setStyleSheet(SETTINGS_STITLE)
-        hdr00.addWidget(t00); hdr00.addStretch()
+        # ── Installed Models ──────────────────────────────────────────────────
+        hdr = QHBoxLayout(); hdr.setSpacing(6)
+        t_models = QLabel("INSTALLED MODELS"); t_models.setStyleSheet(SETTINGS_STITLE)
+        hdr.addWidget(t_models); hdr.addStretch()
         refresh_btn = QPushButton("↻ Refresh"); refresh_btn.setStyleSheet(BTN_SM_GHOST)
-        refresh_btn.clicked.connect(self.refresh_models); hdr00.addWidget(refresh_btn)
-        c00.addLayout(hdr00)
+        refresh_btn.clicked.connect(self.refresh_models); hdr.addWidget(refresh_btn)
+        layout.addLayout(hdr)
 
         self.model_table = QTableWidget()
-        self.model_table.setColumnCount(4)
-        self.model_table.setHorizontalHeaderLabels(["Model", "Size", "Modified", "Status"])
+        self.model_table.setColumnCount(3)
+        self.model_table.setHorizontalHeaderLabels(["Model", "Size", "Modified"])
         self.model_table.horizontalHeader().setStyleSheet(SETTINGS_TBL_HDR)
         self.model_table.setStyleSheet(SETTINGS_TABLE)
         self.model_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.model_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.model_table.setSortingEnabled(True)
-        self.model_table.setMaximumHeight(200)
         self.model_table.verticalHeader().setVisible(False)
         mhdr = self.model_table.horizontalHeader()
         mhdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         mhdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        mhdr.resizeSection(1, 64)
+        mhdr.resizeSection(1, 80)
         mhdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        mhdr.resizeSection(2, 64)
-        mhdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        mhdr.resizeSection(3, 68)
-        self.model_table.itemClicked.connect(self._on_select)
-        c00.addWidget(self.model_table)
+        mhdr.resizeSection(2, 90)
+        layout.addWidget(self.model_table)
 
-        btn_row00 = QHBoxLayout(); btn_row00.setSpacing(6)
-        self.load_btn = QPushButton("Load"); self.load_btn.setStyleSheet(BTN_SM_PRIMARY)
-        self.load_btn.setToolTip("Load model into memory")
-        self.load_btn.clicked.connect(self._load_selected); btn_row00.addWidget(self.load_btn)
-        self.unload_btn = QPushButton("Unload"); self.unload_btn.setStyleSheet(BTN_SM_SECONDARY)
-        self.unload_btn.setToolTip("Unload from memory")
-        self.unload_btn.clicked.connect(self._unload_selected)
-        btn_row00.addWidget(self.unload_btn)
-        self._delete_btn = QPushButton("Delete"); self._delete_btn.setStyleSheet(BTN_SM_DANGER)
-        self._delete_btn.clicked.connect(self._delete); btn_row00.addWidget(self._delete_btn)
-        btn_row00.addStretch()
-        c00.addLayout(btn_row00)
+        self.status = QLabel("")
+        self.status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        layout.addWidget(self.status)
 
-        self.model_status = QLabel("")
-        self.model_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        c00.addWidget(self.model_status)
-
-        grid.addWidget(cell00, 0, 0, Qt.AlignmentFlag.AlignTop)
-
-        # ── Cell (0,1): Pull New Model ────────────────────────────────────────
-        cell01 = QWidget()
-        c01 = QVBoxLayout(cell01); c01.setContentsMargins(0,0,0,0); c01.setSpacing(8)
-
-        t01 = QLabel("PULL NEW MODEL"); t01.setStyleSheet(SETTINGS_STITLE)
-        c01.addWidget(t01)
-
-        self.pull_filter = QLineEdit()
-        self.pull_filter.setPlaceholderText("Search models…")
-        self.pull_filter.setStyleSheet(SETTINGS_INPUT)
-        self.pull_filter.textChanged.connect(self._filter_curated)
-        c01.addWidget(self.pull_filter)
-
-        self.curated_table = QTableWidget()
-        self.curated_table.setColumnCount(2)
-        self.curated_table.setHorizontalHeaderLabels(["Model", "Size"])
-        self.curated_table.horizontalHeader().setStyleSheet(SETTINGS_TBL_HDR)
-        self.curated_table.setStyleSheet(SETTINGS_TABLE)
-        self.curated_table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows)
-        self.curated_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.curated_table.setSortingEnabled(True)
-        self.curated_table.setMaximumHeight(148)
-        self.curated_table.verticalHeader().setVisible(False)
-        chdr = self.curated_table.horizontalHeader()
-        chdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        chdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        chdr.resizeSection(1, 64)
-        c01.addWidget(self.curated_table)
-
-        pull_action_row = QHBoxLayout(); pull_action_row.setSpacing(6)
-        pull_sel_btn = QPushButton("Pull Selected"); pull_sel_btn.setStyleSheet(BTN_SM_PRIMARY)
-        pull_sel_btn.clicked.connect(self._pull_curated)
-        pull_action_row.addWidget(pull_sel_btn)
-        or_lbl = QLabel("or"); or_lbl.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL}")
-        pull_action_row.addWidget(or_lbl)
-        self.custom_pull_name = QLineEdit()
-        self.custom_pull_name.setPlaceholderText("e.g. mistral:7b")
-        self.custom_pull_name.setStyleSheet(SETTINGS_INPUT)
-        self.custom_pull_name.returnPressed.connect(self._pull_custom)
-        pull_action_row.addWidget(self.custom_pull_name, stretch=1)
-        pull_any_btn = QPushButton("Pull"); pull_any_btn.setStyleSheet(BTN_SM_SECONDARY)
-        pull_any_btn.clicked.connect(self._pull_custom); pull_action_row.addWidget(pull_any_btn)
-        c01.addLayout(pull_action_row)
-
-        pull_prog_row = QHBoxLayout(); pull_prog_row.setSpacing(6)
-        self.pull_progress = QProgressBar()
-        self.pull_progress.setRange(0, 100); self.pull_progress.setTextVisible(True)
-        self.pull_progress.setStyleSheet(
-            f"QProgressBar{{background:{C['bg_input']};border:1px solid {C['border_light']};"
-            f"border-radius:3px;height:12px;{FONT_SMALL}}}"
-            f"QProgressBar::chunk{{background:{C['teal']};border-radius:2px;}}")
-        self.pull_progress.hide(); pull_prog_row.addWidget(self.pull_progress, stretch=1)
-        self._pull_cancel_btn = QPushButton("Cancel")
-        self._pull_cancel_btn.setStyleSheet(BTN_DANGER)
-        self._pull_cancel_btn.clicked.connect(self._cancel_pull)
-        self._pull_cancel_btn.hide(); pull_prog_row.addWidget(self._pull_cancel_btn)
-        c01.addLayout(pull_prog_row)
-        self._pull_cancelled = False
-
-        self.pull_status = QLabel("")
-        self.pull_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        c01.addWidget(self.pull_status)
-
-        self._cell_pull = cell01
-        grid.addWidget(cell01, 0, 1, Qt.AlignmentFlag.AlignTop)
-
-        # ── Cell (1,0): Model Details ─────────────────────────────────────────
-        cell10 = QWidget()
-        c10 = QVBoxLayout(cell10); c10.setContentsMargins(0,0,0,0); c10.setSpacing(8)
-
-        t10 = QLabel("MODEL DETAILS"); t10.setStyleSheet(SETTINGS_STITLE)
-        c10.addWidget(t10)
-
-        details_card = QFrame(); details_card.setStyleSheet(SETTINGS_CARD)
-        dcl = QVBoxLayout(details_card)
-        dcl.setContentsMargins(16, 14, 16, 14); dcl.setSpacing(4)
-
-        info_grid = QGridLayout(); info_grid.setSpacing(3); info_grid.setColumnStretch(1, 1)
-        self._detail_vals = {}
-        for i, key in enumerate(["Name", "Architecture", "Parameters",
-                                  "Max Context", "Quantization"]):
-            k_lbl = QLabel(key)
-            k_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-            v_lbl = QLabel("—"); v_lbl.setStyleSheet(f"color:{C['fg']};{FONT_BODY}")
-            info_grid.addWidget(k_lbl, i, 0); info_grid.addWidget(v_lbl, i, 1)
-            self._detail_vals[key] = v_lbl
-        dcl.addLayout(info_grid)
-
-        sep_line = QFrame(); sep_line.setFrameShape(QFrame.Shape.HLine)
-        sep_line.setStyleSheet(f"color:{C['border']};margin-top:6px;margin-bottom:6px;")
-        dcl.addWidget(sep_line)
-
-        desc_row = QHBoxLayout(); desc_row.setSpacing(6)
-        desc_lbl = QLabel("Description"); desc_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        desc_row.addWidget(desc_lbl)
-        self.desc_edit = QLineEdit()
-        self.desc_edit.setStyleSheet(SETTINGS_INPUT)
-        self.desc_edit.setPlaceholderText("Short label shown in toolbar dropdown")
-        desc_row.addWidget(self.desc_edit, stretch=1)
-        save_desc_btn = QPushButton("Save"); save_desc_btn.setStyleSheet(BTN_SM_PRIMARY)
-        save_desc_btn.clicked.connect(self._save_desc); desc_row.addWidget(save_desc_btn)
-        gen_desc_btn = QPushButton("Auto"); gen_desc_btn.setStyleSheet(BTN_SM_GHOST)
-        gen_desc_btn.clicked.connect(self._auto_gen_desc); desc_row.addWidget(gen_desc_btn)
-        dcl.addLayout(desc_row)
-
-        hint10 = QLabel("Short label shown in the toolbar dropdown")
-        hint10.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL}")
-        dcl.addWidget(hint10)
-
-        self.status = QLabel(""); self.status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        dcl.addWidget(self.status)
-
-        c10.addWidget(details_card)
-        self._cell_details = cell10
-        grid.addWidget(cell10, 1, 0, Qt.AlignmentFlag.AlignTop)
-
-        # ── Cell (1,1): Create Custom Model ───────────────────────────────────
-        cell11 = QWidget()
-        c11 = QVBoxLayout(cell11); c11.setContentsMargins(0,0,0,0); c11.setSpacing(8)
-
-        t11 = QLabel("CREATE CUSTOM MODEL"); t11.setStyleSheet(SETTINGS_STITLE)
-        c11.addWidget(t11)
-
-        create_card = QFrame(); create_card.setStyleSheet(SETTINGS_CARD)
-        ccl = QVBoxLayout(create_card)
-        ccl.setContentsMargins(16, 14, 16, 14); ccl.setSpacing(8)
-
-        r1 = QHBoxLayout(); r1.setSpacing(8)
-        r1_lbl = QLabel("Name"); r1_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        r1_lbl.setMinimumWidth(64); r1.addWidget(r1_lbl)
-        self.name_in = QLineEdit(); self.name_in.setPlaceholderText("e.g. teensy-coder-v2")
-        self.name_in.setStyleSheet(SETTINGS_INPUT); r1.addWidget(self.name_in); ccl.addLayout(r1)
-
-        r2 = QHBoxLayout(); r2.setSpacing(8)
-        r2_lbl = QLabel("Base"); r2_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        r2_lbl.setMinimumWidth(64); r2.addWidget(r2_lbl)
-        self.base_cb = QComboBox(); self.base_cb.setEditable(True)
-        self.base_cb.setStyleSheet(SETTINGS_COMBO)
-        r2.addWidget(self.base_cb, stretch=1); ccl.addLayout(r2)
-
-        r3 = QHBoxLayout(); r3.setSpacing(8)
-        r3_lbl = QLabel("Context"); r3_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        r3_lbl.setMinimumWidth(64); r3.addWidget(r3_lbl)
-        self.ctx_cb = QComboBox(); self.ctx_cb.addItems(["4096","8192","16384","32768","65536"])
-        self.ctx_cb.setCurrentText("16384"); self.ctx_cb.setEditable(True)
-        self.ctx_cb.setStyleSheet(SETTINGS_COMBO); self.ctx_cb.setFixedWidth(90)
-        r3.addWidget(self.ctx_cb)
-        temp_lbl = QLabel("Temp"); temp_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        r3.addWidget(temp_lbl)
-        self.temp_in = QLineEdit("0.7"); self.temp_in.setStyleSheet(SETTINGS_INPUT)
-        self.temp_in.setFixedWidth(52); r3.addWidget(self.temp_in)
-        r3.addStretch(); ccl.addLayout(r3)
-
-        r4 = QHBoxLayout(); r4.setSpacing(8); r4.setAlignment(Qt.AlignmentFlag.AlignTop)
-        r4_lbl = QLabel("System"); r4_lbl.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-        r4_lbl.setMinimumWidth(64); r4.addWidget(r4_lbl)
-        self.sys_in = QPlainTextEdit()
-        self.sys_in.setStyleSheet(
-            f"background:{C['bg_input']};color:{C['fg']};"
-            f"border:1px solid {C['border_light']};border-radius:6px;"
-            f"padding:6px 10px;{FONT_CODE}")
-        self.sys_in.setPlaceholderText("e.g. You are an expert embedded systems developer…")
-        self.sys_in.setMinimumHeight(54)
-        r4.addWidget(self.sys_in, stretch=1); ccl.addLayout(r4)
-
-        r5 = QHBoxLayout(); r5.addStretch()
-        prev_btn = QPushButton("Preview"); prev_btn.setStyleSheet(BTN_SM_GHOST)
-        prev_btn.clicked.connect(self._preview); r5.addWidget(prev_btn)
-        create_btn = QPushButton("Create Model"); create_btn.setStyleSheet(BTN_SM_PRIMARY)
-        create_btn.clicked.connect(self._create); r5.addWidget(create_btn)
-        ccl.addLayout(r5)
-
-        self.mf_preview = QPlainTextEdit(); self.mf_preview.setReadOnly(True)
-        self.mf_preview.setMaximumHeight(90); self.mf_preview.setPlaceholderText("Modelfile preview…")
-        self.mf_preview.hide(); ccl.addWidget(self.mf_preview)
-
-        c11.addWidget(create_card)
-        self._cell_create = cell11
-        grid.addWidget(cell11, 1, 1, Qt.AlignmentFlag.AlignTop)
-
-        scroll_layout.addLayout(grid)
-        scroll_layout.addStretch()
+        layout.addStretch()
         scroll.setWidget(content)
 
-        outer = QVBoxLayout(self); outer.setContentsMargins(0,0,0,0)
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
-
-        self._populate_curated_list()
-        self._update_backend_visibility()
 
     # -- Backend selector methods -----------------------------------------------
 
@@ -7679,7 +7438,6 @@ class ModelsTab(QWidget):
         global AI_BACKEND, OLLAMA_URL, LMSTUDIO_URL
         is_lm = idx == 1
         AI_BACKEND = "lmstudio" if is_lm else "ollama"
-        # Update URL field to show the active backend's URL
         if is_lm:
             self._backend_url.setText(LMSTUDIO_URL)
         else:
@@ -7688,7 +7446,6 @@ class ModelsTab(QWidget):
         cfg = _load_config()
         cfg["ai_backend"] = AI_BACKEND
         _save_config(cfg)
-        self._update_backend_visibility()
         self.refresh_models()
         self.model_changed.emit()
 
@@ -7728,56 +7485,8 @@ class ModelsTab(QWidget):
             self._conn_status.setText("Not reachable")
             self._conn_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
 
-    def _update_backend_visibility(self):
-        """Show/hide Ollama-only sections based on active backend."""
-        is_ollama = AI_BACKEND == "ollama"
-        self._cell_pull.setVisible(is_ollama)
-        self._cell_details.setVisible(is_ollama)
-        self._cell_create.setVisible(is_ollama)
-        self.load_btn.setVisible(is_ollama)
-        self.unload_btn.setVisible(is_ollama)
-        self._delete_btn.setVisible(is_ollama)
-
-    def _build_mf(self):
-        lines = [f"FROM {self.base_cb.currentText().strip()}"]
-        ctx = self.ctx_cb.currentText().strip()
-        if ctx: lines.append(f"PARAMETER num_ctx {ctx}")
-        t = self.temp_in.text().strip()
-        if t: lines.append(f"PARAMETER temperature {t}")
-        s = self.sys_in.toPlainText().strip()
-        if s: lines.append(f'SYSTEM """{s}"""')
-        return "\n".join(lines)
-
-    def _preview(self): self.mf_preview.setPlainText(self._build_mf())
-
-    def _create(self):
-        name = self.name_in.text().strip()
-        if not name: self.status.setText("Enter a name."); self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}"); return
-        mf = self._build_mf()
-        self.status.setText(f"Creating '{name}'..."); self.status.setStyleSheet(f"color:{C['fg_link']};{FONT_SMALL}")
-        def go():
-            try:
-                r = requests.post(f"{self.BASE}/api/create", json={"name": name, "modelfile": mf}, stream=True, timeout=300)
-                st = ""
-                for l in r.iter_lines():
-                    if l:
-                        try: st = json.loads(l).get("status","")
-                        except: pass
-                ok = "success" in st.lower()
-                QTimer.singleShot(0, lambda: self._done(name if ok else st, ok))
-            except Exception as e:
-                QTimer.singleShot(0, lambda: self._done(str(e), False))
-        threading.Thread(target=go, daemon=True).start()
-
-    def _done(self, m, ok):
-        if ok:
-            self.status.setText(f"'{m}' created!"); self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-            self.refresh_models(); self.model_changed.emit()
-        else:
-            self.status.setText(f"Error: {m}"); self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-
     def refresh_models(self):
-        self.model_table.setRowCount(0); self.base_cb.clear()
+        self.model_table.setRowCount(0)
         try:
             if AI_BACKEND == "lmstudio":
                 r = requests.get(f"{LMSTUDIO_URL}/v1/models", timeout=5)
@@ -7789,12 +7498,8 @@ class ModelsTab(QWidget):
                         self.model_table.setItem(row, 0, QTableWidgetItem(n))
                         self.model_table.setItem(row, 1, QTableWidgetItem("—"))
                         self.model_table.setItem(row, 2, QTableWidgetItem("—"))
-                        st_item = QTableWidgetItem("Loaded")
-                        st_item.setForeground(QColor(C['fg_ok']))
-                        self.model_table.setItem(row, 3, st_item)
-                        self.base_cb.addItem(n)
             else:
-                r = requests.get(f"{self.BASE}/api/tags", timeout=5)
+                r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
                 if r.status_code == 200:
                     for m in r.json().get("models", []):
                         n = m.get("name", ""); sz = m.get("size", 0)
@@ -7805,414 +7510,10 @@ class ModelsTab(QWidget):
                         self.model_table.setItem(row, 0, QTableWidgetItem(n))
                         self.model_table.setItem(row, 1, QTableWidgetItem(ss))
                         self.model_table.setItem(row, 2, QTableWidgetItem(d))
-                        st_item = QTableWidgetItem("Idle")
-                        st_item.setForeground(QColor(C['fg_dim']))
-                        self.model_table.setItem(row, 3, st_item)
-                        self.base_cb.addItem(n)
         except Exception as e:
             backend = "LM Studio" if AI_BACKEND == "lmstudio" else "Ollama"
             self.status.setText(f"{backend} error: {e}")
             self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-
-    # Shared cache path for model descriptions
-    DESC_FILE = os.path.expanduser("~/.teensy_ide_model_descs.json")
-
-    def _load_descs(self):
-        try:
-            with open(self.DESC_FILE, "r") as f: return json.load(f)
-        except: return {}
-
-    def _save_descs_dict(self, d):
-        try:
-            with open(self.DESC_FILE, "w") as f: json.dump(d, f, indent=2)
-        except: pass
-
-    def _on_select(self, item):
-        row = item.row()
-        ni = self.model_table.item(row, 0)
-        if not ni: return
-        name = ni.text(); self.name_in.setText(name)
-        descs = self._load_descs()
-        self.desc_edit.setText(descs.get(name, ""))
-        self._detail_vals["Name"].setText(name)
-        if AI_BACKEND == "lmstudio":
-            # LM Studio has no /api/show equivalent
-            self._detail_vals["Architecture"].setText("—")
-            self._detail_vals["Parameters"].setText("—")
-            self._detail_vals["Max Context"].setText("—")
-            self._detail_vals["Quantization"].setText("—")
-            self.mf_preview.setPlainText("")
-            return
-        try:
-            r = requests.post(f"{self.BASE}/api/show", json={"name": name}, timeout=10)
-            if r.status_code == 200:
-                d = r.json(); info = d.get("model_info", {})
-                arch = info.get("general.architecture", "?") if info else "?"
-                pc = info.get("general.parameter_count", "") if info else ""
-                cl = info.get(f"{arch}.context_length", "") if info else ""
-                quant = ""
-                for k, v in (info.items() if info else []):
-                    if "quantization" in k.lower(): quant = str(v); break
-                self._detail_vals["Architecture"].setText(arch)
-                self._detail_vals["Parameters"].setText(
-                    f"{int(pc)/1e9:.1f}B" if pc else "?")
-                self._detail_vals["Max Context"].setText(
-                    f"{int(cl):,} tokens" if cl else "?")
-                self._detail_vals["Quantization"].setText(quant or "?")
-                sys_prompt = d.get("system", "")
-                mf = d.get("modelfile", "")
-                if mf:
-                    self.mf_preview.setPlainText(mf)
-                    if not sys_prompt:
-                        if 'SYSTEM """' in mf:
-                            try:
-                                sys_prompt = mf[mf.index('SYSTEM """')+10:
-                                               mf.index('"""', mf.index('SYSTEM """')+10)].strip()
-                            except: pass
-                        elif 'SYSTEM "' in mf:
-                            try:
-                                start = mf.index('SYSTEM "') + 8
-                                sys_prompt = mf[start:mf.index('"', start)].strip()
-                            except: pass
-                    for ln in mf.splitlines():
-                        if ln.startswith("FROM "): self.base_cb.setCurrentText(ln[5:].strip())
-                        if "num_ctx" in ln.lower(): self.ctx_cb.setCurrentText(ln.split()[-1])
-                        if "temperature" in ln.lower(): self.temp_in.setText(ln.split()[-1])
-                if sys_prompt:
-                    self.sys_in.setPlainText(sys_prompt)
-        except Exception as e:
-            self.status.setText(f"Error: {e}")
-            self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-
-    def _save_desc(self):
-        """Save the user-edited description to the persistent cache."""
-        name = self.name_in.text().strip()
-        if not name: return
-        descs = self._load_descs()
-        descs[name] = self.desc_edit.text().strip()
-        self._save_descs_dict(descs)
-        self.status.setText("Description saved.")
-        self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-
-    def _auto_gen_desc(self):
-        """Ask the model to generate its own description, then save it."""
-        name = self.name_in.text().strip()
-        if not name:
-            return
-        self.desc_edit.setText("Generating...")
-        self.status.setText("Asking model to describe itself...")
-        self.status.setStyleSheet(f"color:{C['teal']};{FONT_SMALL}")
-        def gen():
-            desc = ""
-            try:
-                # Get technical info (Ollama only)
-                tech = ""
-                if AI_BACKEND != "lmstudio":
-                    r = requests.post(f"{self.BASE}/api/show", json={"name": name}, timeout=5)
-                    if r.status_code == 200:
-                        info = r.json().get("model_info", {})
-                        arch = info.get("general.architecture", "")
-                        pc = info.get("general.parameter_count", "")
-                        parts = []
-                        if arch: parts.append(arch)
-                        if pc:
-                            try: parts.append(f"{int(pc)/1e9:.1f}B")
-                            except: pass
-                        tech = ", ".join(parts)
-                # Ask the model itself
-                desc_prompt = [{"role": "user", "content":
-                    "In EXACTLY 6 words or fewer, describe what you specialize in. "
-                    "Reply with ONLY the description, nothing else. "
-                    "Example: 'Teensy embedded systems and audio'"}]
-                if AI_BACKEND == "lmstudio":
-                    r2 = requests.post(
-                        f"{LMSTUDIO_URL}/v1/chat/completions",
-                        json={"model": name, "messages": desc_prompt,
-                              "stream": False, "temperature": 0.3, "max_tokens": 64},
-                        timeout=60)
-                    if r2.status_code == 200:
-                        ai_desc = r2.json()["choices"][0]["message"]["content"].strip()
-                else:
-                    r2 = requests.post(
-                        f"{OLLAMA_URL}/api/chat",
-                        json={"model": name, "messages": desc_prompt,
-                              "stream": False, "options": OLLAMA_CHAT_OPTIONS},
-                        timeout=60)
-                    if r2.status_code == 200:
-                        ai_desc = r2.json().get("message", {}).get("content", "").strip()
-                    else:
-                        ai_desc = ""
-                ai_desc = ai_desc.split("\n")[0].strip().rstrip(".")
-                if ai_desc and len(ai_desc) < 60:
-                    desc = f"{ai_desc} ({tech})" if tech else ai_desc
-                if not desc:
-                    desc = tech or "LM Studio model"
-            except Exception as e:
-                desc = f"Error: {e}"
-
-            def apply():
-                self.desc_edit.setText(desc)
-                if desc and not desc.startswith("Error"):
-                    descs = self._load_descs()
-                    descs[name] = desc
-                    self._save_descs_dict(descs)
-                    self.status.setText("Description generated and saved.")
-                    self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-                else:
-                    self.status.setText(desc)
-                    self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-            QTimer.singleShot(0, apply)
-        threading.Thread(target=gen, daemon=True).start()
-
-    def _delete(self):
-        row = self.model_table.currentRow()
-        if row < 0: return
-        name = self.model_table.item(row, 0).text()
-        if QMessageBox.question(self, "Delete", f"Delete '{name}'?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-            try:
-                r = requests.delete(f"{self.BASE}/api/delete", json={"name": name}, timeout=30)
-                if r.status_code == 200:
-                    self.status.setText(f"Deleted."); self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-                    self.refresh_models(); self.model_changed.emit()
-            except Exception as e:
-                self.status.setText(str(e)); self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-
-    def _rename(self):
-        """Rename selected model via Ollama copy + delete."""
-        from PyQt6.QtWidgets import QInputDialog
-        row = self.model_table.currentRow()
-        if row < 0:
-            return
-        old_name = self.model_table.item(row, 0).text()
-        new_name, ok = QInputDialog.getText(
-            self, "Rename Model", f"New name for '{old_name}':", text=old_name)
-        if not ok or not new_name.strip() or new_name.strip() == old_name:
-            return
-        new_name = new_name.strip()
-        try:
-            r = requests.post(f"{self.BASE}/api/copy",
-                              json={"source": old_name, "destination": new_name},
-                              timeout=30)
-            if r.status_code == 200:
-                requests.delete(f"{self.BASE}/api/delete",
-                                json={"name": old_name}, timeout=30)
-                self.status.setText(f"Renamed to '{new_name}'.")
-                self.status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-                self.refresh_models()
-                self.model_changed.emit()
-            else:
-                self.status.setText(f"Rename failed: {r.text}")
-                self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-        except Exception as e:
-            self.status.setText(str(e))
-            self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-
-    def _reveal_models_folder(self):
-        """Open the Ollama models folder in Finder."""
-        import subprocess
-        folder = os.path.expanduser("~/.ollama/models")
-        if not os.path.isdir(folder):
-            folder = os.path.expanduser("~/.ollama")
-        subprocess.Popen(["open", folder])
-
-    # ---- Load / Unload Model methods ----
-
-    def _load_selected(self):
-        """Load the selected model into memory (Ollama only)."""
-        if AI_BACKEND == "lmstudio":
-            self.model_status.setText("Model loading is managed by LM Studio.")
-            self.model_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-            return
-        row = self.model_table.currentRow()
-        if row < 0:
-            self.model_status.setText("Select a model to load.")
-            self.model_status.setStyleSheet(f"color:{C['fg_warn']};{FONT_SMALL}")
-            return
-        name = self.model_table.item(row, 0).text()
-        self.load_btn.setEnabled(False)
-        self.load_btn.setText("Loading...")
-        self.model_status.setText(f"Loading {name}...")
-        self.model_status.setStyleSheet(f"color:{C['fg_link']};{FONT_SMALL}")
-
-        def do_load():
-            try:
-                requests.post(f"{self.BASE}/api/generate",
-                    json={"model": name, "prompt": " ", "keep_alive": "10m",
-                          "stream": False,
-                          "options": {"num_predict": 1}},
-                    timeout=120)
-                QTimer.singleShot(0, lambda: self._on_load_done(name, True))
-            except Exception as e:
-                QTimer.singleShot(0, lambda: self._on_load_done(name, False, str(e)))
-        threading.Thread(target=do_load, daemon=True).start()
-
-    def _on_load_done(self, name, success, error=""):
-        self.load_btn.setEnabled(True)
-        self.load_btn.setText("Load")
-        if success:
-            self.model_status.setText(f"{name} loaded into memory.")
-            self.model_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-        else:
-            self.model_status.setText(f"Failed to load {name}: {error}")
-            self.model_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-
-    def _unload_selected(self):
-        """Unload the selected model from memory (Ollama only)."""
-        if AI_BACKEND == "lmstudio":
-            self.model_status.setText("Model loading is managed by LM Studio.")
-            self.model_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
-            return
-        row = self.model_table.currentRow()
-        if row < 0:
-            self.model_status.setText("Select a model to unload.")
-            self.model_status.setStyleSheet(f"color:{C['fg_warn']};{FONT_SMALL}")
-            return
-        name = self.model_table.item(row, 0).text()
-        self.unload_btn.setEnabled(False)
-        self.unload_btn.setText("Unloading...")
-        self.model_status.setText(f"Unloading {name}...")
-        self.model_status.setStyleSheet(f"color:{C['fg_link']};{FONT_SMALL}")
-
-        def do_unload():
-            try:
-                requests.post(f"{self.BASE}/api/generate",
-                    json={"model": name, "prompt": "", "keep_alive": "0"},
-                    timeout=30)
-                QTimer.singleShot(0, lambda: self._on_unload_done(name, True))
-            except Exception as e:
-                QTimer.singleShot(0, lambda: self._on_unload_done(name, False, str(e)))
-        threading.Thread(target=do_unload, daemon=True).start()
-
-    def _on_unload_done(self, name, success, error=""):
-        self.unload_btn.setEnabled(True)
-        self.unload_btn.setText("Unload")
-        if success:
-            self.model_status.setText(f"{name} unloaded from memory.")
-            self.model_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-        else:
-            self.model_status.setText(f"Failed to unload {name}: {error}")
-            self.model_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
-
-    # ---- Pull Model methods ----
-
-    def _get_installed_names(self):
-        """Return set of installed model names."""
-        names = set()
-        for row in range(self.model_table.rowCount()):
-            item = self.model_table.item(row, 0)
-            if item:
-                names.add(item.text())
-        return names
-
-    def _populate_curated_list(self, filter_text=""):
-        self.curated_table.setRowCount(0)
-        installed = self._get_installed_names()
-        ft = filter_text.lower()
-        for m in CURATED_MODELS:
-            name, size, desc = m["name"], m["size"], m["desc"]
-            if ft and ft not in name.lower() and ft not in desc.lower():
-                continue
-            row = self.curated_table.rowCount()
-            self.curated_table.insertRow(row)
-            is_installed = name in installed
-            name_item = QTableWidgetItem(name)
-            size_item = QTableWidgetItem(size)
-            if is_installed:
-                name_item.setForeground(QColor(C["fg_dim"]))
-                size_item.setForeground(QColor(C["fg_dim"]))
-            self.curated_table.setItem(row, 0, name_item)
-            self.curated_table.setItem(row, 1, size_item)
-
-    def _filter_curated(self, text):
-        self._populate_curated_list(text)
-
-    def _pull_curated(self):
-        row = self.curated_table.currentRow()
-        if row < 0:
-            self.pull_status.setText("Select a model from the list first.")
-            self.pull_status.setStyleSheet(f"color:{C['fg_warn']};{FONT_SMALL}")
-            return
-        name_item = self.curated_table.item(row, 0)
-        if not name_item: return
-        self._pull_model(name_item.text().strip())
-
-    def _pull_custom(self):
-        name = self.custom_pull_name.text().strip()
-        if not name:
-            self.pull_status.setText("Enter a model name.")
-            self.pull_status.setStyleSheet(f"color:{C['fg_warn']};{FONT_SMALL}")
-            return
-        self._pull_model(name)
-
-    def _pull_model(self, name):
-        self.pull_status.setText(f"Pulling '{name}'...")
-        self.pull_status.setStyleSheet(f"color:{C['teal']};{FONT_SMALL}")
-        self.pull_progress.setValue(0)
-        self.pull_progress.show()
-        self._pull_cancel_btn.show()
-        self._pull_cancelled = False
-
-        def go():
-            try:
-                r = requests.post(
-                    f"{self.BASE}/api/pull",
-                    json={"name": name}, stream=True, timeout=(10, 600))
-                last_status = ""
-                for line in r.iter_lines():
-                    if self._pull_cancelled:
-                        r.close()
-                        QTimer.singleShot(0, lambda: self._on_pull_done(
-                            f"Pull of '{name}' cancelled.", False))
-                        return
-                    if line:
-                        try:
-                            chunk = json.loads(line)
-                            status = chunk.get("status", "")
-                            completed = chunk.get("completed", 0)
-                            total = chunk.get("total", 0)
-                            if total and completed:
-                                pct = int(completed / total * 100)
-                                msg = f"{status} \u2014 {pct}%"
-                            else:
-                                pct = -1  # indeterminate
-                                msg = status
-                            last_status = status
-                            QTimer.singleShot(0, lambda m=msg, p=pct: self._on_pull_progress(m, p))
-                        except json.JSONDecodeError:
-                            continue
-                ok = "success" in last_status.lower()
-                QTimer.singleShot(0, lambda: self._on_pull_done(name, ok))
-            except Exception as e:
-                QTimer.singleShot(0, lambda: self._on_pull_done(str(e), False))
-        threading.Thread(target=go, daemon=True).start()
-
-    def _cancel_pull(self):
-        """Cancel an in-progress model pull."""
-        self._pull_cancelled = True
-        self.pull_status.setText("Cancelling...")
-
-    def _on_pull_progress(self, msg, pct=-1):
-        self.pull_status.setText(msg)
-        if pct >= 0:
-            self.pull_progress.setRange(0, 100)
-            self.pull_progress.setValue(pct)
-        else:
-            # Indeterminate (e.g. "pulling manifest", "verifying sha256")
-            self.pull_progress.setRange(0, 0)
-
-    def _on_pull_done(self, name, success):
-        self.pull_progress.hide()
-        self._pull_cancel_btn.hide()
-        if success:
-            self.pull_status.setText(f"'{name}' pulled successfully!")
-            self.pull_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
-            self.refresh_models()
-            self._populate_curated_list(self.pull_filter.text())
-            self.model_changed.emit()
-        else:
-            self.pull_status.setText(f"Pull failed: {name}")
-            self.pull_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
 
 
 
@@ -9962,30 +9263,6 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.model_desc_label)
         self._update_model_desc()
 
-        # Load / Unload buttons — manage model in Ollama memory
-        tb_secondary = (f"QPushButton {{ {BTN_SM_SECONDARY} }}"
-                        f"QPushButton:hover {{ background:{C['bg_hover']}; }}")
-
-        self.load_model_btn = QPushButton("Load")
-        self.load_model_btn.setToolTip("Load model into memory")
-        self.load_model_btn.setStyleSheet(tb_primary)
-        self.load_model_btn.clicked.connect(self._load_model)
-        toolbar.addWidget(self.load_model_btn)
-
-        self.unload_model_btn = QPushButton("Unload")
-        self.unload_model_btn.setToolTip("Unload model from memory to free VRAM")
-        self.unload_model_btn.setStyleSheet(tb_secondary)
-        self.unload_model_btn.clicked.connect(self._unload_model)
-        self.unload_model_btn.setEnabled(False)
-        toolbar.addWidget(self.unload_model_btn)
-
-        self._loaded_model = None  # track which model is currently in memory
-        self.model_status_label = QLabel("No model loaded")
-        self.model_status_label.setStyleSheet(
-            f"color:{C['fg_dim']};{FONT_SMALL}"
-            f"background:transparent;border:none;margin-left:4px;")
-        toolbar.addWidget(self.model_status_label)
-
         # Spacer to push spinner to the right
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -10285,6 +9562,20 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(editor_group)
 
+        # ── AI Context Settings ──
+        ctx_group = QGroupBox("AI Context")
+        cg_layout = QFormLayout(ctx_group)
+
+        budget_spin = QSpinBox()
+        budget_spin.setRange(2000, 100000)
+        budget_spin.setSingleStep(1000)
+        budget_spin.setSuffix(" tokens")
+        budget_spin.setValue(cfg.get("context_budget", 12000))
+        budget_spin.setToolTip("Token budget for file context sent to the AI")
+        cg_layout.addRow("Context Budget:", budget_spin)
+
+        layout.addWidget(ctx_group)
+
         # ── Build Settings ──
         build_group = QGroupBox("Build")
         bg_layout = QFormLayout(build_group)
@@ -10322,6 +9613,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             cfg["editor_font_size"] = font_spin.value()
             cfg["tab_width"] = tab_spin.value()
+            cfg["context_budget"] = budget_spin.value()
             cfg["arduino_cli_path"] = arduino_cli_input.text().strip()
             urls = [u.strip() for u in board_urls_input.toPlainText().split('\n')
                     if u.strip()]
@@ -10347,6 +9639,10 @@ class MainWindow(QMainWindow):
                 ed = self.editor.tabs.widget(i)
                 if hasattr(ed, 'setTabWidth'):
                     ed.setTabWidth(tab_width)
+        # Context budget
+        budget = cfg.get("context_budget", 12000)
+        if hasattr(self, 'chat_panel') and hasattr(self.chat_panel, '_working_set'):
+            self.chat_panel._working_set.budget = budget
         # Board manager additional URLs
         urls = cfg.get("additional_board_urls", [])
         if urls:
@@ -10439,32 +9735,17 @@ class MainWindow(QMainWindow):
     def _on_model_switch(self, model_name):
         """Handle /model command — update toolbar combo and status bar."""
         global OLLAMA_MODEL
-        old_model = OLLAMA_MODEL
         OLLAMA_MODEL = model_name
         if hasattr(self, 'model_combo'):
-            # Try to find and select the model in the combo box
             idx = self.model_combo.findText(model_name)
             if idx >= 0:
                 self.model_combo.setCurrentIndex(idx)
             else:
-                # Model not in list — add it
                 self.model_combo.addItem(model_name)
                 self.model_combo.setCurrentText(model_name)
         if hasattr(self, '_status_model'):
             _bs = " (LM Studio)" if AI_BACKEND == "lmstudio" else ""
             self._status_model.setText(f"{model_name}{_bs}")
-        # Unload the previous model to free VRAM/RAM
-        if old_model and old_model != model_name:
-            if old_model == getattr(self, '_loaded_model', None):
-                self._unload_model_async(old_model)
-                self._loaded_model = None
-                if hasattr(self, 'unload_model_btn'):
-                    self.unload_model_btn.setEnabled(False)
-                if hasattr(self, 'model_status_label'):
-                    self.model_status_label.setText("No model loaded")
-                    self.model_status_label.setStyleSheet(
-                        f"color:{C['fg_dim']};{FONT_SMALL}"
-                        f"background:transparent;border:none;margin-left:4px;")
 
     def _on_editor_file_changed(self, fp):
         self.setWindowTitle(f"{WINDOW_TITLE} — {os.path.basename(fp)}")
@@ -10764,141 +10045,10 @@ class MainWindow(QMainWindow):
     def _on_model_changed(self, name):
         global OLLAMA_MODEL
         if name and name != OLLAMA_MODEL:
-            old_model = OLLAMA_MODEL
             OLLAMA_MODEL = name
             self._update_model_desc()
             if hasattr(self, '_status_model'):
                 self._status_model.setText(name)
-            # Unload the previous model to free VRAM/RAM
-            if old_model and old_model == getattr(self, '_loaded_model', None):
-                self._unload_model_async(old_model)
-                self._loaded_model = None
-                if hasattr(self, 'unload_model_btn'):
-                    self.unload_model_btn.setEnabled(False)
-                if hasattr(self, 'model_status_label'):
-                    self.model_status_label.setText("No model loaded")
-                    self.model_status_label.setStyleSheet(
-                        f"color:{C['fg_dim']};{FONT_SMALL}"
-                        f"background:transparent;border:none;margin-left:4px;")
-
-    def _unload_model_async(self, model_name):
-        """Send keep_alive=0 to Ollama to unload a model from memory."""
-        if AI_BACKEND == "lmstudio":
-            return  # LM Studio manages model loading
-        import threading
-        def do_unload():
-            try:
-                requests.post(f"{OLLAMA_URL}/api/generate",
-                    json={"model": model_name, "prompt": "", "keep_alive": "0"},
-                    timeout=10)
-            except Exception:
-                pass  # Best-effort — don't block UI on failure
-        threading.Thread(target=do_unload, daemon=True).start()
-
-    def _load_model(self):
-        """Load the selected model into memory (skip for LM Studio)."""
-        model = OLLAMA_MODEL
-        if not model:
-            return
-        if AI_BACKEND == "lmstudio":
-            # LM Studio manages loading — just update status
-            self._loaded_model = model
-            if hasattr(self, '_status_model'):
-                self._status_model.setText(f"{model} (LM Studio)")
-            return
-        # If a different model is already loaded, unload it first
-        if self._loaded_model and self._loaded_model != model:
-            self._unload_model_async(self._loaded_model)
-        self.load_model_btn.setEnabled(False)
-        self.unload_model_btn.setEnabled(False)
-        self.load_model_btn.setText("Loading...")
-        self.ai_spinner.active = True
-        self.ai_spinner.update()
-        self.model_status_label.setText(f"Loading {model}...")
-        self.model_status_label.setStyleSheet(
-            f"color:{C['fg_dim']};{FONT_SMALL}"
-            f"background:transparent;border:none;margin-left:4px;")
-        if hasattr(self, '_status_model'):
-            self._status_model.setText(f"Loading {model}...")
-
-        def do_load():
-            try:
-                requests.post(f"{OLLAMA_URL}/api/generate",
-                    json={"model": model, "prompt": " ", "keep_alive": "10m",
-                          "stream": False,
-                          "options": {"num_predict": 1}},
-                    timeout=120)
-                QTimer.singleShot(0, lambda: self._on_model_loaded(model, True))
-            except Exception as e:
-                QTimer.singleShot(0, lambda: self._on_model_loaded(model, False, str(e)))
-        threading.Thread(target=do_load, daemon=True).start()
-
-    def _on_model_loaded(self, model, success, error=""):
-        """Callback when model loading completes."""
-        self.load_model_btn.setEnabled(True)
-        self.load_model_btn.setText("Load")
-        self.ai_spinner.active = False
-        self.ai_spinner.update()
-        if success:
-            self._loaded_model = model
-            self.unload_model_btn.setEnabled(True)
-            self.model_status_label.setText(f"{model} loaded")
-            self.model_status_label.setStyleSheet(
-                f"color:{C['fg_ok']};{FONT_SMALL}"
-                f"background:transparent;border:none;margin-left:4px;")
-            if hasattr(self, '_status_model'):
-                self._status_model.setText(f"{model} (loaded)")
-        else:
-            self.unload_model_btn.setEnabled(False)
-            self.model_status_label.setText(f"Load failed")
-            self.model_status_label.setStyleSheet(
-                f"color:{C['fg_err']};{FONT_SMALL}"
-                f"background:transparent;border:none;margin-left:4px;")
-            if hasattr(self, '_status_model'):
-                self._status_model.setText(f"{model} (failed)")
-
-    def _unload_model(self):
-        """Unload the currently loaded model from memory (skip for LM Studio)."""
-        if AI_BACKEND == "lmstudio":
-            return
-        if not self._loaded_model:
-            return
-        model = self._loaded_model
-        self.unload_model_btn.setEnabled(False)
-        self.model_status_label.setText(f"Unloading {model}...")
-        self.model_status_label.setStyleSheet(
-            f"color:{C['fg_dim']};{FONT_SMALL}"
-            f"background:transparent;border:none;margin-left:4px;")
-        if hasattr(self, '_status_model'):
-            self._status_model.setText(f"Unloading {model}...")
-
-        def do_unload():
-            try:
-                requests.post(f"{OLLAMA_URL}/api/generate",
-                    json={"model": model, "prompt": "", "keep_alive": "0"},
-                    timeout=10)
-                QTimer.singleShot(0, lambda: self._on_model_unloaded(model, True))
-            except Exception:
-                QTimer.singleShot(0, lambda: self._on_model_unloaded(model, False))
-        threading.Thread(target=do_unload, daemon=True).start()
-
-    def _on_model_unloaded(self, model, success):
-        """Callback when model unloading completes."""
-        if success:
-            self._loaded_model = None
-            self.unload_model_btn.setEnabled(False)
-            self.model_status_label.setText("No model loaded")
-            self.model_status_label.setStyleSheet(
-                f"color:{C['fg_dim']};{FONT_SMALL}"
-                f"background:transparent;border:none;margin-left:4px;")
-            if hasattr(self, '_status_model'):
-                self._status_model.setText(OLLAMA_MODEL)
-        else:
-            self.unload_model_btn.setEnabled(True)
-            self.model_status_label.setText(f"Unload failed")
-            self.model_status_label.setStyleSheet(
-                f"color:{C['fg_err']};{FONT_SMALL}"
-                f"background:transparent;border:none;margin-left:4px;")
 
     def _send_errors_to_ai(self):
         if self._compiler_errors:
