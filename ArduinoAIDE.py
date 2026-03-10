@@ -446,6 +446,8 @@ def _make_panel_header(title_text=""):
 
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "teensy-coder"
+AI_BACKEND = "ollama"        # "ollama" or "lmstudio"
+LMSTUDIO_URL = "http://localhost:1234"
 DEFAULT_FQBN = "teensy:avr:teensy40"
 
 # Unified application config file
@@ -463,6 +465,8 @@ def _load_config():
         "editor_font_size": 13,
         "tab_width": 2,
         "ollama_url": "http://localhost:11434",
+        "ai_backend": "ollama",
+        "lmstudio_url": "http://localhost:1234",
         "arduino_cli_path": "arduino-cli",
         "additional_board_urls": [],
     }
@@ -1257,34 +1261,74 @@ class OllamaWorker(QObject):
     def run(self):
         self._stop = False
         try:
-            resp = requests.post(f"{OLLAMA_URL}/api/chat",
-                json={"model": OLLAMA_MODEL, "messages": self.messages,
-                      "stream": True,
-                      "options": OLLAMA_CHAT_OPTIONS,
-                      "stop": OLLAMA_STOP_SEQUENCES},
-                stream=True, timeout=(5, 120))
-            resp.raise_for_status()
-            for line in resp.iter_lines():
-                if self._stop:
-                    resp.close()
-                    break
-                if line:
-                    try:
-                        chunk = json.loads(line)
-                        t = chunk.get("message", {}).get("content", "")
-                        if t: self.token_received.emit(t)
-                        if chunk.get("done"): break
-                    except json.JSONDecodeError:
-                        continue
+            if AI_BACKEND == "lmstudio":
+                self._run_openai()
+            else:
+                self._run_ollama()
         except requests.exceptions.ConnectionError:
             if not self._stop:
-                self.error_occurred.emit("Cannot connect to Ollama. Is 'ollama serve' running?")
+                backend_name = "LM Studio" if AI_BACKEND == "lmstudio" else "Ollama"
+                self.error_occurred.emit(
+                    f"Cannot connect to {backend_name}. Is it running?")
         except Exception as e:
             if not self._stop:
                 self.error_occurred.emit(str(e))
         finally:
             if not self._stop:
                 self.response_complete.emit()
+
+    def _run_ollama(self):
+        resp = requests.post(f"{OLLAMA_URL}/api/chat",
+            json={"model": OLLAMA_MODEL, "messages": self.messages,
+                  "stream": True,
+                  "options": OLLAMA_CHAT_OPTIONS,
+                  "stop": OLLAMA_STOP_SEQUENCES},
+            stream=True, timeout=(5, 120))
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if self._stop:
+                resp.close()
+                break
+            if line:
+                try:
+                    chunk = json.loads(line)
+                    t = chunk.get("message", {}).get("content", "")
+                    if t: self.token_received.emit(t)
+                    if chunk.get("done"): break
+                except json.JSONDecodeError:
+                    continue
+
+    def _run_openai(self):
+        resp = requests.post(f"{LMSTUDIO_URL}/v1/chat/completions",
+            json={"model": OLLAMA_MODEL, "messages": self.messages,
+                  "stream": True,
+                  "temperature": OLLAMA_CHAT_OPTIONS.get("temperature", 0.3),
+                  "top_p": OLLAMA_CHAT_OPTIONS.get("top_p", 0.8),
+                  "max_tokens": OLLAMA_CHAT_OPTIONS.get("num_predict", 4096),
+                  "stop": OLLAMA_STOP_SEQUENCES},
+            headers={"Content-Type": "application/json"},
+            stream=True, timeout=(5, 120))
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if self._stop:
+                resp.close()
+                break
+            if not line:
+                continue
+            text = line.decode("utf-8", errors="replace")
+            if text.startswith("data: "):
+                text = text[6:]
+            if text.strip() == "[DONE]":
+                break
+            try:
+                chunk = json.loads(text)
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                t = delta.get("content", "")
+                if t: self.token_received.emit(t)
+                if chunk.get("choices", [{}])[0].get("finish_reason"):
+                    break
+            except json.JSONDecodeError:
+                continue
 
 
 # =============================================================================
@@ -4436,14 +4480,25 @@ class ChatPanel(QWidget):
 
             def run(self_w):
                 try:
-                    resp = requests.post(
-                        f"{OLLAMA_URL}/api/generate",
-                        json={"model": OLLAMA_MODEL, "prompt": summary_prompt,
-                              "stream": False},
-                        timeout=(5, 60))
-                    resp.raise_for_status()
-                    data = resp.json()
-                    self_w.finished.emit(data.get("response", "").strip())
+                    if AI_BACKEND == "lmstudio":
+                        resp = requests.post(
+                            f"{LMSTUDIO_URL}/v1/chat/completions",
+                            json={"model": OLLAMA_MODEL,
+                                  "messages": [{"role": "user", "content": summary_prompt}],
+                                  "stream": False,
+                                  "temperature": 0.3, "max_tokens": 2048},
+                            timeout=60)
+                        resp.raise_for_status()
+                        summary = resp.json()["choices"][0]["message"]["content"].strip()
+                    else:
+                        resp = requests.post(
+                            f"{OLLAMA_URL}/api/generate",
+                            json={"model": OLLAMA_MODEL, "prompt": summary_prompt,
+                                  "stream": False},
+                            timeout=(5, 60))
+                        resp.raise_for_status()
+                        summary = resp.json().get("response", "").strip()
+                    self_w.finished.emit(summary)
                 except Exception as e:
                     self_w.error.emit(str(e))
 
@@ -7604,23 +7659,39 @@ class ModelsTab(QWidget):
     def refresh_models(self):
         self.model_table.setRowCount(0); self.base_cb.clear()
         try:
-            r = requests.get(f"{self.BASE}/api/tags", timeout=5)
-            if r.status_code == 200:
-                for m in r.json().get("models", []):
-                    n = m.get("name", ""); sz = m.get("size", 0)
-                    ss = f"{sz/(1024**3):.1f} GB" if sz > 1024**3 else f"{sz/(1024**2):.0f} MB"
-                    d = m.get("modified_at", "")[:10]
-                    row = self.model_table.rowCount()
-                    self.model_table.insertRow(row)
-                    self.model_table.setItem(row, 0, QTableWidgetItem(n))
-                    self.model_table.setItem(row, 1, QTableWidgetItem(ss))
-                    self.model_table.setItem(row, 2, QTableWidgetItem(d))
-                    st_item = QTableWidgetItem("Idle")
-                    st_item.setForeground(QColor(C['fg_dim']))
-                    self.model_table.setItem(row, 3, st_item)
-                    self.base_cb.addItem(n)
+            if AI_BACKEND == "lmstudio":
+                r = requests.get(f"{LMSTUDIO_URL}/v1/models", timeout=5)
+                if r.status_code == 200:
+                    for m in r.json().get("data", []):
+                        n = m.get("id", "")
+                        row = self.model_table.rowCount()
+                        self.model_table.insertRow(row)
+                        self.model_table.setItem(row, 0, QTableWidgetItem(n))
+                        self.model_table.setItem(row, 1, QTableWidgetItem("—"))
+                        self.model_table.setItem(row, 2, QTableWidgetItem("—"))
+                        st_item = QTableWidgetItem("Loaded")
+                        st_item.setForeground(QColor(C['fg_ok']))
+                        self.model_table.setItem(row, 3, st_item)
+                        self.base_cb.addItem(n)
+            else:
+                r = requests.get(f"{self.BASE}/api/tags", timeout=5)
+                if r.status_code == 200:
+                    for m in r.json().get("models", []):
+                        n = m.get("name", ""); sz = m.get("size", 0)
+                        ss = f"{sz/(1024**3):.1f} GB" if sz > 1024**3 else f"{sz/(1024**2):.0f} MB"
+                        d = m.get("modified_at", "")[:10]
+                        row = self.model_table.rowCount()
+                        self.model_table.insertRow(row)
+                        self.model_table.setItem(row, 0, QTableWidgetItem(n))
+                        self.model_table.setItem(row, 1, QTableWidgetItem(ss))
+                        self.model_table.setItem(row, 2, QTableWidgetItem(d))
+                        st_item = QTableWidgetItem("Idle")
+                        st_item.setForeground(QColor(C['fg_dim']))
+                        self.model_table.setItem(row, 3, st_item)
+                        self.base_cb.addItem(n)
         except Exception as e:
-            self.status.setText(f"Ollama error: {e}")
+            backend = "LM Studio" if AI_BACKEND == "lmstudio" else "Ollama"
+            self.status.setText(f"{backend} error: {e}")
             self.status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
 
     # Shared cache path for model descriptions
@@ -7643,6 +7714,15 @@ class ModelsTab(QWidget):
         name = ni.text(); self.name_in.setText(name)
         descs = self._load_descs()
         self.desc_edit.setText(descs.get(name, ""))
+        self._detail_vals["Name"].setText(name)
+        if AI_BACKEND == "lmstudio":
+            # LM Studio has no /api/show equivalent
+            self._detail_vals["Architecture"].setText("—")
+            self._detail_vals["Parameters"].setText("—")
+            self._detail_vals["Max Context"].setText("—")
+            self._detail_vals["Quantization"].setText("—")
+            self.mf_preview.setPlainText("")
+            return
         try:
             r = requests.post(f"{self.BASE}/api/show", json={"name": name}, timeout=10)
             if r.status_code == 200:
@@ -7653,7 +7733,6 @@ class ModelsTab(QWidget):
                 quant = ""
                 for k, v in (info.items() if info else []):
                     if "quantization" in k.lower(): quant = str(v); break
-                self._detail_vals["Name"].setText(name)
                 self._detail_vals["Architecture"].setText(arch)
                 self._detail_vals["Parameters"].setText(
                     f"{int(pc)/1e9:.1f}B" if pc else "?")
@@ -7706,38 +7785,48 @@ class ModelsTab(QWidget):
         def gen():
             desc = ""
             try:
-                # Get technical info
-                r = requests.post(f"{self.BASE}/api/show", json={"name": name}, timeout=5)
+                # Get technical info (Ollama only)
                 tech = ""
-                if r.status_code == 200:
-                    info = r.json().get("model_info", {})
-                    arch = info.get("general.architecture", "")
-                    pc = info.get("general.parameter_count", "")
-                    parts = []
-                    if arch: parts.append(arch)
-                    if pc:
-                        try: parts.append(f"{int(pc)/1e9:.1f}B")
-                        except: pass
-                    tech = ", ".join(parts)
+                if AI_BACKEND != "lmstudio":
+                    r = requests.post(f"{self.BASE}/api/show", json={"name": name}, timeout=5)
+                    if r.status_code == 200:
+                        info = r.json().get("model_info", {})
+                        arch = info.get("general.architecture", "")
+                        pc = info.get("general.parameter_count", "")
+                        parts = []
+                        if arch: parts.append(arch)
+                        if pc:
+                            try: parts.append(f"{int(pc)/1e9:.1f}B")
+                            except: pass
+                        tech = ", ".join(parts)
                 # Ask the model itself
-                r2 = requests.post(
-                    f"{OLLAMA_URL}/api/chat",
-                    json={
-                        "model": name,
-                        "messages": [{"role": "user", "content":
-                            "In EXACTLY 6 words or fewer, describe what you specialize in. "
-                            "Reply with ONLY the description, nothing else. "
-                            "Example: 'Teensy embedded systems and audio'"}],
-                        "stream": False,
-                        "options": OLLAMA_CHAT_OPTIONS,
-                    }, timeout=60)
-                if r2.status_code == 200:
-                    ai_desc = r2.json().get("message", {}).get("content", "").strip()
-                    ai_desc = ai_desc.split("\n")[0].strip().rstrip(".")
-                    if ai_desc and len(ai_desc) < 60:
-                        desc = f"{ai_desc} ({tech})" if tech else ai_desc
+                desc_prompt = [{"role": "user", "content":
+                    "In EXACTLY 6 words or fewer, describe what you specialize in. "
+                    "Reply with ONLY the description, nothing else. "
+                    "Example: 'Teensy embedded systems and audio'"}]
+                if AI_BACKEND == "lmstudio":
+                    r2 = requests.post(
+                        f"{LMSTUDIO_URL}/v1/chat/completions",
+                        json={"model": name, "messages": desc_prompt,
+                              "stream": False, "temperature": 0.3, "max_tokens": 64},
+                        timeout=60)
+                    if r2.status_code == 200:
+                        ai_desc = r2.json()["choices"][0]["message"]["content"].strip()
+                else:
+                    r2 = requests.post(
+                        f"{OLLAMA_URL}/api/chat",
+                        json={"model": name, "messages": desc_prompt,
+                              "stream": False, "options": OLLAMA_CHAT_OPTIONS},
+                        timeout=60)
+                    if r2.status_code == 200:
+                        ai_desc = r2.json().get("message", {}).get("content", "").strip()
+                    else:
+                        ai_desc = ""
+                ai_desc = ai_desc.split("\n")[0].strip().rstrip(".")
+                if ai_desc and len(ai_desc) < 60:
+                    desc = f"{ai_desc} ({tech})" if tech else ai_desc
                 if not desc:
-                    desc = tech
+                    desc = tech or "LM Studio model"
             except Exception as e:
                 desc = f"Error: {e}"
 
@@ -7810,7 +7899,11 @@ class ModelsTab(QWidget):
     # ---- Load / Unload Model methods ----
 
     def _load_selected(self):
-        """Load the selected model into Ollama memory."""
+        """Load the selected model into memory (Ollama only)."""
+        if AI_BACKEND == "lmstudio":
+            self.model_status.setText("Model loading is managed by LM Studio.")
+            self.model_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+            return
         row = self.model_table.currentRow()
         if row < 0:
             self.model_status.setText("Select a model to load.")
@@ -7845,7 +7938,11 @@ class ModelsTab(QWidget):
             self.model_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
 
     def _unload_selected(self):
-        """Unload the selected model from Ollama memory."""
+        """Unload the selected model from memory (Ollama only)."""
+        if AI_BACKEND == "lmstudio":
+            self.model_status.setText("Model loading is managed by LM Studio.")
+            self.model_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+            return
         row = self.model_table.currentRow()
         if row < 0:
             self.model_status.setText("Select a model to unload.")
@@ -9617,8 +9714,11 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._status_board)
         self._update_status_board()
         # Right: model name + cursor position
-        self._status_model = QLabel(OLLAMA_MODEL)
+        _backend_suffix = " (LM Studio)" if AI_BACKEND == "lmstudio" else ""
+        self._status_model = QLabel(f"{OLLAMA_MODEL}{_backend_suffix}")
         self._status_model.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL} padding: 0 8px;")
+        self._status_model.setToolTip(
+            f"Backend: {'LM Studio' if AI_BACKEND == 'lmstudio' else 'Ollama'}")
         sb.addPermanentWidget(self._status_model)
         self._status_cursor = QLabel("Ln 1, Col 1")
         self._status_cursor.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL} padding: 0 8px;")
@@ -9823,8 +9923,10 @@ class MainWindow(QMainWindow):
         threading.Thread(target=generate, daemon=True).start()
 
     def _generate_model_desc(self, name):
-        """Build a short description from Ollama API metadata, or ask the model itself."""
+        """Build a short description from API metadata, or ask the model itself."""
         try:
+            if AI_BACKEND == "lmstudio":
+                return "LM Studio model"
             r = requests.post(
                 f"{OLLAMA_URL}/api/show",
                 json={"name": name}, timeout=5)
@@ -10061,13 +10163,34 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(editor_group)
 
-        # ── AI / Ollama Settings ──
-        ai_group = QGroupBox("AI (Ollama)")
+        # ── AI Backend Settings ──
+        ai_group = QGroupBox("AI Backend")
         ag_layout = QFormLayout(ai_group)
+
+        backend_combo = QComboBox()
+        backend_combo.addItems(["Ollama", "LM Studio (OpenAI-compatible)"])
+        cur_backend = cfg.get("ai_backend", "ollama")
+        backend_combo.setCurrentIndex(1 if cur_backend == "lmstudio" else 0)
+        ag_layout.addRow("Backend:", backend_combo)
 
         ollama_url_input = QLineEdit()
         ollama_url_input.setText(cfg.get("ollama_url", "http://localhost:11434"))
-        ag_layout.addRow("Ollama URL:", ollama_url_input)
+        ollama_url_label = QLabel("Ollama URL:")
+        ag_layout.addRow(ollama_url_label, ollama_url_input)
+
+        lmstudio_url_input = QLineEdit()
+        lmstudio_url_input.setText(cfg.get("lmstudio_url", "http://localhost:1234"))
+        lmstudio_url_label = QLabel("LM Studio URL:")
+        ag_layout.addRow(lmstudio_url_label, lmstudio_url_input)
+
+        def _on_backend_changed(idx):
+            is_lm = idx == 1
+            ollama_url_input.setVisible(not is_lm)
+            ollama_url_label.setVisible(not is_lm)
+            lmstudio_url_input.setVisible(is_lm)
+            lmstudio_url_label.setVisible(is_lm)
+        backend_combo.currentIndexChanged.connect(_on_backend_changed)
+        _on_backend_changed(backend_combo.currentIndex())
 
         layout.addWidget(ai_group)
 
@@ -10108,7 +10231,9 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             cfg["editor_font_size"] = font_spin.value()
             cfg["tab_width"] = tab_spin.value()
+            cfg["ai_backend"] = "lmstudio" if backend_combo.currentIndex() == 1 else "ollama"
             cfg["ollama_url"] = ollama_url_input.text().strip()
+            cfg["lmstudio_url"] = lmstudio_url_input.text().strip()
             cfg["arduino_cli_path"] = arduino_cli_input.text().strip()
             urls = [u.strip() for u in board_urls_input.toPlainText().split('\n')
                     if u.strip()]
@@ -10118,7 +10243,7 @@ class MainWindow(QMainWindow):
 
     def _apply_preferences(self, cfg):
         """Apply preferences to the running app."""
-        global OLLAMA_URL
+        global OLLAMA_URL, AI_BACKEND, LMSTUDIO_URL
         # Editor font size
         font_size = cfg.get("editor_font_size", 13)
         if hasattr(self, 'editor') and hasattr(self.editor, 'tabs'):
@@ -10134,9 +10259,18 @@ class MainWindow(QMainWindow):
                 ed = self.editor.tabs.widget(i)
                 if hasattr(ed, 'setTabWidth'):
                     ed.setTabWidth(tab_width)
-        # Ollama URL — update global
+        # AI backend globals
+        AI_BACKEND = cfg.get("ai_backend", "ollama")
         new_url = cfg.get("ollama_url", "http://localhost:11434").rstrip("/")
         OLLAMA_URL = new_url
+        LMSTUDIO_URL = cfg.get("lmstudio_url", "http://localhost:1234").rstrip("/")
+        # Refresh model list and status bar for new backend
+        if hasattr(self, '_status_model'):
+            self._refresh_models()
+            backend_label = " (LM Studio)" if AI_BACKEND == "lmstudio" else ""
+            self._status_model.setText(f"{OLLAMA_MODEL}{backend_label}")
+            self._status_model.setToolTip(
+                f"Backend: {'LM Studio' if AI_BACKEND == 'lmstudio' else 'Ollama'}")
         # Board manager additional URLs
         urls = cfg.get("additional_board_urls", [])
         if urls:
@@ -10241,7 +10375,8 @@ class MainWindow(QMainWindow):
                 self.model_combo.addItem(model_name)
                 self.model_combo.setCurrentText(model_name)
         if hasattr(self, '_status_model'):
-            self._status_model.setText(model_name)
+            _bs = " (LM Studio)" if AI_BACKEND == "lmstudio" else ""
+            self._status_model.setText(f"{model_name}{_bs}")
         # Unload the previous model to free VRAM/RAM
         if old_model and old_model != model_name:
             if old_model == getattr(self, '_loaded_model', None):
@@ -10514,16 +10649,23 @@ class MainWindow(QMainWindow):
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
         try:
-            r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
-            if r.status_code == 200:
-                for m in r.json().get("models",[]):
-                    n = m.get("name","")
-                    if n: self.model_combo.addItem(n)
-                idx = self.model_combo.findText(OLLAMA_MODEL)
-                if idx >= 0:
-                    self.model_combo.setCurrentIndex(idx)
-                elif self.model_combo.count() > 0:
-                    self.model_combo.setCurrentIndex(0)
+            if AI_BACKEND == "lmstudio":
+                r = requests.get(f"{LMSTUDIO_URL}/v1/models", timeout=5)
+                if r.status_code == 200:
+                    for m in r.json().get("data", []):
+                        n = m.get("id", "")
+                        if n: self.model_combo.addItem(n)
+            else:
+                r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+                if r.status_code == 200:
+                    for m in r.json().get("models", []):
+                        n = m.get("name", "")
+                        if n: self.model_combo.addItem(n)
+            idx = self.model_combo.findText(OLLAMA_MODEL)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            elif self.model_combo.count() > 0:
+                self.model_combo.setCurrentIndex(0)
         except:
             self.model_combo.addItem(OLLAMA_MODEL)
         self.model_combo.blockSignals(False)
@@ -10559,6 +10701,8 @@ class MainWindow(QMainWindow):
 
     def _unload_model_async(self, model_name):
         """Send keep_alive=0 to Ollama to unload a model from memory."""
+        if AI_BACKEND == "lmstudio":
+            return  # LM Studio manages model loading
         import threading
         def do_unload():
             try:
@@ -10570,9 +10714,15 @@ class MainWindow(QMainWindow):
         threading.Thread(target=do_unload, daemon=True).start()
 
     def _load_model(self):
-        """Load the selected model into Ollama memory."""
+        """Load the selected model into memory (skip for LM Studio)."""
         model = OLLAMA_MODEL
         if not model:
+            return
+        if AI_BACKEND == "lmstudio":
+            # LM Studio manages loading — just update status
+            self._loaded_model = model
+            if hasattr(self, '_status_model'):
+                self._status_model.setText(f"{model} (LM Studio)")
             return
         # If a different model is already loaded, unload it first
         if self._loaded_model and self._loaded_model != model:
@@ -10626,7 +10776,9 @@ class MainWindow(QMainWindow):
                 self._status_model.setText(f"{model} (failed)")
 
     def _unload_model(self):
-        """Unload the currently loaded model from Ollama memory."""
+        """Unload the currently loaded model from memory (skip for LM Studio)."""
+        if AI_BACKEND == "lmstudio":
+            return
         if not self._loaded_model:
             return
         model = self._loaded_model
@@ -10840,8 +10992,16 @@ class MainWindow(QMainWindow):
 # Entry Point
 # =============================================================================
 
-def _ensure_ollama():
-    """Start Ollama if it isn't already running."""
+def _ensure_backend():
+    """Check backend connectivity; start Ollama if needed."""
+    if AI_BACKEND == "lmstudio":
+        # Just verify LM Studio is reachable — don't try to launch it
+        try:
+            requests.get(f"{LMSTUDIO_URL}/v1/models", timeout=2)
+        except Exception:
+            pass  # Non-fatal — user may start LM Studio later
+        return
+    # Ollama path
     try:
         requests.get(f"{OLLAMA_URL}/api/tags", timeout=2)
         return  # already running
@@ -10896,11 +11056,13 @@ def main():
     # Load persisted configs
     config = _load_config()
     # Set globals from config before window creation
-    global OLLAMA_MODEL, OLLAMA_URL
+    global OLLAMA_MODEL, OLLAMA_URL, AI_BACKEND, LMSTUDIO_URL
     OLLAMA_MODEL = config.get("ollama_model", "teensy-coder")
     OLLAMA_URL = config.get("ollama_url", "http://localhost:11434").rstrip("/")
-    # Ensure Ollama is running (uses OLLAMA_URL)
-    _ensure_ollama()
+    AI_BACKEND = config.get("ai_backend", "ollama")
+    LMSTUDIO_URL = config.get("lmstudio_url", "http://localhost:1234").rstrip("/")
+    # Ensure AI backend is running
+    _ensure_backend()
     # CLI arg takes precedence over saved project path
     project_path = None
     if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
