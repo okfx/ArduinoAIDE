@@ -2436,10 +2436,79 @@ class ChatPanel(QWidget):
         return "\n".join(lines)
 
     def _resolve_file_path(self, filename):
-        """Resolve a filename from AI output to an absolute path."""
+        """Resolve a filename from AI output to an absolute path.
+        Uses a multi-strategy approach:
+          a) Exact match (original logic)
+          b) Case-insensitive exact match against project files
+          c) Case-insensitive substring match against WorkingSet context files
+          d) Extension-based fallback for single-file-in-context scenarios
+        """
         if os.path.isabs(filename):
             return filename
         proj = getattr(self, '_project_path', None) or ""
+
+        # --- (a) Exact match: file exists at proj/filename ---
+        if proj:
+            exact = os.path.join(proj, filename)
+            if os.path.isfile(exact):
+                return exact
+
+        # --- (b) Case-insensitive exact basename match against open tabs + project ---
+        target_lower = os.path.basename(filename).lower()
+        # Check open editor tabs
+        if self._editor_ref:
+            tab_matches = []
+            for fp in self._editor_ref.get_all_files():
+                if os.path.basename(fp).lower() == target_lower:
+                    tab_matches.append(fp)
+            if len(tab_matches) == 1:
+                print(f"[resolve] case-insensitive tab match: {filename!r} → {tab_matches[0]!r}")
+                return tab_matches[0]
+
+        # Check project files on disk
+        if proj:
+            disk_matches = []
+            for root, dirs, files in os.walk(proj):
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in PROJECT_SKIP_DIRS]
+                for f in files:
+                    if f.lower() == target_lower:
+                        disk_matches.append(os.path.join(root, f))
+            if len(disk_matches) == 1:
+                print(f"[resolve] case-insensitive disk match: {filename!r} → {disk_matches[0]!r}")
+                return disk_matches[0]
+
+        # --- (c) Substring match against WorkingSet context files ---
+        target_stem = os.path.splitext(target_lower)[0]  # e.g. "drumsynth"
+        target_ext = os.path.splitext(target_lower)[1]    # e.g. ".ino"
+        context_files = []  # list of (abs_path, basename)
+        if hasattr(self, '_working_set') and self._working_set.entries:
+            for entry in self._working_set.entries.values():
+                context_files.append((entry.filepath, os.path.basename(entry.filepath)))
+
+        if target_stem and context_files:
+            substr_matches = []
+            for abs_path, bname in context_files:
+                bname_stem = os.path.splitext(bname)[0].lower()
+                bname_ext = os.path.splitext(bname)[1].lower()
+                # Extension must match if both have one
+                if target_ext and bname_ext and target_ext != bname_ext:
+                    continue
+                # Check if LLM's stem is a substring of the context file's stem
+                if target_stem in bname_stem:
+                    substr_matches.append(abs_path)
+            if len(substr_matches) == 1:
+                print(f"[resolve] context substring match: {filename!r} → {substr_matches[0]!r}")
+                return substr_matches[0]
+
+        # --- (d) Extension fallback: single context file with same extension ---
+        if target_ext and context_files:
+            ext_matches = [fp for fp, bn in context_files
+                           if os.path.splitext(bn)[1].lower() == target_ext]
+            if len(ext_matches) == 1:
+                print(f"[resolve] single-extension fallback: {filename!r} → {ext_matches[0]!r}")
+                return ext_matches[0]
+
+        # --- Fallback: construct path (may not exist) ---
         if proj:
             return os.path.join(proj, filename)
         return os.path.abspath(filename)
