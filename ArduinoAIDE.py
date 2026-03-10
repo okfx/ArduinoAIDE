@@ -3609,6 +3609,50 @@ class ChatPanel(QWidget):
         "No explanation, no alternatives, no commentary. If the user asks "
         "to 'explain', give a brief explanation (2-3 sentences max) — "
         "not a tutorial.\n"
+        "- Wrap your replacement in <<<REPLACEMENT>>> and >>>REPLACEMENT>>> "
+        "delimiters, like this:\n"
+        "<<<REPLACEMENT>>>\n"
+        "// your replacement code here\n"
+        ">>>REPLACEMENT>>>\n"
+        "- If your entire response IS the replacement (no explanation), "
+        "the delimiters are optional.\n"
+        "\nEXAMPLES:\n\n"
+        "Example 1:\n"
+        "User selected: // This is the old comment\n"
+        "User request: replace this with hello world\n"
+        "Your response:\n"
+        "<<<REPLACEMENT>>>\n"
+        "// hello world\n"
+        ">>>REPLACEMENT>>>\n\n"
+        "Example 2:\n"
+        "User selected: int delay_ms = 100;\n"
+        "User request: change the delay to 250\n"
+        "Your response:\n"
+        "<<<REPLACEMENT>>>\n"
+        "int delay_ms = 250;\n"
+        ">>>REPLACEMENT>>>\n\n"
+        "Example 3:\n"
+        "User selected:\n"
+        "void setup() {\n"
+        "  Serial.begin(9600);\n"
+        "}\n"
+        "User request: add a pin mode setup for pin 13\n"
+        "Your response:\n"
+        "<<<REPLACEMENT>>>\n"
+        "void setup() {\n"
+        "  Serial.begin(9600);\n"
+        "  pinMode(13, OUTPUT);\n"
+        "}\n"
+        ">>>REPLACEMENT>>>\n\n"
+        "Example 4:\n"
+        "User selected: // FIRMWARE_VERSION auto-generated from compile date\n"
+        "User request: replace this with wowser\n"
+        "Your response:\n"
+        "<<<REPLACEMENT>>>\n"
+        "// wowser\n"
+        ">>>REPLACEMENT>>>\n\n"
+        "Notice: every response is ONLY the replacement code. "
+        "No explanation. No markdown fences. No preamble.\n"
     )
 
     def _send_selection_prompt(self, user_text, selected_text,
@@ -3709,19 +3753,47 @@ class ChatPanel(QWidget):
 
     def _handle_selection_response(self, response_text):
         """Process the LLM response in selection mode.
-        Strip code fences, detect explanations, or create selection edit."""
+        Uses multi-strategy extraction to find the replacement text."""
+        import re as _re
         text = response_text.strip()
-
-        # Strip markdown code fences if LLM wrapped its response
-        if text.startswith('```'):
-            first_nl = text.find('\n')
-            if first_nl != -1:
-                text = text[first_nl + 1:]
-        if text.endswith('```'):
-            text = text[:text.rfind('```')].rstrip()
-
-        # Detect explanation responses (no apply bar needed)
         original = self._selection_edit['original_text']
+
+        # Strategy 1: Delimiter extraction (<<<REPLACEMENT>>>...>>>REPLACEMENT>>>)
+        start_marker = '<<<REPLACEMENT>>>'
+        end_marker = '>>>REPLACEMENT>>>'
+        if start_marker in text and end_marker in text:
+            s = text.index(start_marker) + len(start_marker)
+            e = text.index(end_marker)
+            extracted = text[s:e].strip()
+            if extracted:
+                self._create_selection_edit(extracted)
+                return
+
+        # Strategy 2: Single code fence extraction
+        fence_matches = _re.findall(r'```(?:\w*)\n(.*?)```', text, _re.DOTALL)
+        if len(fence_matches) == 1:
+            candidate = fence_matches[0].strip()
+            if candidate and len(candidate) < len(original) * 3:
+                self._create_selection_edit(candidate)
+                return
+
+        # Strategy 3: Strip wrapping code fences if entire response is fenced
+        stripped = text
+        if stripped.startswith('```'):
+            first_nl = stripped.find('\n')
+            if first_nl != -1:
+                stripped = stripped[first_nl + 1:]
+        if stripped.endswith('```'):
+            stripped = stripped[:stripped.rfind('```')].rstrip()
+        if stripped != text:
+            text = stripped
+
+        # Strategy 4: Short response — probably just the replacement
+        if len(text) <= len(original) * 2 and '\n\n' not in text:
+            self._create_selection_edit(text)
+            return
+
+        # Strategy 5: Explanation detection — no apply bar
         code_starters = ('//', '#', '/*', 'void', 'int', 'float', 'char',
                          'bool', 'const', 'static', 'class', 'struct', 'enum',
                          'if', 'for', 'while', 'return', '#include', 'unsigned',
@@ -3742,19 +3814,34 @@ class ChatPanel(QWidget):
             # Already rendered in chat as streaming text — nothing more to do
             return
 
-        # Preserve trailing newline from original selection
-        if original.endswith('\r\n') and not text.endswith('\r\n'):
-            text = text.rstrip('\n') + '\r\n'
-        elif original.endswith('\n') and not text.endswith('\n'):
-            text += '\n'
+        # Fallback: treat the (possibly fence-stripped) text as replacement
+        self._create_selection_edit(text)
 
-        # Create a ProposedEdit for the selection replacement
+    def _create_selection_edit(self, replacement_text):
+        """Create a ProposedEdit for a selection replacement and show apply bar."""
+        original = self._selection_edit['original_text']
+
+        # Strip markdown fences if still wrapped
+        if replacement_text.strip().startswith('```'):
+            lines = replacement_text.strip().split('\n')
+            if lines[0].strip().startswith('```'):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == '```':
+                lines = lines[:-1]
+            replacement_text = '\n'.join(lines)
+
+        # Preserve trailing newline from original selection
+        if original.endswith('\r\n') and not replacement_text.endswith('\r\n'):
+            replacement_text = replacement_text.rstrip('\n') + '\r\n'
+        elif original.endswith('\n') and not replacement_text.endswith('\n'):
+            replacement_text += '\n'
+
         file_path = self._selection_edit['file_path']
         edit = ProposedEdit(
             edit_type="selection",
             filename=os.path.basename(file_path),
             old_text=original,
-            new_text=text,
+            new_text=replacement_text,
             operation="selection_replace",
             resolved_path=file_path,
         )
