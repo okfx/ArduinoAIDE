@@ -471,6 +471,8 @@ def _load_config():
         "arduino_cli_path": "arduino-cli",
         "additional_board_urls": [],
         "context_budget": 12000,
+        "verbose_compile": False,
+        "compiler_warnings": "default",
     }
     try:
         with open(CONFIG_FILE, "r") as f:
@@ -3555,11 +3557,11 @@ class ChatPanel(QWidget):
         outer_lay.setSpacing(0)
         outer_lay.addStretch()
         chat_column = QWidget()
-        chat_column.setMaximumWidth(800)
+        chat_column.setMaximumWidth(1200)
         chat_column.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._chat_layout = QVBoxLayout(chat_column)
-        self._chat_layout.setContentsMargins(20, 16, 20, 16)
+        self._chat_layout.setContentsMargins(12, 12, 12, 12)
         self._chat_layout.setSpacing(20)
         self._chat_layout.addStretch()
         outer_lay.addWidget(chat_column)
@@ -5670,9 +5672,12 @@ class ChatPanel(QWidget):
         if not self._current_ai_widget or not self._current_response:
             return
         text = self._current_response
-        # Only render if there are code fences, edit blocks, inline code, or think blocks
+        # Only render if there's markdown-like content worth processing
         if ("```" not in text and "<<<" not in text
-                and "`" not in text and "<think>" not in text):
+                and "`" not in text and "<think>" not in text
+                and "**" not in text and "\n#" not in text
+                and "\n- " not in text and "\n* " not in text
+                and "\n1." not in text):
             return
         html_parts = []
         in_code = False
@@ -5767,19 +5772,94 @@ class ChatPanel(QWidget):
                 html_parts.append(html.escape(line) + "\n")
                 i += 1
                 continue
-            # Regular text — strip LaTeX and render inline `code` spans
+            # Regular text — markdown rendering
             line = self._strip_latex(line)
+
+            # Empty line = paragraph break
+            if not line.strip():
+                html_parts.append('<div style="height:8px;"></div>')
+                i += 1
+                continue
+
             escaped_line = html.escape(line)
+
+            # Headings: ## or ### at start of line
+            heading_match = re.match(r'^(#{1,4})\s+(.+)$', escaped_line)
+            if heading_match:
+                level = len(heading_match.group(1))
+                h_text = heading_match.group(2)
+                sizes = {1: '18px', 2: '16px', 3: '15px', 4: '14px'}
+                font_size = sizes.get(level, '14px')
+                html_parts.append(
+                    f'<div style="font-size:{font_size};font-weight:bold;'
+                    f'color:{C["fg_head"]};margin:12px 0 4px 0;">{h_text}</div>')
+                i += 1
+                continue
+
+            # Bullet list items: "- item" or "* item"
+            bullet_match = re.match(r'^(\s*)[*\-]\s+(.+)$', escaped_line)
+            if bullet_match:
+                indent = len(bullet_match.group(1))
+                b_text = bullet_match.group(2)
+                margin_left = 16 + (indent * 8)
+                b_text = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', b_text)
+                b_text = re.sub(r'\*([^*]+)\*', r'<i>\1</i>', b_text)
+                b_text = re.sub(
+                    r'`([^`]+)`',
+                    rf'<code style="{self._INLINE_CODE_STYLE}">\1</code>',
+                    b_text)
+                html_parts.append(
+                    f'<div style="margin-left:{margin_left}px;margin-bottom:2px;">'
+                    f'\u2022 {b_text}</div>')
+                i += 1
+                continue
+
+            # Numbered list items: "1. item", "2. item"
+            num_match = re.match(r'^(\s*)(\d+)\.\s+(.+)$', escaped_line)
+            if num_match:
+                indent = len(num_match.group(1))
+                number = num_match.group(2)
+                n_text = num_match.group(3)
+                margin_left = 16 + (indent * 8)
+                n_text = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', n_text)
+                n_text = re.sub(r'\*([^*]+)\*', r'<i>\1</i>', n_text)
+                n_text = re.sub(
+                    r'`([^`]+)`',
+                    rf'<code style="{self._INLINE_CODE_STYLE}">\1</code>',
+                    n_text)
+                html_parts.append(
+                    f'<div style="margin-left:{margin_left}px;margin-bottom:2px;">'
+                    f'{number}. {n_text}</div>')
+                i += 1
+                continue
+
+            # Horizontal rules: --- or ***
+            if re.match(r'^[\-\*]{3,}\s*$', escaped_line):
+                html_parts.append(
+                    f'<hr style="border:none;border-top:1px solid {C["border_light"]};'
+                    f'margin:8px 0;">')
+                i += 1
+                continue
+
+            # Inline formatting: bold, italic, inline code
+            escaped_line = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', escaped_line)
+            escaped_line = re.sub(r'\*([^*]+)\*', r'<i>\1</i>', escaped_line)
             escaped_line = re.sub(
                 r'`([^`]+)`',
                 rf'<code style="{self._INLINE_CODE_STYLE}">\1</code>',
                 escaped_line)
+
             html_parts.append(escaped_line + "<br>")
             i += 1
         # Close any unclosed blocks
         if in_code or in_edit:
             html_parts.append("</pre></div>")
-        self._current_ai_widget.setHtml("".join(html_parts))
+        styled_html = (
+            f'<div style="color:{C["fg"]};font-family:\'Helvetica Neue\',Helvetica,'
+            f'Arial,sans-serif;font-size:14px;line-height:1.5;">'
+            + "".join(html_parts)
+            + '</div>')
+        self._current_ai_widget.setHtml(styled_html)
         self._current_ai_widget.document().adjustSize()
         self._scroll_to_bottom()
 
@@ -5816,6 +5896,10 @@ class ChatPanel(QWidget):
                 self._conversation.append(
                     {"role": "assistant", "content": _clean_hist})
                 self._render_formatted_response()
+                # Deferred resize to ensure final height is correct after HTML render
+                if self._current_ai_widget:
+                    QTimer.singleShot(50, lambda w=self._current_ai_widget:
+                        w.setFixedHeight(max(30, int(w.document().size().height()) + 20)))
                 result = AIWorkResult(assistant_text=self._current_response)
                 result.diagnostics = list(self._error_diagnostics)
                 self._parse_edits(self._current_response, result)
@@ -6900,13 +6984,16 @@ class ChatPanel(QWidget):
         vl.addWidget(speaker)
         # Bubble row
         row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 12, 0)
-        row.addStretch()
+        row.setContentsMargins(0, 0, 0, 0)
+        left_spacer = QWidget()
+        left_spacer.setFixedWidth(80)
+        left_spacer.setStyleSheet("background:transparent;border:none;")
+        row.addWidget(left_spacer)
         bubble = QFrame()
         bubble.setStyleSheet(
             f"QFrame {{ background-color:{C['bg_input']}; border-radius:14px; }}")
         bl = QVBoxLayout(bubble)
-        bl.setContentsMargins(16, 10, 16, 10)
+        bl.setContentsMargins(16, 12, 16, 12)
         bl.setSpacing(8)
         # Text label
         text_label = QLabel(text)
@@ -6969,11 +7056,13 @@ class ChatPanel(QWidget):
             f"selection-background-color:{C['teal']}; }}")
         ai_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         ai_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # Auto-resize as content grows
-        ai_text.document().contentsChanged.connect(
-            lambda: ai_text.setFixedHeight(
-                max(24, int(ai_text.document().size().height()) + 4)))
-        ai_text.setFixedHeight(24)
+        ai_text.document().setDocumentMargin(2)
+        # Auto-resize as content grows — generous padding for QTextEdit internals
+        def _resize_ai_text(te=ai_text):
+            doc_height = te.document().size().height()
+            te.setFixedHeight(max(30, int(doc_height) + 20))
+        ai_text.document().contentsChanged.connect(_resize_ai_text)
+        ai_text.setFixedHeight(30)
         vl.addWidget(ai_text)
         self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
         self._current_ai_widget = ai_text
@@ -9812,6 +9901,7 @@ class MainWindow(QMainWindow):
         fm.addSeparator()
         fm.addAction(self._make_action("Save", self._save_file, "Ctrl+S"))
         fm.addAction(self._make_action("Save As...", self._save_as, "Ctrl+Shift+S"))
+        fm.addAction(self._make_action("Close Tab", self._close_current_tab, "Ctrl+W"))
         fm.addSeparator()
         pref_action = self._make_action("Preferences...", self._show_preferences, "Ctrl+,")
         pref_action.setMenuRole(QAction.MenuRole.PreferencesRole)
@@ -9832,11 +9922,15 @@ class MainWindow(QMainWindow):
         em.addAction(self._make_action("Decrease Font Size", self._zoom_out, "Ctrl+-"))
         em.addSeparator()
         em.addAction(self._make_action("Go to Line\u2026", self._goto_line, "Ctrl+G"))
+        em.addSeparator()
+        em.addAction(self._make_action("Auto Format", self._auto_format, "Ctrl+T"))
+        em.addAction(self._make_action("Find in Project\u2026", self._find_in_project, "Ctrl+Shift+F"))
 
         # ── Sketch ──
         sm = mb.addMenu("Sketch")
         sm.addAction(self._make_action("Verify / Compile", self._compile, "Ctrl+B"))
         sm.addAction(self._make_action("Upload", self._upload, "Ctrl+U"))
+        sm.addAction(self._make_action("Export Compiled Binary", self._export_binary))
         sm.addSeparator()
         self._include_lib_menu = sm.addMenu("Include Library")
         self._include_lib_menu.aboutToShow.connect(self._populate_include_menu)
@@ -10009,6 +10103,20 @@ class MainWindow(QMainWindow):
             f"border:1px solid {C['border_light']};border-radius:3px;padding:4px 8px;}}")
         bg_layout.addRow("Board URLs:", board_urls_input)
 
+        from PyQt6.QtWidgets import QCheckBox
+        verbose_cb = QCheckBox("Verbose output during compile/upload")
+        verbose_cb.setChecked(cfg.get("verbose_compile", False))
+        bg_layout.addRow(verbose_cb)
+
+        warnings_combo = QComboBox()
+        for w in ["none", "default", "more", "all"]:
+            warnings_combo.addItem(w.capitalize(), w)
+        current_warnings = cfg.get("compiler_warnings", "default")
+        idx = warnings_combo.findData(current_warnings)
+        if idx >= 0:
+            warnings_combo.setCurrentIndex(idx)
+        bg_layout.addRow("Compiler warnings:", warnings_combo)
+
         layout.addWidget(build_group)
 
         # ── Buttons ──
@@ -10031,6 +10139,8 @@ class MainWindow(QMainWindow):
             urls = [u.strip() for u in board_urls_input.toPlainText().split('\n')
                     if u.strip()]
             cfg["additional_board_urls"] = urls
+            cfg["verbose_compile"] = verbose_cb.isChecked()
+            cfg["compiler_warnings"] = warnings_combo.currentData()
             _save_config(cfg)
             self._apply_preferences(cfg)
 
@@ -10294,6 +10404,185 @@ class MainWindow(QMainWindow):
             self._switch_view(0)
             ed.setFocus()
 
+    def _auto_format(self):
+        """Auto-format the current file using clang-format."""
+        import shutil
+        ed = self.editor.tabs.currentWidget()
+        if not ed:
+            return
+        cf = shutil.which("clang-format")
+        if not cf:
+            self.statusBar().showMessage(
+                "clang-format not found \u2014 install with: brew install clang-format", 5000)
+            return
+        import tempfile, subprocess
+        content = ed.text() if HAS_QSCINTILLA else ed.toPlainText()
+        try:
+            with tempfile.NamedTemporaryFile(
+                    mode='w', suffix='.cpp', delete=False, encoding='utf-8') as f:
+                f.write(content)
+                tmp_path = f.name
+            subprocess.run(
+                [cf, '-style={BasedOnStyle: LLVM, IndentWidth: 2, ColumnLimit: 100}',
+                 '-i', tmp_path], check=True, capture_output=True)
+            with open(tmp_path, 'r', encoding='utf-8') as f:
+                formatted = f.read()
+            os.unlink(tmp_path)
+            if formatted != content:
+                if HAS_QSCINTILLA:
+                    ed.beginUndoAction()
+                    ed.selectAll()
+                    ed.replaceSelectedText(formatted)
+                    ed.endUndoAction()
+                else:
+                    ed.selectAll()
+                    ed.insertPlainText(formatted)
+                self.statusBar().showMessage("Formatted with clang-format", 3000)
+            else:
+                self.statusBar().showMessage("Already formatted", 3000)
+        except Exception as ex:
+            self.statusBar().showMessage(f"Format error: {ex}", 5000)
+
+    def _find_in_project(self):
+        """Open project-wide search dialog."""
+        from PyQt6.QtWidgets import (QDialog, QCheckBox)
+        if not self.project_path:
+            QMessageBox.warning(self, "No Project", "Open a project first.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Find in Project")
+        dlg.setMinimumSize(600, 400)
+        dlg.setStyleSheet(
+            f"QDialog{{background:{C['bg']};color:{C['fg']};}}"
+            f"QLabel{{color:{C['fg']};}}"
+            f"QLineEdit{{background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};border-radius:3px;padding:6px;}}"
+            f"QCheckBox{{color:{C['fg']};}}")
+
+        layout = QVBoxLayout(dlg)
+
+        search_row = QHBoxLayout()
+        search_input = QLineEdit()
+        search_input.setPlaceholderText("Search in project files...")
+        search_row.addWidget(search_input)
+        case_cb = QCheckBox("Case sensitive")
+        search_row.addWidget(case_cb)
+        regex_cb = QCheckBox("Regex")
+        search_row.addWidget(regex_cb)
+        search_btn = QPushButton("Search")
+        search_btn.setStyleSheet(
+            f"QPushButton{{background:{C['teal']};color:#fff;"
+            f"border:none;border-radius:4px;padding:6px 16px;}}")
+        search_row.addWidget(search_btn)
+        layout.addLayout(search_row)
+
+        results_tree = QTreeWidget()
+        results_tree.setHeaderLabels(["Match", "Line"])
+        results_tree.setStyleSheet(
+            f"QTreeWidget{{background:{C['bg_dark']};color:{C['fg']};"
+            f"border:1px solid {C['border']};{FONT_BODY}}}"
+            f"QTreeWidget::item:selected{{background:{C['teal']};color:#fff;}}"
+            f"QHeaderView::section{{background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border']};padding:4px;}}")
+        results_tree.setColumnWidth(0, 500)
+        layout.addWidget(results_tree)
+
+        status_label = QLabel("")
+        status_label.setStyleSheet(f"color:{C['fg_muted']};{FONT_SMALL}")
+        layout.addWidget(status_label)
+
+        def do_search():
+            import re as _re
+            results_tree.clear()
+            query = search_input.text()
+            if not query:
+                return
+            all_files = self.chat_panel._scan_project_files(self.project_path)
+            flags = 0 if case_cb.isChecked() else _re.IGNORECASE
+            total = 0
+            try:
+                if regex_cb.isChecked():
+                    pattern = _re.compile(query, flags)
+                else:
+                    pattern = _re.compile(_re.escape(query), flags)
+            except _re.error as e:
+                status_label.setText(f"Invalid regex: {e}")
+                return
+            for rel_path, content in sorted(all_files.items()):
+                ext = os.path.splitext(rel_path)[1].lower()
+                if ext not in {".ino", ".cpp", ".c", ".h", ".hpp"}:
+                    continue
+                file_matches = []
+                for line_num, line_text in enumerate(content.split('\n'), 1):
+                    if pattern.search(line_text):
+                        file_matches.append((line_num, line_text.strip()))
+                        total += 1
+                        if total >= 500:
+                            break
+                if file_matches:
+                    parent = QTreeWidgetItem(results_tree,
+                                             [f"{rel_path} ({len(file_matches)})", ""])
+                    parent.setForeground(0, QColor(C["teal"]))
+                    parent.setExpanded(True)
+                    abs_path = os.path.join(self.project_path, rel_path)
+                    parent.setData(0, Qt.ItemDataRole.UserRole, abs_path)
+                    for ln, txt in file_matches:
+                        child = QTreeWidgetItem(parent,
+                                                 [txt[:120], str(ln)])
+                        child.setData(0, Qt.ItemDataRole.UserRole, abs_path)
+                        child.setData(1, Qt.ItemDataRole.UserRole, ln)
+                if total >= 500:
+                    break
+            status_label.setText(f"{total} matches" + (" (limited to 500)" if total >= 500 else ""))
+
+        def on_item_dblclick(item, col):
+            abs_path = item.data(0, Qt.ItemDataRole.UserRole)
+            ln = item.data(1, Qt.ItemDataRole.UserRole)
+            if abs_path and ln:
+                self.editor.goto_line(abs_path, ln)
+                self._switch_view(0)
+                dlg.accept()
+
+        search_btn.clicked.connect(do_search)
+        search_input.returnPressed.connect(do_search)
+        results_tree.itemDoubleClicked.connect(on_item_dblclick)
+        dlg.exec()
+
+    def _close_current_tab(self):
+        """Close the active editor tab. Prompt to save if dirty."""
+        idx = self.editor.tabs.currentIndex()
+        if idx < 0 or self.editor.tabs.count() <= 1:
+            return
+        ed = self.editor.tabs.widget(idx)
+        if ed and hasattr(ed, 'isModified') and ed.isModified():
+            r = QMessageBox.question(
+                self, "Unsaved Changes",
+                f"Save changes to {self.editor.tabs.tabText(idx).lstrip('\u2022 ')}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel)
+            if r == QMessageBox.StandardButton.Cancel:
+                return
+            if r == QMessageBox.StandardButton.Yes:
+                if hasattr(ed, 'save_file'):
+                    ed.save_file()
+        self.editor._close_tab(idx)
+
+    def _export_binary(self):
+        """Export compiled binary to build/ folder."""
+        if not self.project_path:
+            QMessageBox.warning(self, "No Project", "Open a project first.")
+            return
+        self._save_file()
+        self.compiler_output.clear_output()
+        self._switch_view(0)
+        self.bottom_tabs.setCurrentWidget(self._output_tab)
+        build_dir = os.path.join(self.project_path, "build")
+        self.compiler_output.append_output("Exporting compiled binary...", C["fg_link"])
+        self._run_cli([
+            "compile", "--fqbn", self._current_fqbn(),
+            "--output-dir", build_dir, self.project_path])
+
     def _toggle_comment(self):
         """Toggle // comment on selected lines (or current line)."""
         ed = self.editor.tabs.currentWidget()
@@ -10407,7 +10696,15 @@ class MainWindow(QMainWindow):
         self._save_file(); self.compiler_output.clear_output()
         self._switch_view(0); self.bottom_tabs.setCurrentWidget(self._output_tab)
         self.compiler_output.append_output("Compiling...", C["fg_link"])
-        self._run_cli(["compile", "--fqbn", self._current_fqbn(), self.project_path])
+        cmd = ["compile", "--fqbn", self._current_fqbn()]
+        cfg = _load_config()
+        warnings = cfg.get("compiler_warnings", "default")
+        if warnings and warnings != "none":
+            cmd.extend(["--warnings", warnings])
+        if cfg.get("verbose_compile", False):
+            cmd.append("-v")
+        cmd.append(self.project_path)
+        self._run_cli(cmd)
 
     def _upload(self):
         if not self.project_path:
@@ -10418,7 +10715,15 @@ class MainWindow(QMainWindow):
         self._save_file(); self.compiler_output.clear_output()
         self._switch_view(0); self.bottom_tabs.setCurrentWidget(self._output_tab)
         self.compiler_output.append_output("Compiling and uploading...", C["fg_link"])
-        self._run_cli(["compile","--upload","--fqbn",self._current_fqbn(),"--port",port,self.project_path])
+        cmd = ["compile", "--upload", "--fqbn", self._current_fqbn(), "--port", port]
+        cfg = _load_config()
+        warnings = cfg.get("compiler_warnings", "default")
+        if warnings and warnings != "none":
+            cmd.extend(["--warnings", warnings])
+        if cfg.get("verbose_compile", False):
+            cmd.append("-v")
+        cmd.append(self.project_path)
+        self._run_cli(cmd)
 
     def _run_cli(self, args):
         self._compiler_errors = ""
