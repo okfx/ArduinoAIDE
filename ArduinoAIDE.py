@@ -8225,6 +8225,7 @@ class MainWindow(QMainWindow):
     def _on_model_switch(self, model_name):
         """Handle /model command — update toolbar combo and status bar."""
         global OLLAMA_MODEL
+        old_model = OLLAMA_MODEL
         OLLAMA_MODEL = model_name
         if hasattr(self, 'model_combo'):
             # Try to find and select the model in the combo box
@@ -8237,6 +8238,9 @@ class MainWindow(QMainWindow):
                 self.model_combo.setCurrentText(model_name)
         if hasattr(self, '_status_model'):
             self._status_model.setText(model_name)
+        # Unload the previous model to free VRAM/RAM
+        if old_model and old_model != model_name:
+            self._unload_model_async(old_model)
 
     def _on_editor_file_changed(self, fp):
         self.setWindowTitle(f"{WINDOW_TITLE} — {os.path.basename(fp)}")
@@ -8343,11 +8347,27 @@ class MainWindow(QMainWindow):
 
     def _on_model_changed(self, name):
         global OLLAMA_MODEL
-        if name:
+        if name and name != OLLAMA_MODEL:
+            old_model = OLLAMA_MODEL
             OLLAMA_MODEL = name
             self._update_model_desc()
             if hasattr(self, '_status_model'):
                 self._status_model.setText(name)
+            # Unload the previous model to free VRAM/RAM
+            if old_model:
+                self._unload_model_async(old_model)
+
+    def _unload_model_async(self, model_name):
+        """Send keep_alive=0 to Ollama to unload a model from memory."""
+        import threading
+        def do_unload():
+            try:
+                requests.post("http://localhost:11434/api/generate",
+                    json={"model": model_name, "prompt": "", "keep_alive": "0"},
+                    timeout=10)
+            except Exception:
+                pass  # Best-effort — don't block UI on failure
+        threading.Thread(target=do_unload, daemon=True).start()
 
     def _load_model(self):
         """Pre-load the selected model into Ollama memory."""
