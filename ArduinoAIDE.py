@@ -1207,8 +1207,9 @@ if HAS_QSCINTILLA:
             menu = QMenu(self)
             menu.setStyleSheet(
                 f"QMenu{{background:{C['bg_input']};color:{C['fg']};"
-                f"border:1px solid {C['border_light']};padding:4px;}}"
-                f"QMenu::item:selected{{background:{C['bg_hover']};}}"
+                f"border:1px solid {C['border_light']};border-radius:4px;padding:4px;}}"
+                f"QMenu::item{{padding:4px 20px;border-radius:2px;}}"
+                f"QMenu::item:selected{{background:{C['teal']};color:#fff;}}"
                 f"QMenu::separator{{height:1px;background:{C['border_light']};"
                 f"margin:4px 8px;}}")
             # Standard editing actions with keyboard shortcuts
@@ -1305,8 +1306,9 @@ else:
             menu = self.createStandardContextMenu()
             menu.setStyleSheet(
                 f"QMenu{{background:{C['bg_input']};color:{C['fg']};"
-                f"border:1px solid {C['border_light']};padding:4px;}}"
-                f"QMenu::item:selected{{background:{C['bg_hover']};}}"
+                f"border:1px solid {C['border_light']};border-radius:4px;padding:4px;}}"
+                f"QMenu::item{{padding:4px 20px;border-radius:2px;}}"
+                f"QMenu::item:selected{{background:{C['teal']};color:#fff;}}"
                 f"QMenu::separator{{height:1px;background:{C['border_light']};"
                 f"margin:4px 8px;}}")
             if self.textCursor().hasSelection():
@@ -1935,8 +1937,9 @@ class ChatPanel(QWidget):
         # Style right-click context menus (QTextEdit default menus inherit this)
         self.setStyleSheet(
             f"ChatPanel QMenu{{background:{C['bg_input']};color:{C['fg']};"
-            f"border:1px solid {C['border_light']};padding:4px;}}"
-            f"ChatPanel QMenu::item:selected{{background:{C['bg_hover']};}}"
+            f"border:1px solid {C['border_light']};border-radius:4px;padding:4px;}}"
+            f"ChatPanel QMenu::item{{padding:4px 20px;border-radius:2px;}}"
+            f"ChatPanel QMenu::item:selected{{background:{C['teal']};color:#fff;}}"
             f"ChatPanel QMenu::separator{{height:1px;background:{C['border_light']};"
             f"margin:4px 8px;}}")
 
@@ -3737,7 +3740,7 @@ class ChatPanel(QWidget):
         """Process the LLM response in selection mode.
         Uses pre-fill extraction first, then multi-strategy fallbacks."""
         import re as _re
-        text = response_text.strip()
+        text = self._clean_model_artifacts(response_text).strip()
         original = self._selection_edit['original_text']
         prefilled = self._selection_prefilled
         self._selection_prefilled = False
