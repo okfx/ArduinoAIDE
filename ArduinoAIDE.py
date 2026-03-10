@@ -3914,10 +3914,15 @@ class ChatPanel(QWidget):
 
     # Styles for code blocks and edit blocks in AI responses (QTextEdit HTML)
     _CODE_BLOCK_STYLE = (
-        f'background:{C["bg_input"]};'
-        f'border:1px solid {C["border_light"]};'
-        f'padding:10px;margin:12px 0;'
-        f'font-family:Menlo,Monaco,Courier New,monospace;font-size:13px;')
+        f'background:{C["bg_dark"]};'
+        f'border:1px solid #333;'
+        f'border-radius:6px;'
+        f'padding:10px 12px;margin:8px 0;'
+        f'font-family:Menlo,Monaco,Consolas,monospace;font-size:12px;')
+    _INLINE_CODE_STYLE = (
+        f'background:#252525;padding:1px 5px;border-radius:3px;'
+        f'font-family:Menlo,Monaco,Consolas,monospace;font-size:12px;'
+        f'color:{C["fg_warn"]};')
     _EDIT_BLOCK_STYLE = (
         f'background:{C["bg_input"]};'
         f'border:1px solid {C["border_light"]};'
@@ -3929,11 +3934,12 @@ class ChatPanel(QWidget):
 
     def _render_formatted_response(self):
         """Re-render the completed AI response with styled code blocks and edit blocks."""
+        import re
         if not self._current_ai_widget or not self._current_response:
             return
         text = self._current_response
-        # Only render if there are code fences or edit blocks
-        if "```" not in text and "<<<" not in text:
+        # Only render if there are code fences, edit blocks, or inline code
+        if "```" not in text and "<<<" not in text and "`" not in text:
             return
         html_parts = []
         in_code = False
@@ -4001,13 +4007,20 @@ class ChatPanel(QWidget):
                 html_parts.append(html.escape(line) + "\n")
                 i += 1
                 continue
-            # Regular text
-            html_parts.append(html.escape(line) + "<br>")
+            # Regular text — render inline `code` spans
+            escaped_line = html.escape(line)
+            escaped_line = re.sub(
+                r'`([^`]+)`',
+                rf'<code style="{self._INLINE_CODE_STYLE}">\1</code>',
+                escaped_line)
+            html_parts.append(escaped_line + "<br>")
             i += 1
         # Close any unclosed blocks
         if in_code or in_edit:
             html_parts.append("</pre></div>")
         self._current_ai_widget.setHtml("".join(html_parts))
+        self._current_ai_widget.document().adjustSize()
+        self._scroll_to_bottom()
 
     def _on_complete(self):
         if self.thread.isRunning():
