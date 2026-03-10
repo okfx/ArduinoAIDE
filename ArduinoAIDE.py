@@ -3550,6 +3550,14 @@ class ChatPanel(QWidget):
         using a line-by-line state machine. Handles >>> and <<< inside code
         content, blank lines between markers, and trailing newlines in captured
         sections. Returns list[ProposedEdit]."""
+        # Normalize literal \r\n and \n escape sequences to real newlines.
+        # Some local models (e.g. deepseek-coder-v2) emit backslash-n instead
+        # of actual newline chars. Only trigger when markers are adjacent.
+        if '\\r\\n<<<' in text or '\\r\\n>>>' in text:
+            text = text.replace('\\r\\n', '\n')
+        if '\\n<<<' in text or '\\n>>>' in text:
+            text = text.replace('\\n', '\n')
+
         edits = []
         lines = text.split('\n')
         state = 'idle'
