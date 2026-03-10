@@ -7739,10 +7739,22 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._config = config or {}
         self.setWindowTitle(WINDOW_TITLE)
-        # Set window/dock icon from icon.svg next to ArduinoAIDE.py
+        # Set window/dock icon from icon.svg with transparent background
         _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.svg')
         if os.path.exists(_icon_path):
-            self.setWindowIcon(QIcon(_icon_path))
+            try:
+                from PyQt6.QtSvg import QSvgRenderer
+                _renderer = QSvgRenderer(_icon_path)
+                _pix = QPixmap(QSize(256, 256))
+                _pix.fill(Qt.GlobalColor.transparent)
+                _painter = QPainter(_pix)
+                _renderer.render(_painter)
+                _painter.end()
+                _app_icon = QIcon(_pix)
+            except ImportError:
+                _app_icon = QIcon(_icon_path)  # fallback: may have white bg
+            self.setWindowIcon(_app_icon)
+            QApplication.instance().setWindowIcon(_app_icon)
         # Size to 75% of screen so it fits any display; fully resizable
         screen = QApplication.primaryScreen()
         if screen:
