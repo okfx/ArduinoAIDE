@@ -3201,6 +3201,23 @@ class ChatPanel(QWidget):
                 "Please wait — model is currently responding.", C['fg_warn'])
             return
 
+        # Guard: warn if pending edits will be discarded
+        # apply_bar is hidden after edits are applied, so escalation buttons
+        # (which fire after apply) naturally bypass this check.
+        if self._pending_edits and self.apply_bar.isVisible():
+            n = len(self._pending_edits)
+            reply = QMessageBox.question(
+                self,
+                "Discard pending edits?",
+                f"You have {n} pending edit{'s' if n != 1 else ''} in the apply bar.\n"
+                "Sending a new message will discard them.\n\n"
+                "Discard and send?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
         # Detect named files in user message for per-prompt targeting override
         self._target_override = self._detect_named_files(text)
 
