@@ -3833,10 +3833,7 @@ class ChatPanel(QWidget):
             self._create_selection_edit(text)
             return
 
-        # Default: no edit — treat as explanation/prose
-        self._add_info_msg(
-            "AI responded with an explanation instead of a code edit. "
-            "Try rephrasing your request.", C['fg_warn'])
+        # Default: no edit found — response is an explanation (already displayed)
 
     # Code token prefixes for detecting code vs prose in selection responses
     _CODE_STARTERS = (
@@ -3927,10 +3924,7 @@ class ChatPanel(QWidget):
             has_paragraphs,
         ])
         if prose_signals >= 2:
-            self._add_info_msg(
-                "AI responded with an explanation instead of a code edit. "
-                "Try rephrasing your request.", C['fg_warn'])
-            return True
+            return True  # Explanation already displayed via streaming
         return False
 
     def _create_selection_edit(self, replacement_text):
@@ -5290,15 +5284,30 @@ class ChatPanel(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse)
         bl.addWidget(text_label)
         if code:
-            # Code block inside the bubble
+            # Code block inside the bubble — scrollable for long lines
             code_label = QLabel(code)
             code_label.setWordWrap(False)
             code_label.setStyleSheet(
                 f"background-color:{C['bg']};color:{C['fg']};{FONT_CODE}"
-                f"border-radius:8px;padding:8px;")
+                f"padding:8px;border:none;")
             code_label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse)
-            bl.addWidget(code_label)
+            code_scroll = QScrollArea()
+            code_scroll.setWidget(code_label)
+            code_scroll.setWidgetResizable(False)
+            code_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            code_scroll.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            code_scroll.setStyleSheet(
+                f"QScrollArea{{background-color:{C['bg']};border-radius:8px;border:none;}}"
+                f"QScrollBar:horizontal{{background:{C['bg']};height:6px;}}"
+                f"QScrollBar::handle:horizontal{{background:{C['border_light']};"
+                f"border-radius:3px;min-width:20px;}}"
+                f"QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal"
+                f"{{width:0px;}}")
+            code_scroll.setFixedHeight(code_label.sizeHint().height() + 10)
+            bl.addWidget(code_scroll)
         row.addWidget(bubble)
         vl.addLayout(row)
         self._chat_layout.insertWidget(self._chat_layout.count() - 1, wrapper)
