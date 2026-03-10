@@ -1907,6 +1907,7 @@ class ChatPanel(QWidget):
         self._editor_ref = None          # will be set by MainWindow
         self._pending_edits = []         # list[ProposedEdit]
         self._file_acceptance = {}       # {filename: True (accepted) | False (rejected)}
+        self._apply_snapshot = {}        # {abs_path: original_content} for undo
         self._working_set = WorkingSet()          # shadow context tracker (Step 2)
         self._ai_edited_files = set()             # rel_paths of files the AI has edited
         self._use_working_set_context = True      # WorkingSet is default; /debug-use-ws off for old path
@@ -2046,6 +2047,11 @@ class ChatPanel(QWidget):
         self._recompile_label.setStyleSheet(f"color:{C['fg']};{FONT_BODY}")
         rc_layout.addWidget(self._recompile_label)
         rc_layout.addStretch()
+        self._undo_btn = QPushButton("\u21a9 Undo Last Apply")
+        self._undo_btn.setStyleSheet(BTN_GHOST)
+        self._undo_btn.clicked.connect(self._undo_last_apply)
+        self._undo_btn.hide()
+        rc_layout.addWidget(self._undo_btn)
         recompile_btn = QPushButton("Recompile")
         recompile_btn.setStyleSheet(BTN_PRIMARY)
         recompile_btn.clicked.connect(self._on_recompile_clicked)
@@ -3260,6 +3266,8 @@ class ChatPanel(QWidget):
         self._current_response = ""
         self.apply_bar.hide()
         self._pending_edits = []
+        self._apply_snapshot.clear()
+        self._undo_btn.hide()
 
         # Create AI response widget (left-aligned, no bubble)
         self._add_ai_msg()
@@ -3848,6 +3856,18 @@ class ChatPanel(QWidget):
         rejected = 0
         errors = []
 
+        # Snapshot current file contents for undo
+        self._apply_snapshot.clear()
+        all_editor_files = self._editor_ref.get_all_files()
+        for edit in self._pending_edits:
+            if edit.blocked or self._file_acceptance.get(edit.filename) is False:
+                continue
+            fp = self._editor_ref.find_file_by_name(edit.filename)
+            if fp and fp not in self._apply_snapshot:
+                content = all_editor_files.get(fp)
+                if content is not None:
+                    self._apply_snapshot[fp] = content
+
         for edit in self._pending_edits:
             if self._file_acceptance.get(edit.filename) is False:
                 rejected += 1
@@ -3983,9 +4003,32 @@ class ChatPanel(QWidget):
             self.edits_applied.emit()
             # Rebuild symbol index after edits (non-blocking)
             QTimer.singleShot(0, self._build_symbol_index)
-            # Show recompile bar if there are active diagnostics
+            # Show undo button and recompile bar
+            self._undo_btn.setVisible(bool(self._apply_snapshot))
             if self._error_diagnostics:
                 self.recompile_bar.show()
+            elif self._apply_snapshot:
+                # No diagnostics but we have a snapshot — show recompile bar
+                # just for the undo button
+                self.recompile_bar.show()
+        else:
+            self._apply_snapshot.clear()
+
+    def _undo_last_apply(self):
+        """Revert files to their pre-apply content using the snapshot."""
+        if not self._apply_snapshot or not self._editor_ref:
+            return
+        restored = 0
+        for fpath, original in self._apply_snapshot.items():
+            if self._editor_ref.set_file_content(fpath, original):
+                restored += 1
+        self._apply_snapshot.clear()
+        self._undo_btn.hide()
+        self.recompile_bar.hide()
+        n = restored
+        self._add_info_msg(
+            f"Reverted {n} file{'s' if n != 1 else ''} to pre-apply state.",
+            C['fg_warn'])
 
     def _apply_and_compile(self):
         """Apply all edits then trigger a compile."""
