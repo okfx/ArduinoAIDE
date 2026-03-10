@@ -3759,6 +3759,8 @@ class ChatPanel(QWidget):
         original = self._selection_edit['original_text']
 
         # Strategy 1: Delimiter extraction (<<<REPLACEMENT>>>...>>>REPLACEMENT>>>)
+        # Checked first — if the LLM wrapped actual code in delimiters alongside
+        # an apology preamble, the code inside the delimiters is still valid.
         start_marker = '<<<REPLACEMENT>>>'
         end_marker = '>>>REPLACEMENT>>>'
         if start_marker in text and end_marker in text:
@@ -3768,6 +3770,25 @@ class ChatPanel(QWidget):
             if extracted:
                 self._create_selection_edit(extracted)
                 return
+
+        # Refusal detection — after delimiter extraction (which takes priority)
+        # but before heuristic strategies that might mistake a refusal for code
+        _refusal_phrases = (
+            "i'm sorry", "i can't assist", "i cannot assist",
+            "i can't help", "i cannot help", "i apologize",
+            "i'm unable to", "i am unable to",
+            "i'm not able to", "i am not able to",
+            "as an ai", "as a language model",
+            "i don't have the ability", "i cannot fulfill",
+            "i can't fulfill", "against my guidelines",
+            "i must decline", "not appropriate for me",
+            "i can't do that", "i cannot do that",
+        )
+        text_lower = text.lower()
+        if any(phrase in text_lower for phrase in _refusal_phrases):
+            self._add_info_msg(
+                "AI declined to make the edit.", C['fg_warn'])
+            return
 
         # Strategy 2: Single code fence extraction
         fence_matches = _re.findall(r'```(?:\w*)\n(.*?)```', text, _re.DOTALL)
@@ -3819,6 +3840,15 @@ class ChatPanel(QWidget):
 
     def _create_selection_edit(self, replacement_text):
         """Create a ProposedEdit for a selection replacement and show apply bar."""
+        # Safety net: reject refusal text that slipped through extraction
+        rt_lower = replacement_text.lower()
+        if any(p in rt_lower for p in (
+                "i'm sorry", "i can't assist", "i cannot",
+                "i apologize", "as an ai")):
+            self._add_info_msg(
+                "AI declined to make the edit.", C['fg_warn'])
+            return
+
         original = self._selection_edit['original_text']
 
         # Strip markdown fences if still wrapped
