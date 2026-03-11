@@ -5413,8 +5413,8 @@ Be specific. Reference actual code from the files in context."""
         # Guard: check model is set and backend is reachable
         if not OLLAMA_MODEL or OLLAMA_MODEL.strip() == "":
             self._add_info_msg(
-                "No model selected. Choose a model from the toolbar dropdown "
-                "or the Models tab in Settings.", C['fg_warn'])
+                "No model selected. Go to Settings → Models to select a model.",
+                C['fg_warn'])
             return
         base_url = LMSTUDIO_URL if AI_BACKEND == "lmstudio" else OLLAMA_URL
         try:
@@ -10368,11 +10368,14 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
 
         toolbar.addWidget(QLabel("AI"))
-        self.model_combo = QComboBox()
-        self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self.model_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.model_combo.setMinimumWidth(140)
-        toolbar.addWidget(self.model_combo)
+        self.model_label = QLabel(OLLAMA_MODEL or "No model")
+        self.model_label.setStyleSheet(
+            f"color:{C['teal']};{FONT_BODY}"
+            f"background:transparent;border:none;padding:2px 6px;")
+        self.model_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.model_label.setToolTip("Click to open Models settings")
+        self.model_label.mousePressEvent = lambda e: self._switch_view(3)
+        toolbar.addWidget(self.model_label)
 
         self.model_desc_label = QLabel("")
         self.model_desc_label.setStyleSheet(
@@ -10381,7 +10384,6 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.model_desc_label)
 
         self._refresh_models()
-        self.model_combo.currentTextChanged.connect(self._on_model_changed)
         self._update_model_desc()
 
         # Spacer to push spinner to the right
@@ -10415,7 +10417,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _update_model_desc(self):
-        name = self.model_combo.currentText()
+        name = OLLAMA_MODEL
         if not name or AI_BACKEND == "lmstudio":
             self.model_desc_label.setText("")
             return
@@ -10935,19 +10937,18 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_model_switch(self, model_name):
-        """Handle /model command — update toolbar combo and status bar."""
+        """Handle /model command — update toolbar label and status bar."""
         global OLLAMA_MODEL
         OLLAMA_MODEL = model_name
-        if hasattr(self, 'model_combo'):
-            idx = self.model_combo.findText(model_name)
-            if idx >= 0:
-                self.model_combo.setCurrentIndex(idx)
-            else:
-                self.model_combo.addItem(model_name)
-                self.model_combo.setCurrentText(model_name)
+        if hasattr(self, 'model_label'):
+            self.model_label.setText(model_name)
+        self._update_model_desc()
         if hasattr(self, '_status_model'):
             _bs = " (LM Studio)" if AI_BACKEND == "lmstudio" else ""
             self._status_model.setText(f"{model_name}{_bs}")
+        cfg = _load_config()
+        cfg["ollama_model"] = model_name
+        _save_config(cfg)
 
     def _on_editor_file_changed(self, fp):
         self.setWindowTitle(f"{WINDOW_TITLE} — {os.path.basename(fp)}")
@@ -11461,41 +11462,18 @@ class MainWindow(QMainWindow):
                 if self.port_combo.findText(p)==-1: self.port_combo.addItem(p)
 
     def _refresh_models(self):
+        """Refresh model list from backend and update toolbar label."""
         global OLLAMA_MODEL
-        self.model_combo.blockSignals(True)
-        self.model_combo.clear()
-        try:
-            if AI_BACKEND == "lmstudio":
-                r = requests.get(f"{LMSTUDIO_URL}/v1/models", timeout=5)
-                if r.status_code == 200:
-                    for m in r.json().get("data", []):
-                        n = m.get("id", "")
-                        if n: self.model_combo.addItem(n)
-            else:
-                r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
-                if r.status_code == 200:
-                    for m in r.json().get("models", []):
-                        n = m.get("name", "")
-                        if n: self.model_combo.addItem(n)
-            idx = self.model_combo.findText(OLLAMA_MODEL)
-            if idx >= 0:
-                self.model_combo.setCurrentIndex(idx)
-            elif self.model_combo.count() > 0:
-                self.model_combo.setCurrentIndex(0)
-        except:
-            self.model_combo.addItem(OLLAMA_MODEL)
-        self.model_combo.blockSignals(False)
-        # Always sync the global to whatever is actually selected
-        current = self.model_combo.currentText()
-        if current:
-            OLLAMA_MODEL = current
+        # Update toolbar label
+        if hasattr(self, 'model_label'):
+            self.model_label.setText(OLLAMA_MODEL if OLLAMA_MODEL else "No model")
         # Update status bar with backend info
         if hasattr(self, '_status_model'):
             backend_label = " (LM Studio)" if AI_BACKEND == "lmstudio" else ""
             self._status_model.setText(f"{OLLAMA_MODEL}{backend_label}")
             self._status_model.setToolTip(
                 f"Backend: {'LM Studio' if AI_BACKEND == 'lmstudio' else 'Ollama'}")
-        # Update model desc label (clear for LM Studio, generate for Ollama)
+        # Update model desc label
         self._update_model_desc()
         # Rebuild system prompt in conversation (e.g. after rules change)
         if hasattr(self, 'chat_panel') and self.chat_panel._conversation:
@@ -11504,16 +11482,24 @@ class MainWindow(QMainWindow):
                     self.chat_panel._build_system_prompt()
 
     def _on_model_changed(self, name):
+        """Called when model selection changes (from ModelsTab or /model command)."""
         global OLLAMA_MODEL
         if name and name != OLLAMA_MODEL:
             OLLAMA_MODEL = name
+            if hasattr(self, 'model_label'):
+                self.model_label.setText(name)
             self._update_model_desc()
             if hasattr(self, '_status_model'):
-                self._status_model.setText(name)
+                backend_label = " (LM Studio)" if AI_BACKEND == "lmstudio" else ""
+                self._status_model.setText(f"{name}{backend_label}")
             # Refresh system prompt for new model size
             if self.chat_panel._conversation:
                 self.chat_panel._conversation[0]["content"] = \
                     self.chat_panel._build_system_prompt()
+            # Persist model choice
+            cfg = _load_config()
+            cfg["ollama_model"] = name
+            _save_config(cfg)
 
     def _send_errors_to_ai(self):
         if self._compiler_errors:
