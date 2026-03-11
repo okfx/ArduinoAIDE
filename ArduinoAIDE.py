@@ -124,8 +124,15 @@ BTN_DANGER = (f"background:{C['danger']};color:white;border:none;"
               f"border-radius:4px;padding:6px 14px;{FONT_BODY}font-weight:bold;")
 BTN_TOOLBAR = (f"background:{C['teal']};color:white;border:none;"
                f"border-radius:4px;padding:6px 14px;{FONT_BODY}font-weight:bold;")
-BTN_GHOST = (f"background:transparent;color:{C['teal']};border:none;"
-             f"{FONT_SMALL}text-decoration:underline;")
+BTN_GHOST = (
+    f"QPushButton{{background:transparent;color:{C['teal']};border:none;"
+    f"{FONT_SMALL}padding:4px 8px;border-radius:4px;}}"
+    f"QPushButton:hover{{background:{C['bg_hover']};color:{C['teal_hover']};}}"
+    f"QPushButton:pressed{{background:{C['border_light']};color:{C['teal']};}}"
+    f"QPushButton:checked{{background:{C['bg_input']};color:{C['teal_hover']};"
+    f"border:1px solid {C['border_light']};}}"
+    f"QPushButton:disabled{{color:{C['fg_muted']};}}"
+)
 BTN_CHAT_SEND = (f"background:{C['teal']};color:white;border:none;"
                  f"border-radius:10px;font-weight:600;padding:8px 20px;{FONT_CHAT}")
 BTN_CHAT_STOP = (f"background:{C['bg_input']};color:{C['fg']};border:1px solid {C['border_light']};"
@@ -4049,7 +4056,9 @@ class ChatPanel(QWidget):
         bl.setSpacing(8)
         self.send_errors_btn = QPushButton("Attach Errors")
         self.send_errors_btn.setCheckable(True)
+        self.send_errors_btn.setEnabled(False)  # disabled until errors exist
         self.send_errors_btn.setStyleSheet(BTN_GHOST)
+        self.send_errors_btn.toggled.connect(self._on_attach_errors_toggled)
         bl.addWidget(self.send_errors_btn)
         clr = QPushButton("Clear Chat")
         clr.setStyleSheet(BTN_GHOST)
@@ -4187,9 +4196,20 @@ class ChatPanel(QWidget):
         self._symbol_index = {}
         QTimer.singleShot(0, self._build_symbol_index)
 
+    def _on_attach_errors_toggled(self, checked):
+        """Visual feedback when Attach Errors is toggled."""
+        if checked:
+            self.send_errors_btn.setText("\u2714 Errors Attached")
+        else:
+            self.send_errors_btn.setText("Attach Errors")
+
     def set_error_context(self, e, diagnostics=None):
         self._error_context = e
         self._error_diagnostics = diagnostics or []
+        has_errors = bool(e and e.strip())
+        self.send_errors_btn.setEnabled(has_errors)
+        if not has_errors:
+            self.send_errors_btn.setChecked(False)
         # If the apply bar is open, refresh its intent badge with updated diagnostics
         if self._pending_edits:
             self._refresh_apply_summary()
@@ -4669,9 +4689,16 @@ Be specific. Reference actual code from the files in context."""
         # Overlay editor buffer content onto scanned files.
         # Buffer-only edits (save_to_disk=False) are only in the editor widget,
         # not on disk — the editor buffer is the authoritative source for open files.
+        # Only include files that live under the project directory to avoid
+        # cross-project pollution from tabs left open from other projects.
         active_file = self._editor_ref.current_file() if self._editor_ref else None
         open_files = self._editor_ref.get_all_files() if self._editor_ref else {}
+        norm_proj = os.path.normpath(proj) + os.sep
         for fp, content in open_files.items():
+            norm_fp = os.path.normpath(fp)
+            is_active = active_file and norm_fp == os.path.normpath(active_file)
+            if not is_active and not norm_fp.startswith(norm_proj):
+                continue  # skip cross-project files (unless active tab)
             rel = os.path.relpath(fp, proj)
             all_files[rel] = content  # override disk content with buffer content
 
@@ -6389,6 +6416,16 @@ Be specific. Reference actual code from the files in context."""
             if self._selection_mode:
                 self._handle_selection_response(self._current_response)
                 self._selection_mode = False
+                # Re-render widget to show clean replacement code
+                if self._current_ai_widget and self._pending_edits:
+                    code = self._pending_edits[0].new_text.rstrip('\n')
+                    escaped = html.escape(code)
+                    self._current_ai_widget.setHtml(
+                        f'<pre style="{self._CODE_BLOCK_STYLE}'
+                        f'color:{C["fg"]};">{escaped}</pre>'
+                    )
+                    QTimer.singleShot(50, lambda w=self._current_ai_widget:
+                        w.setFixedHeight(max(30, int(w.document().size().height()) + 20)))
             else:
                 # Strip think blocks from history — keep only final answer
                 _clean_hist = re.sub(
