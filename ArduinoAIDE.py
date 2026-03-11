@@ -507,7 +507,8 @@ OLLAMA_CHAT_OPTIONS = {
 }
 
 # Stop sequences to catch format leakage
-OLLAMA_STOP_SEQUENCES = ["```", "<|im_start|>", "<|im_end|>", "<think>"]
+OLLAMA_STOP_SEQUENCES = ["<|im_start|>", "<|im_end|>", "<think>", "</think>",
+                          "<|assistant|>", "<|user|>", "<|system|>"]
 
 # Persist custom rules to disk
 _RULES_FILE = os.path.expanduser("~/.teensy_ide_rules.txt")
@@ -723,6 +724,33 @@ Assistant: Sure, I can help with that. Please provide the file path and confirm 
 ```
 This change should solve the issue.
 
+COMMON MISTAKES — NEVER DO THESE
+
+1. Do NOT wrap edit blocks in markdown fences:
+WRONG: ```
+<<<EDIT file.cpp
+WRONG: >>>END
+```
+RIGHT: <<<EDIT file.cpp (no fence)
+
+2. Do NOT add preamble before edits:
+WRONG: Here's the fix for the compile error:
+<<<EDIT file.cpp ...
+RIGHT: <<<EDIT file.cpp ...
+
+3. Do NOT explain after edits:
+WRONG: >>>END
+This change adds the missing include.
+RIGHT: >>>END
+
+4. Do NOT offer alternatives or ask follow-up questions after edits.
+
+5. Do NOT use unified diff format (no +/- lines, no @@ markers).
+
+6. Do NOT use <<<FILE to rewrite an existing file — use <<<EDIT instead.
+
+7. When fixing compiler errors, produce ONLY edit blocks. No diagnosis, no explanation.
+
 A Teensy quick reference is appended below. A comprehensive API reference may also be in your file context — consult it for pin mappings, peripheral APIs, and library usage."""
 
 # Load Teensy quick reference (appended to system prompt at startup)
@@ -863,12 +891,22 @@ EXAMPLE 3 — Answer a question (no edit blocks):
 The analogWrite() function on Teensy 4.1 has 12-bit resolution by default.
 Call analogWriteResolution(10) to use 10-bit.
 
-DO NOT DO THIS — bad output:
-Sure! Here's the fix:
-```cpp
-#include <Arduino.h>
+ALSO BAD — wrapping edits in fences:
 ```
-This should resolve the issue.
+<<<EDIT src/main.cpp
+<<<OLD
+...
+```
+
+ALSO BAD — adding explanation after edits:
+>>>END
+This should fix the compile error by adding the missing header.
+
+ADDITIONAL RULES:
+7. When fixing errors: output ONLY edit blocks. No diagnosis text.
+8. Do NOT wrap edit blocks inside ``` fences.
+9. Do NOT add text before or after edit blocks.
+10. Do NOT use <<<FILE for existing files — always use <<<EDIT.
 
 A Teensy quick reference is appended below. A comprehensive API reference may also be in your file context — consult it for pin mappings, peripheral APIs, and library usage."""
 
@@ -5404,6 +5442,7 @@ Be specific. Reference actual code from the files in context."""
 
     def _send_prompt(self, text, display_text=None, display_code=None):
         """Core send method used by both manual chat and AI actions."""
+        self._format_retry_done = False
         # Guard: reject if a generation is already in progress
         if self.thread.isRunning():
             self._add_info_msg(
@@ -5461,9 +5500,19 @@ Be specific. Reference actual code from the files in context."""
             msg += f"\n{git_ctx}\n"
         if self.send_errors_btn.isChecked() and self._error_context:
             msg += "\n" + self._build_diagnostic_context() + "\n"
+            self._errors_were_attached = True
             self.send_errors_btn.setChecked(False)
-        # Targeting reminder — stronger when a named file was detected
-        if self._target_override:
+        else:
+            self._errors_were_attached = False
+        # Targeting reminder — strongest for error-fixing, then named file, then generic
+        if self._errors_were_attached or (self._auto_fix_active and self._auto_fix_retries > 0):
+            target_reminder = (
+                "\n[INSTRUCTION: Fix the compiler errors shown above. "
+                "Output ONLY <<<EDIT blocks. No explanation. No preamble. No markdown fences. "
+                "Match OLD text EXACTLY from the file context above.]\n"
+                f"\n[USER REQUEST:]\n{text}"
+            )
+        elif self._target_override:
             target_reminder = (
                 f"\n[REMINDER: The project files are above — you already have them. "
                 "Respond with <<<EDIT blocks when changes are needed. Do not ask for file paths or permission. "
@@ -5485,20 +5534,35 @@ Be specific. Reference actual code from the files in context."""
         show = display_text or text
         self._add_user_msg(show, code=display_code)
 
-        # For small models, inject a 1-line conversation summary
+        # For small models, inject a concise conversation summary
         if AI_MODEL_PARAMS_B > 0 and AI_MODEL_PARAMS_B <= 14 and len(self._conversation) > 3:
             summary_parts = []
             for entry in self._conversation[1:]:  # skip system prompt
                 role = entry["role"]
-                content = entry["content"][:100].replace("\n", " ").strip()
+                content = entry["content"]
                 if role == "user":
-                    summary_parts.append(f"User: {content}")
+                    # Extract just the [USER REQUEST:] part if present
+                    req_idx = content.find("[USER REQUEST:]")
+                    if req_idx >= 0:
+                        user_text_s = content[req_idx + 15:].strip()[:150]
+                    else:
+                        user_text_s = content[:150]
+                    user_text_s = user_text_s.replace("\n", " ").strip()
+                    summary_parts.append(f"User: {user_text_s}")
                 elif role == "assistant":
-                    summary_parts.append(f"AI: {content}")
-            if len(summary_parts) > 6:
-                summary_parts = summary_parts[-6:]
-            summary = " → ".join(summary_parts)
-            msg = f"[Conversation so far: {summary}]\n\n{msg}"
+                    if '<<<EDIT' in content or '<<<FILE' in content:
+                        edit_count = content.count('<<<EDIT') + content.count('<<<FILE')
+                        files_edited = set(re.findall(
+                            r'<<<(?:EDIT|FILE)\s+(\S+)', content))
+                        summary_parts.append(
+                            f"AI: [{edit_count} edit(s) to {', '.join(files_edited)}]")
+                    else:
+                        summary_parts.append(
+                            f"AI: {content[:120].replace(chr(10), ' ').strip()}")
+            if len(summary_parts) > 8:
+                summary_parts = summary_parts[-8:]
+            summary = " | ".join(summary_parts)
+            msg = f"[Prior conversation: {summary}]\n\n{msg}"
 
         self._conversation.append({"role": "user", "content": msg})
         self.input_field.clear()
@@ -5879,6 +5943,26 @@ Be specific. Reference actual code from the files in context."""
             if preamble:
                 issues.append("preamble")
         return (len(issues) == 0, issues)
+
+    def _edits_were_expected(self, user_text):
+        """Heuristic: did the user likely expect code edits in the response?"""
+        if not user_text:
+            return False
+        text_lower = user_text.lower()
+        if self._auto_fix_active:
+            return True
+        if getattr(self, '_errors_were_attached', False):
+            return True
+        action_words = [
+            'fix', 'add', 'remove', 'delete', 'change', 'replace', 'update',
+            'implement', 'create', 'modify', 'refactor', 'rename', 'move',
+            'insert', 'write', 'make', 'set', 'convert', 'switch', 'swap',
+            'rewrite', 'optimize', 'include', 'import',
+        ]
+        has_action = any(w in text_lower.split() for w in action_words)
+        is_question = text_lower.startswith(
+            ('what ', 'why ', 'how does ', 'explain ', 'describe '))
+        return has_action and not is_question
 
     def _strip_latex(self, text):
         """Convert common LaTeX formatting to plain text."""
@@ -6262,13 +6346,44 @@ Be specific. Reference actual code from the files in context."""
             if not _is_valid and _fmt_issues:
                 cleaned = self._current_response
                 if "markdown_fence" in _fmt_issues:
-                    cleaned = re.sub(r'```\w*\n?', '', cleaned)
+                    # Remove fences that wrap edit blocks
+                    cleaned = re.sub(
+                        r'```\w*\n(<<<(?:EDIT|FILE|INSERT_BEFORE|INSERT_AFTER))',
+                        r'\1', cleaned)
+                    cleaned = re.sub(
+                        r'(>>>(?:END|FILE|CONTENT))\n```',
+                        r'\1', cleaned)
+                    # Remove any remaining orphan fences if edits present
+                    if '<<<EDIT' in cleaned or '<<<FILE' in cleaned:
+                        cleaned = re.sub(r'^```\w*$', '', cleaned, flags=re.MULTILINE)
                 if "think_leak" in _fmt_issues:
                     cleaned = re.sub(
                         r'<think>.*?</think>', '', cleaned, flags=re.DOTALL)
                 if "special_token" in _fmt_issues:
                     cleaned = cleaned.replace(
                         '<|im_start|>', '').replace('<|im_end|>', '')
+                if "preamble" in _fmt_issues:
+                    # Strip text before first edit marker
+                    first_edit_idx = None
+                    for marker in ['<<<EDIT', '<<<FILE', '<<<INSERT_BEFORE',
+                                   '<<<INSERT_AFTER', '<<<REPLACEMENT>>>']:
+                        idx = cleaned.find(marker)
+                        if idx >= 0 and (first_edit_idx is None or idx < first_edit_idx):
+                            first_edit_idx = idx
+                    if first_edit_idx is not None and first_edit_idx > 0:
+                        cleaned = cleaned[first_edit_idx:]
+                # Strip trailing commentary after last edit closure
+                if any(m in cleaned for m in ['>>>END', '>>>FILE']):
+                    last_end = max(
+                        cleaned.rfind('>>>END'),
+                        cleaned.rfind('>>>FILE'),
+                        cleaned.rfind('>>>CONTENT'))
+                    if last_end >= 0:
+                        eol = cleaned.find('\n', last_end)
+                        if eol >= 0 and eol < len(cleaned) - 1:
+                            trailing = cleaned[eol + 1:].strip()
+                            if trailing and '<<<' not in trailing:
+                                cleaned = cleaned[:eol + 1]
                 self._current_response = cleaned.strip()
             # Selection mode: bypass <<<EDIT parser, handle replacement directly
             if self._selection_mode:
@@ -6289,6 +6404,38 @@ Be specific. Reference actual code from the files in context."""
                 result = AIWorkResult(assistant_text=self._current_response)
                 result.diagnostics = list(self._error_diagnostics)
                 self._parse_edits(self._current_response, result)
+                # Auto-retry if edit blocks expected but none found
+                if (not result.proposed_edits
+                        and not getattr(self, '_format_retry_done', False)):
+                    # Extract user text from last user message
+                    last_user = ""
+                    for entry in reversed(self._conversation):
+                        if entry.get("role") == "user":
+                            last_user = entry.get("content", "")
+                            break
+                    if self._edits_were_expected(last_user):
+                        self._format_retry_done = True
+                        self._add_info_msg(
+                            "Response didn't contain valid edit blocks. "
+                            "Retrying with format reminder...",
+                            C['fg_warn'])
+                        retry_prompt = (
+                            "Your previous response did not contain valid edit blocks. "
+                            "Rewrite your response using ONLY this format:\n\n"
+                            "<<<EDIT path/to/file.ext\n<<<OLD\nexact existing code\n"
+                            ">>>NEW\nreplacement code\n>>>END\n\n"
+                            "Output the edit blocks NOW with no other text."
+                        )
+                        self._conversation.append(
+                            {"role": "user", "content": retry_prompt})
+                        self._add_ai_msg()
+                        self._current_response = ""
+                        self.worker.messages = list(self._conversation)
+                        self.input_field.setEnabled(False)
+                        self.send_btn.setEnabled(False)
+                        self.stop_btn.setEnabled(True)
+                        self.thread.start()
+                        return
                 self._last_work_result = result
         # Finalize stats — stop spinner, show final stats
         self._finalize_stats()
