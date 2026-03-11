@@ -736,6 +736,76 @@ except (FileNotFoundError, OSError):
 if _TEENSY_QUICK_REF:
     SYSTEM_PROMPT += "\n\n--- TEENSY QUICK REFERENCE ---\n" + _TEENSY_QUICK_REF
 
+# ── Knowledge Base skill files ─────────────────────────────────────────────
+_KB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docs', 'kb')
+
+_KB_INDEX = {
+    # SPI
+    'spi': 'spi', 'mosi': 'spi', 'miso': 'spi', 'sck': 'spi',
+    'spi.transfer': 'spi', 'spibegintransaction': 'spi', 'spisettings': 'spi',
+    # I2C / Wire
+    'i2c': 'i2c', 'wire': 'i2c', 'sda': 'i2c', 'scl': 'i2c',
+    'wire.begin': 'i2c', 'begintransmission': 'i2c', 'requestfrom': 'i2c',
+    'pullup': 'i2c',
+    # Interrupts
+    'interrupt': 'interrupts', 'attachinterrupt': 'interrupts',
+    'intervaltimer': 'interrupts', 'isr': 'interrupts', 'volatile': 'interrupts',
+    'nointerrupts': 'interrupts', 'detachinterrupt': 'interrupts',
+    # Timing
+    'delay': 'timing', 'millis': 'timing', 'micros': 'timing',
+    'elapsedmillis': 'timing', 'elapsedmicros': 'timing',
+    'non-blocking': 'timing', 'nonblocking': 'timing', 'timing': 'timing',
+    # Serial/Debug
+    'serial.print': 'serial_debug', 'printf': 'serial_debug',
+    'serial1': 'serial_debug', 'serial2': 'serial_debug', 'uart': 'serial_debug',
+    'baud': 'serial_debug', 'serial monitor': 'serial_debug',
+    # Memory
+    'progmem': 'memory', 'dmamem': 'memory', 'f() macro': 'memory',
+    'f("': 'memory', 'freeram': 'memory', 'stack overflow': 'memory',
+    'out of memory': 'memory', 'ram': 'memory',
+    # Common errors
+    'was not declared': 'common_errors', 'undefined reference': 'common_errors',
+    'redefinition': 'common_errors', 'multiple definition': 'common_errors',
+    'no matching function': 'common_errors', 'expected': 'common_errors',
+    'lvalue required': 'common_errors',
+    # Libraries
+    'neopixel': 'libraries', 'ws2812': 'libraries', 'servo': 'libraries',
+    'accelstepper': 'libraries', 'stepper': 'libraries', 'encoder': 'libraries',
+    'sd card': 'libraries', 'sd.begin': 'libraries', 'audio': 'libraries',
+    'audiomemory': 'libraries',
+}
+
+_kb_cache = {}  # filename -> content
+
+
+def _load_kb_file(name):
+    """Load a knowledge base file by name. Returns content or None."""
+    if name in _kb_cache:
+        return _kb_cache[name]
+    path = os.path.join(_KB_DIR, f'{name}.md')
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            _kb_cache[name] = content
+            return content
+        except OSError:
+            pass
+    return None
+
+
+def _match_kb_keywords(text):
+    """Return set of kb file names matching keywords in text. Max 3."""
+    text_lower = text.lower()
+    matched = set()
+    for keyword, kb_name in _KB_INDEX.items():
+        if keyword in text_lower:
+            matched.add(kb_name)
+        if len(matched) >= 3:
+            break
+    return matched
+
+
 SYSTEM_PROMPT_SMALL = """You are ArduinoAIDE, a firmware coding assistant for Teensy and Arduino projects.
 
 RULES
@@ -4607,6 +4677,20 @@ Be specific. Reference actual code from the files in context."""
                     except OSError:
                         pass
 
+        # Knowledge Base: load skill files matching user keywords
+        kb_matches = set()
+        if user_text:
+            kb_matches |= _match_kb_keywords(user_text)
+        if getattr(self, 'send_errors_btn', None) and self.send_errors_btn.isChecked():
+            kb_matches |= _match_kb_keywords(self._error_context or '')
+        for kb_name in kb_matches:
+            kb_content = _load_kb_file(kb_name)
+            if kb_content:
+                kb_rel = f'kb/{kb_name}.md'
+                self._working_set.add(
+                    os.path.join(_KB_DIR, f'{kb_name}.md'),
+                    kb_rel, 2, kb_content)
+
         # Boost files referenced by #include in the active file
         if active_file and active_file in open_files:
             active_content = open_files[active_file]
@@ -4814,6 +4898,7 @@ Be specific. Reference actual code from the files in context."""
         "fix":     "Ask AI to fix compile errors using diagnostics",
         "help":    "Show available slash commands",
         "context": "Show what the AI sees (file list, git status, context size)",
+        "ref":     "Load a reference topic — /ref spi, /ref list",
     }
 
     def _on_input_text_changed(self, text):
@@ -4940,6 +5025,8 @@ Be specific. Reference actual code from the files in context."""
             self._cmd_fix()
         elif cmd == "context":
             self._cmd_context()
+        elif cmd == "ref":
+            self._cmd_ref(args)
         elif cmd == "debug-ws":
             self._cmd_debug_working_set()
         elif cmd == "debug-use-ws":
@@ -5163,11 +5250,56 @@ Be specific. Reference actual code from the files in context."""
                 if line.startswith("Branch:"):
                     summary += f", git: {line.split(':', 1)[1].strip()}"
                     break
+        # KB files loaded
+        kb_loaded = [rp for rp in self._working_set.entries if rp.startswith('kb/')]
+        if kb_loaded:
+            kb_names = ', '.join(rp.replace('kb/', '').replace('.md', '') for rp in kb_loaded)
+            summary += f"\n  Knowledge base: {kb_names}"
         # Show truncated preview
         preview = total[:2000]
         if len(total) > 2000:
             preview += f"\n... ({len(total) - 2000:,} more chars)"
         self._add_info_msg(f"{summary}\n\n{preview}", C['fg_dim'])
+
+    def _cmd_ref(self, args):
+        """Load a reference topic or list available ones."""
+        name = args.strip().lower()
+        if not name or name == 'list':
+            available = []
+            if os.path.isdir(_KB_DIR):
+                for fname in sorted(os.listdir(_KB_DIR)):
+                    if fname.endswith('.md'):
+                        available.append(fname[:-3])
+            if available:
+                self._add_info_msg(
+                    f"Available references: {', '.join(available)}\n"
+                    f"Usage: /ref <name>  (e.g., /ref spi)",
+                    C['fg_dim'])
+            else:
+                self._add_info_msg(
+                    "No knowledge base files found in docs/kb/", C['fg_dim'])
+            return
+        content = _load_kb_file(name)
+        if content:
+            inject_msg = f"[REFERENCE: {name}]\n{content}\n[END REFERENCE]"
+            self._conversation.append({"role": "user", "content": inject_msg})
+            self._add_info_msg(
+                f"Loaded reference: {name} ({len(content)} chars). "
+                f"The AI can now use this information.",
+                C['teal'])
+        else:
+            available = []
+            if os.path.isdir(_KB_DIR):
+                available = [f[:-3] for f in os.listdir(_KB_DIR) if f.endswith('.md')]
+            close = [a for a in available if name in a or a in name]
+            if close:
+                self._add_info_msg(
+                    f"Reference '{name}' not found. Did you mean: {', '.join(close)}?",
+                    C['fg_warn'])
+            else:
+                self._add_info_msg(
+                    f"Reference '{name}' not found. Use /ref list to see available topics.",
+                    C['fg_warn'])
 
     def _cmd_debug_working_set(self):
         """Debug command: dump WorkingSet contents and last prompt stats."""
