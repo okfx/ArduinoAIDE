@@ -10240,8 +10240,6 @@ class MainWindow(QMainWindow):
         self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.model_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.model_combo.setMinimumWidth(140)
-        self._refresh_models()
-        self.model_combo.currentTextChanged.connect(self._on_model_changed)
         toolbar.addWidget(self.model_combo)
 
         self.model_desc_label = QLabel("")
@@ -10249,6 +10247,9 @@ class MainWindow(QMainWindow):
             f"color:{C['fg_dim']};{FONT_SMALL}font-style:italic;"
             f"background:transparent;border:none;margin-left:4px;")
         toolbar.addWidget(self.model_desc_label)
+
+        self._refresh_models()
+        self.model_combo.currentTextChanged.connect(self._on_model_changed)
         self._update_model_desc()
 
         # Spacer to push spinner to the right
