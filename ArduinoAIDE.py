@@ -10,7 +10,7 @@ Requirements:
     pip3 install PyQt6 PyQt6-QScintilla requests
 """
 
-import sys, os, json, glob, re, threading, subprocess, math, html, time
+import sys, os, json, glob, re, threading, subprocess, math, html, time, datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -218,8 +218,10 @@ class WorkingSet:
                 used += entry.token_estimate
             else:
                 size_chars = len(entry.content)
+                line_count = len(entry.content.splitlines())
                 stubs.append(
-                    f"[FILE: {entry.rel_path} — {size_chars} chars, not included (budget)]")
+                    f"[FILE: {entry.rel_path} — {size_chars} chars, "
+                    f"{line_count} lines, not loaded (ask about it to load)]")
         parts = [
             f"[PROJECT: {project_name}]",
             f"[DIRECTORY: {project_path}]",
@@ -4196,18 +4198,20 @@ Instead:
 4. Note any risks, edge cases, or dependencies.
 5. End with a summary of the changes you would make.
 Be specific. Reference actual code from the files in context."""
-        # Prepend project-level .aide_prompt if found
+        # Prepend project-level AIDE.md or .aide_prompt if found
         proj = getattr(self, '_project_path', None) or ""
         if proj:
-            custom_file = os.path.join(proj, ".aide_prompt")
-            if os.path.isfile(custom_file):
-                try:
-                    with open(custom_file, 'r', encoding='utf-8') as f:
-                        custom = f.read().strip()
-                    if custom:
-                        return custom + "\n\n" + base
-                except OSError:
-                    pass
+            for fname in ("AIDE.md", ".aide_prompt"):
+                custom_file = os.path.join(proj, fname)
+                if os.path.isfile(custom_file):
+                    try:
+                        with open(custom_file, 'r', encoding='utf-8') as f:
+                            custom = f.read().strip()
+                        if custom:
+                            return custom + "\n\n" + base
+                    except OSError:
+                        pass
+                    break  # Only use the first one found
         return base
 
     def _scan_project_files(self, project_path):
@@ -4519,7 +4523,7 @@ Be specific. Reference actual code from the files in context."""
         if mw and hasattr(mw, '_refresh_outline'):
             mw._refresh_outline()
 
-    def _build_file_context(self):
+    def _build_file_context(self, user_text=""):
         """Build file context string for AI prompts. Uses WorkingSet with token budget
         by default. Hidden fallback to full-context via /debug-use-ws off."""
         proj = getattr(self, '_project_path', None) or ""
@@ -4603,6 +4607,36 @@ Be specific. Reference actual code from the files in context."""
                     except OSError:
                         pass
 
+        # Boost files referenced by #include in the active file
+        if active_file and active_file in open_files:
+            active_content = open_files[active_file]
+            includes = re.findall(r'#include\s*"([^"]+)"', active_content)
+            include_basenames = set()
+            for inc in includes:
+                basename = os.path.basename(inc)
+                stem = os.path.splitext(basename)[0]
+                include_basenames.add(basename)
+                for ext in ('.cpp', '.c', '.h', '.hpp'):
+                    include_basenames.add(stem + ext)
+            for _rp, entry in self._working_set.entries.items():
+                if entry.priority > 1:
+                    fname = os.path.basename(_rp)
+                    if fname in include_basenames:
+                        entry.priority = 1
+
+        # Keyword-based relevance boosting
+        if user_text:
+            self._boost_by_keywords(user_text)
+
+        # Smart truncation: truncate large low-priority files to save budget
+        for _rp, entry in list(self._working_set.entries.items()):
+            if entry.priority >= 2 and len(entry.content.split('\n')) > 100:
+                truncated = self._smart_truncate(entry.content, _rp)
+                est = len(truncated) // 4
+                self._working_set.entries[_rp] = WorkingSetEntry(
+                    entry.filepath, entry.rel_path, entry.priority,
+                    truncated, est)
+
         self._update_context_display(proj_name, proj, sorted(all_files.keys()))
 
         # Debug fallback: old full-context (all files, no budget)
@@ -4655,6 +4689,60 @@ Be specific. Reference actual code from the files in context."""
             "target_override": self._target_override,
         }
         return context
+
+    def _boost_by_keywords(self, user_text):
+        """Boost WorkingSet files that match keywords in the user's message."""
+        stop_words = {
+            'the', 'and', 'for', 'this', 'that', 'with', 'from', 'have', 'been',
+            'will', 'can', 'not', 'but', 'are', 'was', 'were', 'has', 'had',
+            'its', 'does', 'did', 'how', 'why', 'what', 'when', 'where', 'who',
+            'make', 'use', 'add', 'fix', 'get', 'set', 'put', 'run', 'let',
+            'code', 'file', 'function', 'change', 'error', 'please', 'help',
+            'want', 'need', 'should', 'would', 'could',
+        }
+        words = set(re.findall(r'[a-zA-Z_]\w{2,}', user_text.lower()))
+        keywords = words - stop_words
+        if not keywords:
+            return
+        for _rp, entry in self._working_set.entries.items():
+            if entry.priority <= 1:
+                continue
+            content_lower = entry.content.lower()
+            matches = sum(1 for kw in keywords if kw in content_lower)
+            if matches >= 2:
+                entry.priority = min(entry.priority, 1)
+            elif matches == 1:
+                entry.priority = min(entry.priority, 2)
+
+    def _smart_truncate(self, content, rel_path, max_lines=60):
+        """Truncate a large file to its most relevant sections:
+        first 15 lines, function signatures, and last 5 lines."""
+        lines = content.split('\n')
+        if len(lines) <= max_lines:
+            return content
+        result_lines = []
+        head_count = min(15, len(lines))
+        result_lines.extend(lines[:head_count])
+        result_lines.append(f"    // ... [{len(lines)} lines total] ...")
+        result_lines.append("")
+        func_pattern = re.compile(
+            r'^[a-zA-Z_][\w\s\*&:<>]+\s+(\w+)\s*\([^;]*\)\s*(?:const\s*)?(?:override\s*)?[{]?\s*$')
+        for i, line in enumerate(lines[head_count:], start=head_count):
+            if func_pattern.match(line.strip()):
+                end = min(i + 3, len(lines))
+                result_lines.append(f"    // --- line {i+1} ---")
+                result_lines.extend(lines[i:end])
+                if end < len(lines) and not lines[end-1].strip().startswith('}'):
+                    result_lines.append("        // ...")
+                result_lines.append("")
+        if len(lines) > head_count + 5:
+            result_lines.append("    // --- end of file ---")
+            result_lines.extend(lines[-5:])
+        trunc_lines = result_lines
+        if len(trunc_lines) > max_lines:
+            trunc_lines = trunc_lines[:max_lines]
+            trunc_lines.append(f"    // ... [truncated at {max_lines} lines]")
+        return '\n'.join(trunc_lines)
 
     def _check_working_set_safety(self, included_files):
         """Check that WorkingSet includes critical files. Returns list of warning strings.
@@ -5235,7 +5323,7 @@ Be specific. Reference actual code from the files in context."""
         self._target_override = self._detect_named_files(text)
 
         # Build the full message with automatic file + git context
-        msg = self._build_file_context()
+        msg = self._build_file_context(user_text=text)
         git_ctx = self._build_git_context()
         if git_ctx:
             msg += f"\n{git_ctx}\n"
@@ -8651,6 +8739,65 @@ class RulesTab(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
+        # ── Project Memory (AIDE.md) section ──────────────────────────────
+        self._project_path = None
+
+        aide_hdr = QLabel("PROJECT MEMORY (AIDE.md)")
+        aide_hdr.setStyleSheet(SETTINGS_STITLE)
+        layout.addWidget(aide_hdr)
+
+        aide_hint = QLabel("Project-specific instructions loaded into every AI conversation.")
+        aide_hint.setWordWrap(True)
+        aide_hint.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        layout.addWidget(aide_hint)
+
+        self._aide_md_edit = QTextEdit()
+        self._aide_md_edit.setPlaceholderText(
+            "Project-specific instructions for the AI.\n"
+            "This file is loaded at the start of every conversation.\n\n"
+            "Example:\n"
+            "  Board: Teensy 4.1\n"
+            "  Libraries: Servo.h, Wire.h\n"
+            "  Pin 9: Motor PWM\n"
+            "  Always use IntervalTimer instead of delay()")
+        self._aide_md_edit.setStyleSheet(
+            f"QTextEdit {{ background:{C['bg_input']};color:{C['fg']};"
+            f"border:1px solid {C['border_light']};border-radius:6px;"
+            f"padding:8px;{FONT_CODE} }}")
+        self._aide_md_edit.setMaximumHeight(200)
+        layout.addWidget(self._aide_md_edit)
+
+        aide_btn_row = QHBoxLayout()
+        aide_btn_row.setSpacing(8)
+
+        aide_save_btn = QPushButton("Save")
+        aide_save_btn.setStyleSheet(BTN_SM_PRIMARY)
+        aide_save_btn.setToolTip("Save AIDE.md to project root")
+        aide_save_btn.clicked.connect(self._save_aide_md)
+        aide_btn_row.addWidget(aide_save_btn)
+
+        aide_auto_btn = QPushButton("Auto-Populate")
+        aide_auto_btn.setStyleSheet(BTN_SM_SECONDARY)
+        aide_auto_btn.setToolTip("Scan project and generate AIDE.md content")
+        aide_auto_btn.clicked.connect(self._auto_populate_aide_md)
+        aide_btn_row.addWidget(aide_auto_btn)
+
+        self._aide_status = QLabel("")
+        self._aide_status.setStyleSheet(f"color:{C['fg_dim']};{FONT_SMALL}")
+        aide_btn_row.addWidget(self._aide_status)
+        aide_btn_row.addStretch()
+        layout.addLayout(aide_btn_row)
+
+        aide_sep = QFrame()
+        aide_sep.setFrameShape(QFrame.Shape.HLine)
+        aide_sep.setStyleSheet(f"color:{C['border']};margin-top:8px;margin-bottom:4px;")
+        layout.addWidget(aide_sep)
+
+        # ── System Prompt Rules section ───────────────────────────────────
+        rules_hdr = QLabel("SYSTEM PROMPT RULES")
+        rules_hdr.setStyleSheet(SETTINGS_STITLE)
+        layout.addWidget(rules_hdr)
+
         desc = QLabel(
             "Edit the system prompt rules that control how the AI assistant behaves. "
             "Changes take effect on the next message.")
@@ -8905,6 +9052,104 @@ class RulesTab(QWidget):
         lay.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
         dlg.exec()
 
+    # ── AIDE.md methods ─────────────────────────────────────────────────
+
+    def set_project_path(self, path):
+        """Store project path and reload AIDE.md content."""
+        self._project_path = path
+        self._load_aide_md()
+
+    def _load_aide_md(self):
+        """Load AIDE.md (or .aide_prompt) into the editor."""
+        proj = self._project_path
+        if not proj:
+            self._aide_md_edit.clear()
+            self._aide_status.setText("")
+            return
+        for fname in ("AIDE.md", ".aide_prompt"):
+            fpath = os.path.join(proj, fname)
+            if os.path.isfile(fpath):
+                try:
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        self._aide_md_edit.setPlainText(f.read())
+                    self._aide_status.setText(f"Loaded {fname}")
+                except OSError:
+                    self._aide_status.setText(f"Error reading {fname}")
+                return
+        self._aide_md_edit.clear()
+        self._aide_status.setText("No AIDE.md found — click Auto-Populate to create one")
+
+    def _save_aide_md(self):
+        """Save editor content to AIDE.md in the project root."""
+        proj = self._project_path
+        if not proj:
+            self._aide_status.setText("No project open")
+            return
+        aide_path = os.path.join(proj, "AIDE.md")
+        try:
+            with open(aide_path, 'w', encoding='utf-8') as f:
+                f.write(self._aide_md_edit.toPlainText())
+            self._aide_status.setText(f"Saved to {os.path.basename(proj)}/AIDE.md")
+            self._aide_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+        except OSError as e:
+            self._aide_status.setText(f"Error saving: {e}")
+            self._aide_status.setStyleSheet(f"color:{C['fg_err']};{FONT_SMALL}")
+
+    def _auto_populate_aide_md(self):
+        """Scan the project and auto-generate AIDE.md content."""
+        proj = self._project_path
+        if not proj:
+            self._aide_status.setText("No project open")
+            return
+        parts = [f"# Project: {os.path.basename(proj)}", ""]
+        parts.append("## Board")
+        parts.append("(set from toolbar)")
+        parts.append("")
+        libs = set()
+        pins = []
+        for root, dirs, files in os.walk(proj):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in PROJECT_SKIP_DIRS]
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in {'.ino', '.cpp', '.c', '.h', '.hpp'}:
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line.startswith('#include'):
+                                m = re.match(r'#include\s*[<"]([^>"]+)[>"]', line)
+                                if m:
+                                    libs.add(m.group(1))
+                            pin_m = re.match(
+                                r'(?:#define\s+(\w+(?:_PIN|_pin))\s+(\d+))|'
+                                r'(?:(?:const\s+)?(?:int|uint8_t)\s+(\w*[Pp]in\w*)\s*=\s*(\d+))',
+                                line)
+                            if pin_m:
+                                name = pin_m.group(1) or pin_m.group(3)
+                                num = pin_m.group(2) or pin_m.group(4)
+                                pins.append(f"- Pin {num}: {name}")
+                except OSError:
+                    continue
+        if libs:
+            parts.append("## Libraries")
+            for lib in sorted(libs):
+                parts.append(f"- {lib}")
+            parts.append("")
+        if pins:
+            parts.append("## Pin Assignments (detected)")
+            parts.extend(pins)
+            parts.append("")
+        parts.append("## Coding Conventions")
+        parts.append("(add your preferences here)")
+        parts.append("")
+        parts.append("## Session Log")
+        parts.append("(auto-populated after successful compile-fix cycles)")
+        self._aide_md_edit.setPlainText("\n".join(parts))
+        self._aide_status.setText("Auto-populated — review and click Save")
+        self._aide_status.setStyleSheet(f"color:{C['fg_ok']};{FONT_SMALL}")
+
 
 # =============================================================================
 # Settings Panel — Container
@@ -8950,9 +9195,12 @@ class SettingsPanel(QWidget):
     def _on_tab_changed(self, index):
         if index == 1:  # Git tab
             self.git_tab._refresh()
+        elif index == 2:  # Rules tab
+            self.rules_tab._load_aide_md()
 
     def set_project_path(self, path):
         self.git_tab.set_project_path(path)
+        self.rules_tab.set_project_path(path)
 
     def refresh_models(self):
         """Convenience method for external callers."""
@@ -10516,15 +10764,42 @@ class MainWindow(QMainWindow):
 
     def _reset_fix_attempt_count(self):
         """Reset fix attempt counter, diagnostic snapshot, and stall detection."""
-        # If auto-fix was active, report success
+        # If auto-fix was active, report success and log to AIDE.md
         if self.chat_panel._auto_fix_active:
             self.chat_panel._add_info_msg(
                 "Auto-fix succeeded! Compilation passed.", C['fg_ok'])
+            if hasattr(self, '_compiler_errors') and self._compiler_errors:
+                first_err = self._compiler_errors.split('\n')[0][:80]
+                self._log_aide_session(f"Auto-fixed: {first_err}")
         self.chat_panel._auto_fix_active = False
         self.chat_panel._auto_fix_retries = 0
         self._fix_attempt_count = 0
         self._prev_diagnostics = []
         self._fix_stall_count = 0
+
+    def _log_aide_session(self, summary):
+        """Append a session log entry to AIDE.md."""
+        proj = getattr(self, 'project_path', None)
+        if not proj:
+            return
+        aide_path = os.path.join(proj, "AIDE.md")
+        if not os.path.isfile(aide_path):
+            return
+        try:
+            with open(aide_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+            entry = f"- {date_str}: {summary}"
+            if "## Session Log" in content:
+                content = content.replace(
+                    "## Session Log",
+                    f"## Session Log\n{entry}", 1)
+            else:
+                content += f"\n\n## Session Log\n{entry}"
+            with open(aide_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except OSError:
+            pass
 
     def _on_model_switch(self, model_name):
         """Handle /model command — update toolbar combo and status bar."""
