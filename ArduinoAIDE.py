@@ -8393,8 +8393,10 @@ class ModelsTab(QWidget):
         backend_row.addWidget(t_be)
 
         self._backend_combo = QComboBox()
+        self._backend_combo.blockSignals(True)
         self._backend_combo.addItems(["Ollama", "LM Studio (OpenAI-compatible)"])
         self._backend_combo.setCurrentIndex(1 if AI_BACKEND == "lmstudio" else 0)
+        self._backend_combo.blockSignals(False)
         self._backend_combo.setStyleSheet(SETTINGS_COMBO)
         self._backend_combo.setFixedWidth(220)
         self._backend_combo.currentIndexChanged.connect(self._on_backend_switch)
@@ -11616,12 +11618,23 @@ class MainWindow(QMainWindow):
                 diags = list(self._compiler_diagnostics)
                 QTimer.singleShot(0, lambda: self._update_diag_panel(diags))
                 if r.returncode == 0:
+                    # Check if stderr contains actual errors despite success return code
+                    has_error_lines = any(
+                        'error:' in line.lower()
+                        for line in (r.stderr or '').splitlines())
+                    if has_error_lines:
+                        errors_snap = self._compiler_errors
+                        diags_snap = list(self._compiler_diagnostics)
+                        QTimer.singleShot(0, lambda e=errors_snap, d=diags_snap:
+                            self.chat_panel.set_error_context(e, d))
                     QTimer.singleShot(0, lambda: self.compiler_output.append_output("\nDone compiling.", C["fg_ok"]))
                     QTimer.singleShot(0, self._reset_fix_attempt_count)
                 else:
                     QTimer.singleShot(0, lambda: self.compiler_output.append_output("\nCompilation failed.", C["fg_err"]))
-                    QTimer.singleShot(0, lambda: self.chat_panel.set_error_context(
-                        self._compiler_errors, self._compiler_diagnostics))
+                    errors_snap = self._compiler_errors
+                    diags_snap = list(self._compiler_diagnostics)
+                    QTimer.singleShot(0, lambda e=errors_snap, d=diags_snap:
+                        self.chat_panel.set_error_context(e, d))
                     QTimer.singleShot(0, self._show_fix_errors_btn)
                     QTimer.singleShot(0, self._apply_compile_diagnostics)
             except FileNotFoundError:
@@ -11695,6 +11708,9 @@ class MainWindow(QMainWindow):
     def _show_fix_errors_btn(self):
         """Show fix hint in compiler output; show continuation bar if this follows AI edits."""
         n = len(self._compiler_diagnostics)
+        # Ensure Attach Errors button is enabled (backup for set_error_context)
+        if n > 0 and hasattr(self, 'chat_panel'):
+            self.chat_panel.send_errors_btn.setEnabled(True)
         if self._compile_follows_ai_edits:
             self._compile_follows_ai_edits = False
             hint = f"\nErrors remain after applying AI changes ({n} diagnostic{'s' if n != 1 else ''})."
@@ -11862,17 +11878,22 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         # Save project state before closing
         self._save_project_state()
-        # Save application state before closing
-        config = {
+        # Save application state — merge into existing config to preserve
+        # backend, URL, and other settings saved by ModelsTab
+        config = _load_config()
+        config.update({
             "project_path": self.project_path,
             "ollama_model": OLLAMA_MODEL,
+            "ai_backend": AI_BACKEND,
+            "ollama_url": OLLAMA_URL,
+            "lmstudio_url": LMSTUDIO_URL,
             "board_fqbn": self._current_fqbn(),
             "port": self.port_combo.currentText() if hasattr(self, 'port_combo') else "",
             "window_geometry": [
                 self.geometry().x(), self.geometry().y(),
                 self.geometry().width(), self.geometry().height()
             ],
-        }
+        })
         _save_config(config)
         # Thread cleanup
         self.serial_monitor.cleanup()
