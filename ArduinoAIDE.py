@@ -1577,7 +1577,7 @@ if HAS_QSCINTILLA:
             self._ctrl_held = False
 
             # F12 → Go to Definition
-            from PyQt6.QtWidgets import QShortcut
+            from PyQt6.QtGui import QShortcut
             QShortcut(QKeySequence("F12"), self).activated.connect(
                 self._goto_definition)
 
