@@ -449,6 +449,7 @@ OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "teensy-coder"
 AI_BACKEND = "ollama"        # "ollama" or "lmstudio"
 LMSTUDIO_URL = "http://localhost:1234"
+AI_MODEL_PARAMS_B = 0.0  # Detected model size in billions of parameters (0 = unknown)
 DEFAULT_FQBN = "teensy:avr:teensy40"
 
 # Unified application config file
@@ -473,6 +474,8 @@ def _load_config():
         "context_budget": 12000,
         "verbose_compile": False,
         "compiler_warnings": "default",
+        "auto_fix_enabled": True,
+        "auto_fix_max_retries": 2,
     }
     try:
         with open(CONFIG_FILE, "r") as f:
@@ -730,6 +733,75 @@ except (FileNotFoundError, OSError):
     _TEENSY_QUICK_REF = ""
 if _TEENSY_QUICK_REF:
     SYSTEM_PROMPT += "\n\n--- TEENSY QUICK REFERENCE ---\n" + _TEENSY_QUICK_REF
+
+SYSTEM_PROMPT_SMALL = """You are ArduinoAIDE, a firmware coding assistant for Teensy and Arduino projects.
+
+RULES
+1. For code changes: output ONLY edit blocks. No explanation before or after.
+2. For questions: answer in plain text only. No edit blocks.
+3. Never say "Sure", "Here is", "I can help", or similar filler.
+4. Never use ``` code fences or markdown formatting.
+5. Never output <think>, </think>, <|im_start|>, <|im_end|>, or similar tokens.
+6. Be brief. Be direct. Be precise.
+
+EDIT FORMAT — Use this exact format to change existing code:
+
+<<<EDIT path/to/file.ext
+<<<OLD
+exact existing lines to replace
+>>>NEW
+new replacement lines
+>>>END
+
+NEW FILE FORMAT — Use this for brand new files only:
+
+<<<FILE path/to/file.ext
+complete file contents here
+>>>FILE
+
+CRITICAL RULES FOR EDITS
+- OLD must match the file EXACTLY — same whitespace, same spelling.
+- Never invent code that is not in the file.
+- Make the SMALLEST change that fixes the problem.
+- Keep all unrelated code unchanged.
+- Use relative paths as shown in the file context.
+
+EXAMPLE 1 — Fix a missing include:
+
+<<<EDIT src/main.cpp
+<<<OLD
+void setup() {
+>>>NEW
+#include <Arduino.h>
+
+void setup() {
+>>>END
+
+EXAMPLE 2 — Fix a type error:
+
+<<<EDIT src/motor.cpp
+<<<OLD
+  int speed = 3.14;
+>>>NEW
+  float speed = 3.14;
+>>>END
+
+EXAMPLE 3 — Answer a question (no edit blocks):
+
+The analogWrite() function on Teensy 4.1 has 12-bit resolution by default.
+Call analogWriteResolution(10) to use 10-bit.
+
+DO NOT DO THIS — bad output:
+Sure! Here's the fix:
+```cpp
+#include <Arduino.h>
+```
+This should resolve the issue.
+
+A Teensy quick reference is appended below. A comprehensive API reference may also be in your file context — consult it for pin mappings, peripheral APIs, and library usage."""
+
+if _TEENSY_QUICK_REF:
+    SYSTEM_PROMPT_SMALL += "\n\n--- TEENSY QUICK REFERENCE ---\n" + _TEENSY_QUICK_REF
 
 # Snapshot default prompt before custom rules override
 # _DEFAULT_SYSTEM_PROMPT includes Teensy ref (for full runtime use)
@@ -3504,6 +3576,9 @@ class ChatPanel(QWidget):
         self._stats_label = None                   # QLabel showing token/time stats
         self._stats_spinner = None                 # SpinnerWidget in stats row
         self._in_think_block = False              # True while streaming inside <think>...</think>
+        self._auto_fix_retries = 0                # current retry count in auto-fix loop
+        self._auto_fix_active = False             # True when auto-fix loop is running
+        self._plan_mode = False                   # True when Plan Mode is active
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -3675,7 +3750,11 @@ class ChatPanel(QWidget):
         fc_top.addWidget(self._fix_retry_btn)
         fc_dismiss = QPushButton("Dismiss")
         fc_dismiss.setStyleSheet(BTN_SECONDARY)
-        fc_dismiss.clicked.connect(self.fix_continuation_bar.hide)
+        def _dismiss_fix():
+            self.fix_continuation_bar.hide()
+            self._auto_fix_active = False
+            self._auto_fix_retries = 0
+        fc_dismiss.clicked.connect(_dismiss_fix)
         fc_top.addWidget(fc_dismiss)
         fc_outer.addLayout(fc_top)
         # Escalation row: alternative actions shown when stalled
@@ -3837,6 +3916,19 @@ class ChatPanel(QWidget):
         self.stop_btn.setStyleSheet(BTN_CHAT_STOP)
         self.stop_btn.clicked.connect(self.stop_generation)
         il.addWidget(self.stop_btn)
+
+        self._plan_btn = QPushButton("Plan")
+        self._plan_btn.setCheckable(True)
+        self._plan_btn.setMinimumWidth(56)
+        self._plan_btn.setToolTip("Plan Mode: AI analyzes without making edits")
+        self._plan_btn.setStyleSheet(
+            f"QPushButton{{background:{C['bg_input']};color:{C['fg_dim']};"
+            f"border:1px solid {C['border_light']};border-radius:10px;"
+            f"padding:8px 12px;{FONT_CHAT}}}"
+            f"QPushButton:checked{{background:#2d4a3e;color:{C['fg_ok']};"
+            f"border-color:{C['fg_ok']};}}")
+        self._plan_btn.clicked.connect(self._toggle_plan_mode)
+        il.addWidget(self._plan_btn)
 
         layout.addWidget(inp)
 
@@ -4085,8 +4177,26 @@ class ChatPanel(QWidget):
         return "\n".join(parts) + "\n"
 
     def _build_system_prompt(self):
-        """Build system prompt, prepending project-level .aide_prompt if found."""
-        base = SYSTEM_PROMPT
+        """Build system prompt, using simplified version for small models."""
+        # Use simplified prompt for small models (<=14B)
+        if AI_MODEL_PARAMS_B > 0 and AI_MODEL_PARAMS_B <= 14:
+            base = SYSTEM_PROMPT_SMALL
+        else:
+            base = SYSTEM_PROMPT
+        # Plan mode addendum
+        if getattr(self, '_plan_mode', False):
+            base += """
+
+PLAN MODE — ACTIVE
+You are in analysis mode. Do NOT output any <<<EDIT, <<<FILE, <<<INSERT, or <<<REPLACEMENT blocks.
+Instead:
+1. Analyze the code and the user's request.
+2. List which files need to change and why.
+3. Describe each change with specific function names and line references.
+4. Note any risks, edge cases, or dependencies.
+5. End with a summary of the changes you would make.
+Be specific. Reference actual code from the files in context."""
+        # Prepend project-level .aide_prompt if found
         proj = getattr(self, '_project_path', None) or ""
         if proj:
             custom_file = os.path.join(proj, ".aide_prompt")
@@ -4694,6 +4804,23 @@ class ChatPanel(QWidget):
                     self._slash_popup.hide()
         return super().eventFilter(obj, event)
 
+    def _toggle_plan_mode(self):
+        """Toggle between Normal mode and Plan mode."""
+        self._plan_mode = self._plan_btn.isChecked()
+        if self._plan_mode:
+            self.input_field.setPlaceholderText(
+                "Describe what to analyze (Plan Mode)...")
+            self.send_btn.setText("Analyze")
+            self._add_info_msg(
+                "Plan Mode ON — AI will analyze and suggest changes "
+                "without editing files.", C['fg_ok'])
+        else:
+            self.input_field.setPlaceholderText("Ask about your code...")
+            self.send_btn.setText("Send")
+        # Refresh system prompt with plan mode addendum
+        if self._conversation:
+            self._conversation[0]["content"] = self._build_system_prompt()
+
     def send_message(self):
         text = self.input_field.text().strip()
         if not text:
@@ -5081,6 +5208,10 @@ class ChatPanel(QWidget):
                 f"Make sure {backend_name} is running.", C['fg_warn'])
             return
 
+        # Stop auto-fix loop if user sends a manual message
+        self._auto_fix_active = False
+        self._auto_fix_retries = 0
+
         # Silently discard any pending edits when sending a new message
         if self._pending_edits and self.apply_bar.isVisible():
             self._pending_edits = []
@@ -5133,6 +5264,21 @@ class ChatPanel(QWidget):
         # Show user message bubble (right-aligned)
         show = display_text or text
         self._add_user_msg(show, code=display_code)
+
+        # For small models, inject a 1-line conversation summary
+        if AI_MODEL_PARAMS_B > 0 and AI_MODEL_PARAMS_B <= 14 and len(self._conversation) > 3:
+            summary_parts = []
+            for entry in self._conversation[1:]:  # skip system prompt
+                role = entry["role"]
+                content = entry["content"][:100].replace("\n", " ").strip()
+                if role == "user":
+                    summary_parts.append(f"User: {content}")
+                elif role == "assistant":
+                    summary_parts.append(f"AI: {content}")
+            if len(summary_parts) > 6:
+                summary_parts = summary_parts[-6:]
+            summary = " → ".join(summary_parts)
+            msg = f"[Conversation so far: {summary}]\n\n{msg}"
 
         self._conversation.append({"role": "user", "content": msg})
         self.input_field.clear()
@@ -5932,6 +6078,29 @@ class ChatPanel(QWidget):
         self.send_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.input_field.setFocus()
+        # In plan mode, offer to execute the plan
+        if self._plan_mode and self._current_response:
+            execute_wrapper = QWidget()
+            execute_wrapper.setStyleSheet("background:transparent;")
+            el = QHBoxLayout(execute_wrapper)
+            el.setContentsMargins(0, 4, 0, 4)
+            el.setSpacing(8)
+            exec_btn = QPushButton("Execute This Plan")
+            exec_btn.setStyleSheet(BTN_PRIMARY)
+            exec_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            def _execute_plan():
+                self._plan_btn.setChecked(False)
+                self._toggle_plan_mode()  # Switch back to normal mode
+                self._send_prompt(
+                    "Implement the plan you described above. "
+                    "Output ONLY edit blocks. No explanation.",
+                    display_text="Execute plan")
+            exec_btn.clicked.connect(_execute_plan)
+            el.addWidget(exec_btn)
+            el.addStretch()
+            self._chat_layout.insertWidget(
+                self._chat_layout.count() - 1, execute_wrapper)
+            self._scroll_to_bottom()
         self.generation_finished.emit()
 
     def _finalize_stats(self, suffix=""):
@@ -6631,6 +6800,10 @@ class ChatPanel(QWidget):
     def _apply_and_compile(self):
         """Apply all edits then trigger a compile."""
         self._apply_all_edits()
+        # Start auto-fix loop (retries reset on first apply)
+        if not self._auto_fix_active:
+            self._auto_fix_retries = 0
+            self._auto_fix_active = True
         # Defer compile so editor content updates propagate first
         self.recompile_bar.hide()
         QTimer.singleShot(100, self.recompile_requested.emit)
@@ -6690,6 +6863,10 @@ class ChatPanel(QWidget):
         self._refresh_apply_summary()
         self._refresh_file_rows()
         self.apply_bar.show()
+        # If auto-fix loop is active, automatically apply and recompile
+        if self._auto_fix_active and self._auto_fix_retries > 0:
+            QTimer.singleShot(200, self._apply_and_compile)
+            return
 
     def _refresh_apply_summary(self):
         """Update the header summary label and Apply button count."""
@@ -6941,6 +7118,8 @@ class ChatPanel(QWidget):
         self._selection_mode = False
         self._selection_prefilled = False
         self._selection_edit = None
+        self._auto_fix_active = False
+        self._auto_fix_retries = 0
         self._ai_edited_files.clear()
         self._working_set.clear()
         self._update_context_bar()
@@ -9882,8 +10061,15 @@ class MainWindow(QMainWindow):
 
     def _generate_model_desc(self, name):
         """Build a short description from API metadata, or ask the model itself."""
+        global AI_MODEL_PARAMS_B
         try:
             if AI_BACKEND == "lmstudio":
+                # Try to detect size from model name pattern (e.g. 7b, 14b)
+                m_size = re.search(r'(\d+)[bB]', name)
+                if m_size:
+                    AI_MODEL_PARAMS_B = float(m_size.group(1))
+                else:
+                    AI_MODEL_PARAMS_B = 0.0
                 return "LM Studio model"
             r = requests.post(
                 f"{OLLAMA_URL}/api/show",
@@ -9895,6 +10081,12 @@ class MainWindow(QMainWindow):
             system = d.get("system", "")
             arch = info.get("general.architecture", "")
             pc = info.get("general.parameter_count", "")
+            # Detect model size for prompt selection
+            if pc:
+                try:
+                    AI_MODEL_PARAMS_B = int(pc) / 1e9
+                except (ValueError, TypeError):
+                    AI_MODEL_PARAMS_B = 0.0
             ctx = ""
             if arch:
                 ctx_key = f"{arch}.context_length"
@@ -9942,6 +10134,11 @@ class MainWindow(QMainWindow):
                 except:
                     pass
 
+            # Regex fallback for model size if not detected from API
+            if AI_MODEL_PARAMS_B == 0.0:
+                m_size = re.search(r'(\d+)[bB]', name)
+                if m_size:
+                    AI_MODEL_PARAMS_B = float(m_size.group(1))
             # Fallback: just use the technical info
             return tech
         except:
@@ -10180,6 +10377,10 @@ class MainWindow(QMainWindow):
             warnings_combo.setCurrentIndex(idx)
         bg_layout.addRow("Compiler warnings:", warnings_combo)
 
+        auto_fix_cb = QCheckBox("Auto-fix compile errors after Apply & Recompile (up to 2 retries)")
+        auto_fix_cb.setChecked(cfg.get("auto_fix_enabled", True))
+        bg_layout.addRow(auto_fix_cb)
+
         layout.addWidget(build_group)
 
         # ── Buttons ──
@@ -10204,6 +10405,7 @@ class MainWindow(QMainWindow):
             cfg["additional_board_urls"] = urls
             cfg["verbose_compile"] = verbose_cb.isChecked()
             cfg["compiler_warnings"] = warnings_combo.currentData()
+            cfg["auto_fix_enabled"] = auto_fix_cb.isChecked()
             _save_config(cfg)
             self._apply_preferences(cfg)
 
@@ -10314,6 +10516,12 @@ class MainWindow(QMainWindow):
 
     def _reset_fix_attempt_count(self):
         """Reset fix attempt counter, diagnostic snapshot, and stall detection."""
+        # If auto-fix was active, report success
+        if self.chat_panel._auto_fix_active:
+            self.chat_panel._add_info_msg(
+                "Auto-fix succeeded! Compilation passed.", C['fg_ok'])
+        self.chat_panel._auto_fix_active = False
+        self.chat_panel._auto_fix_retries = 0
         self._fix_attempt_count = 0
         self._prev_diagnostics = []
         self._fix_stall_count = 0
@@ -10894,6 +11102,10 @@ class MainWindow(QMainWindow):
             self._update_model_desc()
             if hasattr(self, '_status_model'):
                 self._status_model.setText(name)
+            # Refresh system prompt for new model size
+            if self.chat_panel._conversation:
+                self.chat_panel._conversation[0]["content"] = \
+                    self.chat_panel._build_system_prompt()
 
     def _send_errors_to_ai(self):
         if self._compiler_errors:
@@ -10923,9 +11135,35 @@ class MainWindow(QMainWindow):
             stalled = self._fix_stall_count >= 2 and self._fix_attempt_count >= 3
             self.chat_panel.show_fix_continuation(
                 n, self._fix_attempt_count, diff, stalled)
+            # Auto-fix: if enabled and within retry limit, auto-send errors to AI
+            cfg = _load_config()
+            if (cfg.get("auto_fix_enabled", True)
+                    and self.chat_panel._auto_fix_active
+                    and self.chat_panel._auto_fix_retries
+                        < cfg.get("auto_fix_max_retries", 2)
+                    and not stalled):
+                self.chat_panel._auto_fix_retries += 1
+                attempt = self.chat_panel._auto_fix_retries
+                max_retries = cfg.get("auto_fix_max_retries", 2)
+                self.chat_panel._add_info_msg(
+                    f"Auto-fix attempt {attempt}/{max_retries}...",
+                    C['fg_dim'])
+                QTimer.singleShot(300, lambda: self._auto_fix_send())
         else:
             hint = f"\nType /fix in AI Chat to auto-fix ({n} diagnostic{'s' if n != 1 else ''})"
             self.compiler_output.append_output(hint, C["teal"])
+
+    def _auto_fix_send(self):
+        """Automatically send compile errors to AI for fixing."""
+        if self._compiler_errors:
+            self.chat_panel.set_error_context(
+                self._compiler_errors,
+                getattr(self, '_compiler_diagnostics', []))
+            self.chat_panel.send_errors_btn.setChecked(True)
+            self.chat_panel._send_prompt(
+                "The previous fix did not resolve all compile errors. "
+                "Fix the REMAINING errors shown above. Make minimal changes.",
+                display_text=f"Auto-fix (attempt {self.chat_panel._auto_fix_retries})")
 
     def _update_diag_panel(self, diags):
         """Populate diagnostic panel and show/hide it."""
